@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=74.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sopotek-trading-ai"
+version = "0.1.0"
+description = "Enterprise-grade trading AI platform with ML, TA indicators, crypto integration, and desktop UI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary - Sopotek Corporation" }
+authors = [
+    { name = "Noel Nguemechieu", email = "your@email.com" }
+]
+keywords = ["trading", "machine learning", "crypto", "technical analysis", "stellar", "automation"]
+
+dependencies = [
+    "sqlalchemy>=2.0",
+    "kafka-python>=2.0.2",
+    "pymysql>=1.1.0",
+    "alembic>=1.13.0",
+    "celery>=5.4.0",
+    "redis>=5.0.0",
+    "arch>=6.3.0",
+    "scikit-learn~=1.7.2",
+    "requests~=2.32.3",
+    "pandas>=2.2.0",
+    "numpy~=1.26.4",
+    "matplotlib~=3.9.2",
+    "seaborn~=0.13.2",
+    "mplfinance~=0.12.10b0",
+    "ta~=0.11.0",
+    "cryptography~=43.0.1",
+    "stellar_sdk~=13.2.1",
+    "PyQt5~=5.15.11",
+    "PyAutoGUI~=0.9.54",
+    "Pillow~=10.4.0",
+    "qrcode~=7.4.2",
+    "Jinja2~=3.1.4",
+    "protobuf~=5.29.0",
+    "filelock~=3.16.1",
+    "attrs~=24.2.0",
+    "pygame~=2.6.0",
+    "textblob~=0.18.0.post0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "hypothesis~=6.123.1",
+    "black>=24.0",
+    "isort>=5.13",
+    "mypy>=1.10",
+    "ruff>=0.5"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
