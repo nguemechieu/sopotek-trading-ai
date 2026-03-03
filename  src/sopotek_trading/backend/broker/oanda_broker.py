@@ -1,6 +1,7 @@
 # brokers/oanda_broker.py
 
 import asyncio
+import logging
 from abc import ABC
 
 import oandapyV20
@@ -15,17 +16,18 @@ class OandaBroker(BaseBroker, ABC):
 
     def __init__(
             self,
-            api_key,
-            account_id,
-            mode="live",
-            rate_limiter=None,
-            logger=None,
+
+
+            config
+
+
     ):
-        self.client = oandapyV20.API(access_token=api_key)
-        self.account_id = account_id
-        self.mode = mode
-        self.rate_limiter = rate_limiter
-        self.logger = logger
+        self.config = config
+        self.client = oandapyV20.API(access_token=config['api_key'])
+        self.account_id =config['account_id']
+        self.mode = config['mode']
+        self.rate_limiter =config['rate_limiter']
+        self.logger = logging.getLogger(__name__)
 
     # -------------------------------------------------
     # CONNECT

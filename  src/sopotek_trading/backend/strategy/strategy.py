@@ -1,43 +1,53 @@
-import joblib
+import logging
+import pandas as pd
 
-from sopotek_trading.backend.quant.ml.ml_models_manager import MLModelManager, logger
+from sopotek_trading.backend.quant.ml.ml_models_manager import MLModelManager
 
 
 class Strategy:
 
-    def __init__(self):
-        # Load trained model once
+    def __init__(self, controller):
 
-        self.name_file = "../sopotek_trading/backend/models/price_model.pkl"
-        try :
+        self.logger = logging.getLogger(__name__)
+        self.controller = controller
 
-            self.model = joblib.load(self.name_file)
-            logger.info("ML model loaded successfully")
-        except Exception as e:
-            logger.warning("ML model not loaded: %s", e)
-            self.model = None
-            self.model_manager = MLModelManager()
+        # Use a proper models directory
+        self.model_manager = MLModelManager(
+            controller=self.controller,
+            model_dir="models"
+        )
 
+    async def generate_signal(self, symbol: str, df: pd.DataFrame):
 
-    async def generate_signal(self, symbol, df):
-     self.model_manager.register_symbol(symbol)
+        if df is None or df.empty:
+            return None
 
-    # First ensure model is trained
-     if not self.model_manager.is_trained(symbol):
-        return None
+        # Ensure symbol is registered
+        self.model_manager.register_symbol(symbol)
 
-     prediction = await self.model_manager.predict(symbol, df)
+        # Ensure model is trained
+        if not self.model_manager.is_trained(symbol):
+            await self.model_manager.train(symbol, df)
+            return None  # Wait for next cycle
 
-     if prediction["signal"] == "HOLD":
-        return "HOLD"
+        # Predict
+        prediction = await self.model_manager.predict(symbol, df)
 
-     return {
-        "signal": prediction["signal"],
-        "entry_price": df["close"].iloc[-1],
-        "stop_price": df["close"].iloc[-1] * 0.99,
-        "confidence": prediction.get("confidence",df),
-        "volatility": df["close"].pct_change().std()
-    }
+        if prediction is None:
+            return None
 
-    def reload_model(self):
-        self.model = joblib.load(self.name_file)
+        signal = prediction.get("signal", "HOLD")
+
+        if signal == "HOLD":
+            return None
+
+        entry_price = float(df["close"].iloc[-1])
+
+        return {
+            "symbol": symbol,
+            "signal": signal,
+            "entry_price": entry_price,
+            "stop_price": entry_price * 0.99,
+            "confidence": float(prediction.get("confidence", 0.5)),
+            "volatility": float(df["close"].pct_change().std())
+        }

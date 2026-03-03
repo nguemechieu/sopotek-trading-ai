@@ -7,7 +7,7 @@ from datetime import datetime
 
 class PerformanceEngine:
 
-    def __init__(self):
+    def __init__(self, controller):
         self.logger = logging.getLogger(__name__)
         self.trades = []
         self.equity_history = []

@@ -7,6 +7,18 @@ class StrategySupervisor:
         self.logger = logger
         self.tasks = {}
         self.running = True
+        debug_info = {
+            "symbol": symbol,
+            "index": current_index,
+            "signal": signal,  # BUY / SELL / HOLD
+            "rsi": current_rsi,
+            "ema_fast": ema_fast,
+            "ema_slow": ema_slow,
+            "ml_probability": ml_prob,
+            "risk_allowed": risk_ok,
+            "position_size": size,
+            "reason": "RSI oversold + EMA cross"
+        }
 
     async def start_strategy(self, name, coro):
         async def wrapper():

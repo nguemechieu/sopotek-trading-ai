@@ -92,3 +92,8 @@ class Portfolio:
     def total_equity(self, cash_balance: float, prices: Dict[str, float]) -> float:
 
         return cash_balance + self.unrealized_pnl(prices)
+
+    def has_position(self, symbol):
+        if symbol not in self.positions:
+            return False
+        return True

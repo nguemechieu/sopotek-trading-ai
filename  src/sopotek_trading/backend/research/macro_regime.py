@@ -12,8 +12,8 @@ class MacroRegimeClassifier:
         """
         self.model.fit(X, y)
 
-    def predict(self, X_latest):
-        return self.model.predict([X_latest])[0]
+    def predict(self, x_latest):
+        return self.model.predict([x_latest])[0]
 
 #
 # Example Regimes

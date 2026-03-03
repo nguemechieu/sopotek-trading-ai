@@ -3,7 +3,7 @@ import pandas as pd
 from sopotek_trading.backend.quant.ml.ml_signal import MLSignal
 
 
-async def train_model(self, symbol):
+async def train_model(self, symbol="EURUSD"):
 
     ohlcv = await self.broker.fetch_ohlcv(symbol, self.time_frame)
     if not ohlcv:
@@ -16,6 +16,7 @@ async def train_model(self, symbol):
 
     model = MLSignal()
     model.train(df)
+    model.save("models/shadow_model.pkl")
 
     self.models[symbol] = model
 

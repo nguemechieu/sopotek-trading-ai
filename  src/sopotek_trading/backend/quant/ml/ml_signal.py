@@ -30,6 +30,11 @@ class MLSignal:
         self.is_trained = False
         self.lookback = 50
 
+
+
+
+
+
     def _prepare_data(self, df):
 
         df = _add_features(df)
@@ -127,5 +132,4 @@ class MLSignal:
         self.model.save(path)
 
     def load(self, path):
-
      self.model = load_model(path)

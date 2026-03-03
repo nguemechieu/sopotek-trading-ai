@@ -14,48 +14,71 @@ BROKER_REGISTRY = {
 class BrokerFactory:
 
     @staticmethod
-    def create(config, logger=None):
+    def create(config: dict, logger=None):
 
-        broker_type = config.get("type",  "crypto")
+        broker_type = config.get("type")
+
         if not broker_type:
-            raise ValueError("Broker type not specified")
+            raise ValueError("Broker type not specified in config")
 
         broker_class = BROKER_REGISTRY.get(broker_type)
+
         if not broker_class:
             raise ValueError(f"Unsupported broker type: {broker_type}")
 
-        mode = config.get("mode", 'paper')
-        credentials = config.get("credentials", {})
-        options = config.get("options", {})
+        mode = config.get("mode", "paper")
+        credentials = config.get("credentials") or {}
+        options = config.get("options") or {}
 
         rate_limit = options.get("rate_limit", 5)
         rate_limiter = RateLimiter(rate_limit)
 
-        # Build common kwargs
-        common_kwargs = {
-            "mode": mode,
-            "rate_limiter": rate_limiter,
-            "logger": logger,
-        }
-
+        # =============================
+        # CRYPTO (CCXT)
+        # =============================
         if broker_type == "crypto":
 
-            exchange = options.get("exchange", "binanceus")
+            exchange = options.get("exchange")
             if not exchange:
                 raise ValueError("Missing exchange name for crypto broker")
 
-            return broker_class(
-                exchange_name=exchange,
-                api_key=credentials.get("api_key", "ert"),
-                secret=credentials.get("secret", "4u9io"),
-                **common_kwargs
-            )
+            api_key = credentials.get("api_key")
+            secret = credentials.get("secret")
 
+            if not api_key or not secret:
+                raise ValueError("Missing API credentials for crypto broker")
+
+            broker_config = {
+                "exchange_name": exchange,
+                "api_key": api_key,
+                "secret": secret,
+                "mode": mode,
+                "rate_limiter": rate_limiter,
+                "exchange_options": options.get("exchange_options", "spot"),
+                "logger": logger,
+            }
+
+            return broker_class(broker_config)
+
+        # =============================
+        # OANDA
+        # =============================
         if broker_type == "oanda":
 
-            return broker_class(
-                api_key=credentials.get("api_key", "ert"),
-                account_id=credentials.get("account_id", "2345"),
-                **common_kwargs
-            )
-        return None
+            api_key = credentials.get("api_key")
+            account_id = credentials.get("account_id")
+
+            if not api_key or not account_id:
+                raise ValueError("Missing OANDA credentials")
+
+            broker_config = {
+                "api_key": api_key,
+                "account_id": account_id,
+                "mode": mode,
+                "rate_limiter": rate_limiter,
+                "logger": logger,
+            }
+
+            return broker_class(broker_config)
+
+        raise RuntimeError("BrokerFactory reached unreachable state")

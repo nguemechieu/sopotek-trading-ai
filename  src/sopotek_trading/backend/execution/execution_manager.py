@@ -62,6 +62,7 @@ class ExecutionManager:
 
     async def _worker(self):
 
+        future=None
         while self.running:
 
             try:

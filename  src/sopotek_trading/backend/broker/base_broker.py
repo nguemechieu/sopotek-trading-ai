@@ -87,7 +87,9 @@ class BaseBroker(ABC):
             side: str,
             order_type: str,
             amount: float,
-            price: Optional[float] = None,
+            price: Optional[float] = 0.0,
+            stop_loss: Optional[float] = 0.0,
+            take_profit: Optional[float] = 0.0
     ) -> Dict:
         """
         Must return normalized order:

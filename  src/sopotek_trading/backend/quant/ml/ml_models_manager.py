@@ -1,29 +1,23 @@
 import asyncio
-import logging
 import os
 
-from sopotek_trading.backend.quant.ml.ml_signal import MLSignal
+import joblib
 
-logger = logging.getLogger(__name__)
+from sopotek_trading.backend.quant.ml.ml_signal import MLSignal
 
 
 class MLModelManager:
 
-    def __init__(self, model_dir="models"):
+    def __init__(self, controller=None, model_dir="models"):
 
-        self.logger = logger
-
-        # FIXED: must be dict
+        self.controller = controller
+        self.logger = controller.logger if controller else None
         self.models = {}
         self.training_status = {}
         self.locks = {}
 
         self.model_dir = model_dir
         os.makedirs(self.model_dir, exist_ok=True)
-
-    # --------------------------------------------------
-    # REGISTER SYMBOL
-    # --------------------------------------------------
 
     def register_symbol(self, symbol):
 
@@ -36,106 +30,93 @@ class MLModelManager:
 
         self._load_model(symbol)
 
-    # --------------------------------------------------
-    # MODEL PATH
-    # --------------------------------------------------
-
-    def _model_path(self, symbol):
-
-        safe_symbol = symbol.replace("/", "_")
-        return os.path.join(
-            self.model_dir,
-            f"{safe_symbol}.keras"
-        )
-
-    # --------------------------------------------------
-    # LOAD MODEL
-    # --------------------------------------------------
-
-    def _load_model(self, symbol):
-
-        path = self._model_path(symbol)
-
-        if not os.path.exists(path):
-            self.logger.info(f"No saved model for {symbol}")
-            return
-
-        try:
-            model = MLSignal()
-            model.load(path)
-
-            self.models[symbol] = model
-            self.training_status[symbol] = True
-
-            self.logger.info(f"Model loaded for {symbol}")
-
-        except Exception as e:
-            self.logger.error(
-                f"Failed loading model {symbol}: {e}"
-            )
-
-    # --------------------------------------------------
-    # SAVE MODEL
-    # --------------------------------------------------
-
-    def _save_model(self, symbol):
+    def save_model(self, symbol: str):
 
         path = self._model_path(symbol)
 
         try:
             self.models[symbol].save(path)
-            self.logger.info(f"Model saved for {symbol}")
+            if self.logger:
+                self.logger.info(f"Model saved for {symbol}")
         except Exception as e:
-            self.logger.error(
-                f"Failed saving model {symbol}: {e}"
+            if self.logger:
+                self.logger.error(f"Failed saving model {symbol}: {e}")
+
+    def _model_path(self, symbol):
+
+        return os.path.join(self.model_dir, symbol)
+
+    def _load_model(self, symbol):
+        path = self._model_path(symbol)
+        if os.path.exists(path):
+            self.logger.info("Loading model from %s", symbol)
+            self.model = joblib.load(path)
+            if self.logger:
+                self.logger.info(f"Model loaded from {symbol}")
+
+    async def predict(self, symbol: str, df):
+
+     model = self.models.get(symbol)
+
+     if model is None:
+        if self.logger:
+            self.logger.warning(
+                f"Prediction requested but model not trained for {symbol}"
             )
+        return None
 
-    # --------------------------------------------------
-    # TRAIN
-    # --------------------------------------------------
+     loop = asyncio.get_running_loop()
 
-    async def train(self, symbol, data):
+     try:
+        result = await loop.run_in_executor(
+            None,
+            model.predict,
+            df
+        )
 
-        async with self.locks[symbol]:
+        return result
 
-            model = self.models.get(symbol)
+     except Exception as e:
+        if self.logger:
+            self.logger.error(
+                f"Prediction failed for {symbol}: {e}"
+            )
+        return None
 
-            if model is None:
-                model = MLSignal()
+    async def train(self, symbol: str, df):
 
-            model.train(data)
+     if symbol not in self.locks:
+        self.register_symbol(symbol)
 
-            self.models[symbol] = model
-            self.training_status[symbol] = True
+     async with self.locks[symbol]:
 
-            self._save_model(symbol)
-
-    # --------------------------------------------------
-    # STATUS
-    # --------------------------------------------------
-
-    def is_trained(self, symbol):
-        return self.training_status.get(symbol, False)
-
-    # --------------------------------------------------
-    # GET MODEL
-    # --------------------------------------------------
-
-    def get_model(self, symbol):
-        return self.models.get(symbol)
-
-    # --------------------------------------------------
-    # PREDICT
-    # --------------------------------------------------
-
-    async def predict(self, symbol, df):
+        # 🟡 Emit TRAINING status
+        self.controller.training_status_signal.emit(symbol, "training")
 
         model = self.models.get(symbol)
 
         if model is None:
-            self.logger.warning(
-                f"Prediction requested but model not trained for {symbol}"
-            )
-            return None
+            model = MLSignal()
 
-        return model.predict(df)
+        loop = asyncio.get_running_loop()
+
+        try:
+            await loop.run_in_executor(
+                None,
+                model.train,
+                df
+            )
+
+            self.models[symbol] = model
+            self.training_status[symbol] = True
+
+            self.save_model(symbol)
+
+            # 🟢 Emit READY status
+            self.controller.training_status_signal.emit(symbol, "ready")
+
+        except Exception as e:
+            self.controller.training_status_signal.emit(symbol, "error")
+
+    def is_trained(self, symbol: str) -> bool:
+        return self.training_status.get(symbol, False)

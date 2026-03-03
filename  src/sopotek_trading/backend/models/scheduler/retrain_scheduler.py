@@ -2,7 +2,7 @@ import asyncio
 import joblib
 import shutil
 
-from sopotek_trading.backend.models.training.train_model import train_model
+
 from sopotek_trading.backend.models.training.pipeline import build_features_and_labels
 
 
@@ -33,7 +33,7 @@ class RetrainingScheduler:
                 X, y = build_features_and_labels(df)
 
                 # 3️⃣ Train shadow model
-                await train_model(X, y, "./models/shadow_model.pkl")
+                await train_model(X, y)
 
                 # 4️⃣ Evaluate shadow model
                 if self._validate_shadow(X, y):

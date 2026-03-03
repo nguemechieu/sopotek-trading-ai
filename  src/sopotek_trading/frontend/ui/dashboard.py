@@ -10,32 +10,72 @@ from PySide6.QtWidgets import (
 from sopotek_trading.backend.services.credential_manager import CredentialManager
 
 
+def _get_styles():
+    return """
+    QWidget {
+        background-color: #0f1115;
+        color: white;
+        font-size: 14px;
+    }
+
+    QFrame#loginCard {
+        background-color: #1c1f26;
+        border-radius: 12px;
+        padding: 25px;
+    }
+
+    QLineEdit, QComboBox, QSpinBox {
+        background-color: #2a2e38;
+        border: 1px solid #3a3f4b;
+        border-radius: 6px;
+        padding: 6px;
+    }
+
+    QLineEdit:focus, QComboBox:focus {
+        border: 1px solid #0078d7;
+    }
+
+    QPushButton {
+        background-color: #0078d7;
+        border-radius: 6px;
+        font-weight: bold;
+    }
+
+    QPushButton:hover {
+        background-color: #0095ff;
+    }
+    """
+
+
 class Dashboard(QWidget):
 
     login_success = Signal(dict)
 
-    def __init__(self):
+    def __init__(self,controller):
         super().__init__()
+        self.logger=controller.logger
 
         self.setWindowTitle("Sopotek AI Trading Platform")
-        self.resize(650, 720)
-        self.setStyleSheet(self._get_styles())
+        self.resize(650, 760)
+        self.setStyleSheet(_get_styles())
 
         main_layout = QVBoxLayout(self)
         main_layout.setAlignment(Qt.AlignCenter)
-        # Spinner
+        self.controller=controller
+
+        # =======================
+        # SPINNER
+        # =======================
         self.spinner = QLabel()
         self.spinner.setAlignment(Qt.AlignCenter)
         self.spinner.setVisible(False)
-
-        self.spinner_movie = QMovie("../assets/spinner.gif")  # optional gif
+        self.spinner_movie = QMovie("src/sopotek_trading/assets/spinner.gif")
         self.spinner.setMovie(self.spinner_movie)
-
         main_layout.addWidget(self.spinner)
 
-        # ======================================================
-        # LOGO
-        # ======================================================
+        # =======================
+        # HEADER
+        # =======================
         logo = QLabel("🚀")
         logo.setAlignment(Qt.AlignCenter)
         logo.setFont(QFont("Arial", 50))
@@ -51,45 +91,42 @@ class Dashboard(QWidget):
         subtitle.setStyleSheet("color: gray;")
         main_layout.addWidget(subtitle)
 
-        # ======================================================
+        # =======================
         # LOGIN CARD
-        # ======================================================
+        # =======================
         card = QFrame()
-        card.setFixedWidth(500)
+        card.setFixedWidth(520)
         card.setObjectName("loginCard")
 
         layout = QVBoxLayout(card)
-        form = QFormLayout()
 
-        # Exchange
+
+
+        self.form_layout = QFormLayout()
+
+# Exchange selector
         self.exchange_box = QComboBox()
         self.exchange_box.addItems([
-            "binance", "binanceus", "coinbase",
-            "kraken", "kucoin", "bybit",
-            "okx", "gateio", "bitget", "oanda"
-        ])
-        form.addRow("Exchange:", self.exchange_box)
+    "binance", "binanceus", "coinbase",
+    "kraken", "kucoin", "bybit",
+    "okx", "gateio", "bitget", "oanda"
+])
+        self.form_layout.addRow("Exchange:", self.exchange_box)
 
-        # API
+# ===== Credential container =====
+        self.credential_widget = QWidget()
+        self.credential_layout = QFormLayout(self.credential_widget)
+
+        self.form_layout.addRow(self.credential_widget)
+        self.form_layout.addRow("Exchange:", self.exchange_box)
+
+        # Credential fields (dynamic)
         self.api_input = QLineEdit()
-        self.api_input.setPlaceholderText("Enter API Key")
-        form.addRow("API Key:", self.api_input)
-
-        # Secret
         self.secret_input = QLineEdit()
-        self.secret_input.setEchoMode(QLineEdit.Password)
-        self.secret_input.setPlaceholderText("Enter Secret Key")
-        form.addRow("Secret:", self.secret_input)
 
         # Mode
         self.mode_box = QComboBox()
         self.mode_box.addItems(["paper", "live"])
-        form.addRow("Mode:", self.mode_box)
-
-
-
-
-
 
         # Strategy
         self.strategy_box = QComboBox()
@@ -99,21 +136,46 @@ class Dashboard(QWidget):
             "RSI_MEAN_REVERSION",
             "MACD_TREND"
         ])
-        form.addRow("Strategy:", self.strategy_box)
 
-        # Risk %
+        # Risk
         self.risk_input = QSpinBox()
         self.risk_input.setRange(1, 10)
         self.risk_input.setValue(2)
-        form.addRow("Risk % per Trade:", self.risk_input)
+
+        # Advanced
+        self.advanced_checkbox = QCheckBox("Advanced Settings")
+
+        self.limit_input = QSpinBox()
+        self.limit_input.setRange(100, 5000)
+        self.limit_input.setValue(1000)
+
+        self.refresh_input = QSpinBox()
+        self.refresh_input.setRange(10, 300)
+        self.refresh_input.setValue(60)
+
+        self.rate_limit_input = QSpinBox()
+        self.rate_limit_input.setRange(1, 10)
+        self.rate_limit_input.setValue(3)
 
         # Remember
         self.remember_checkbox = QCheckBox("Remember Credentials")
-        form.addRow("", self.remember_checkbox)
 
-        layout.addLayout(form)
+        layout.addLayout(self.form_layout)
 
-        # Connect Button
+        # Add static rows
+        self.form_layout.addRow("Mode:", self.mode_box)
+        self.form_layout.addRow("Strategy:", self.strategy_box)
+        self.form_layout.addRow("Risk % per Trade:", self.risk_input)
+        self.form_layout.addRow("", self.advanced_checkbox)
+
+        # Advanced rows
+        self.form_layout.addRow("Data Limit:", self.limit_input)
+        self.form_layout.addRow("Equity Refresh (sec):", self.refresh_input)
+        self.form_layout.addRow("Rate Limit:", self.rate_limit_input)
+
+        self.form_layout.addRow("", self.remember_checkbox)
+
+        # Connect button
         self.connect_button = QPushButton("CONNECT")
         self.connect_button.setFixedHeight(45)
         layout.addWidget(self.connect_button)
@@ -121,69 +183,66 @@ class Dashboard(QWidget):
         main_layout.addSpacing(20)
         main_layout.addWidget(card, alignment=Qt.AlignCenter)
 
-        # SIGNALS
+        # Signals
         self.connect_button.clicked.connect(self._on_connect)
-        self.exchange_box.currentTextChanged.connect(
-            self._load_saved_credentials
-        )
+        self.exchange_box.currentTextChanged.connect(self._on_exchange_change)
+        self.advanced_checkbox.toggled.connect(self._toggle_advanced)
 
-        self._load_saved_credentials(
-            self.exchange_box.currentText()
-        )
+        # Init
+        self._on_exchange_change(self.exchange_box.currentText())
+        self._toggle_advanced(False)
 
     # ======================================================
-    # STYLE
+    # DYNAMIC CREDENTIAL FIELDS
     # ======================================================
 
-    def _get_styles(self):
-        return """
-        QWidget {
-            background-color: #0f1115;
-            color: white;
-            font-size: 14px;
-        }
+    def _on_exchange_change(self, exchange):
+        self._build_credentials_fields(exchange)
+        self._load_saved_credentials(exchange)
 
-        QFrame#loginCard {
-            background-color: #1c1f26;
-            border-radius: 12px;
-            padding: 25px;
-        }
+    def _build_credentials_fields(self, exchange):
 
-        QLineEdit, QComboBox, QSpinBox {
-            background-color: #2a2e38;
-            border: 1px solid #3a3f4b;
-            border-radius: 6px;
-            padding: 6px;
-        }
+    # Clear credential layout safely
+     while self.credential_layout.count():
+        item = self.credential_layout.takeAt(0)
+        widget = item.widget()
+        if widget:
+            widget.deleteLater()
 
-        QLineEdit:focus, QComboBox:focus {
-            border: 1px solid #0078d7;
-        }
+     self.api_input = QLineEdit()
+     self.secret_input = QLineEdit()
+     self.secret_input.setEchoMode(QLineEdit.Password)
 
-        QPushButton {
-            background-color: #0078d7;
-            border-radius: 6px;
-            font-weight: bold;
-        }
+     if exchange == "oanda":
+        self.api_input.setPlaceholderText("Enter Account ID")
+        self.secret_input.setPlaceholderText("Enter API Key")
 
-        QPushButton:hover {
-            background-color: #0095ff;
-        }
-        """
+        self.credential_layout.addRow("Account ID:", self.api_input)
+        self.credential_layout.addRow("API Key:", self.secret_input)
+     else:
+        self.api_input.setPlaceholderText("Enter API Key")
+        self.secret_input.setPlaceholderText("Enter Secret Key")
+
+        self.credential_layout.addRow("API Key:", self.api_input)
+        self.credential_layout.addRow("Secret:", self.secret_input)
+    # ======================================================
+    # ADVANCED SETTINGS TOGGLE
+    # ======================================================
+
+    def _toggle_advanced(self, enabled):
+        self.limit_input.setVisible(enabled)
+        self.refresh_input.setVisible(enabled)
+        self.rate_limit_input.setVisible(enabled)
 
     # ======================================================
     # LOAD CREDENTIALS
     # ======================================================
 
     def _load_saved_credentials(self, exchange):
-
         api_key, secret = CredentialManager.load_credentials(exchange)
-
         self.api_input.setText(api_key or "")
         self.secret_input.setText(secret or "")
-        self.remember_checkbox.setChecked(
-            bool(api_key and secret)
-        )
+        self.remember_checkbox.setChecked(bool(api_key and secret))
 
     # ======================================================
     # CONNECT
@@ -192,22 +251,21 @@ class Dashboard(QWidget):
     def _on_connect(self):
 
         exchange = self.exchange_box.currentText()
-        api_key = self.api_input.text().strip()
-        secret = self.secret_input.text().strip()
         mode = self.mode_box.currentText()
-
         strategy = self.strategy_box.currentText()
         risk_percent = self.risk_input.value()
 
+        if exchange == "oanda":
+            account_id = self.api_input.text().strip()
+            api_key = self.secret_input.text().strip()
+            secret = ""
+        else:
+            account_id = ""
+            api_key = self.api_input.text().strip()
+            secret = self.secret_input.text().strip()
 
-
-
-        if not api_key or not secret:
-            QMessageBox.warning(
-                self,
-                "Missing Credentials",
-                "API Key and Secret are required."
-            )
+        if not api_key:
+            QMessageBox.warning(self, "Missing Credentials", "API credentials required.")
             return
 
         if mode == "live":
@@ -221,36 +279,35 @@ class Dashboard(QWidget):
                 return
 
         if self.remember_checkbox.isChecked():
-            CredentialManager.save_credentials(
-                exchange,
-                api_key,
-                secret
-            )
+            CredentialManager.save_credentials(exchange, api_key, secret)
         else:
             CredentialManager.delete_credentials(exchange)
 
-        config = {
-            "type": "crypto",
+        self.config = {
+            "type": "forex" if exchange == "oanda" else "crypto",
+            "exchange_name": exchange,
             "mode": mode,
             "strategy": strategy,
-            "limit":1000,
-            "equity_refresh":60,
+            "limit": self.limit_input.value(),
+            "equity_refresh": self.refresh_input.value(),
             "risk_percent": risk_percent,
             "credentials": {
                 "api_key": api_key,
                 "secret": secret,
-                "account_id": 1234,
+                "account_id": account_id,
             },
             "options": {
                 "exchange": exchange,
-                "rate_limit": 6
+                "rate_limit": self.rate_limit_input.value()
             }
         }
 
-        self.connect_button.setText("CONNECTING...")
-        self.connect_button.setEnabled(False)
+        self.show_loading()
+        self.login_success.emit(self.config)
 
-        self.login_success.emit(config)
+    # ======================================================
+    # LOADING CONTROL
+    # ======================================================
 
     def show_loading(self):
         self.connect_button.setEnabled(False)
@@ -258,9 +315,13 @@ class Dashboard(QWidget):
         self.spinner.setVisible(True)
         self.spinner_movie.start()
 
-
     def hide_loading(self):
-     self.spinner.setVisible(False)
-     self.spinner_movie.stop()
-     self.connect_button.setEnabled(True)
-     self.connect_button.setText("CONNECT")
+        self.spinner.setVisible(False)
+        self.spinner_movie.stop()
+        self.connect_button.setEnabled(True)
+        self.connect_button.setText("CONNECT")
+
+    # ======================================================
+    # STYLE
+    # ======================================================
+

@@ -1,10 +1,7 @@
-import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+import pandas as pd
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
-from reportlab.platypus import Table
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
 
 class ReportGenerator:

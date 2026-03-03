@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sopotek_trading.backend.execution.execution_manager import OrderState
+from sopotek_trading.backend.models.order_states import OrderState
 
 
 class ManagedOrder:

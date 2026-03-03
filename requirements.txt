@@ -23,3 +23,5 @@ tensorflow==2.21.0rc0
 python-qt5
 pyside6
 kafka-python
+reportlab
+matplotlib

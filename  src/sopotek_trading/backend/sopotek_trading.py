@@ -1,13 +1,14 @@
 import asyncio
-import logging
 
 import pandas as pd
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject
 
 from sopotek_trading.backend.analytics.performance_engine import PerformanceEngine
 from sopotek_trading.backend.broker.broker import Broker
 from sopotek_trading.backend.broker.broker_factory import BrokerFactory
-from sopotek_trading.backend.core.orchestrator import TradingOrchestrator
+from sopotek_trading.backend.core.multi_symbol_orchestrator import MultiSymbolOrchestrator
+from sopotek_trading.backend.core.trading_engine import TradingEngine
+
 from sopotek_trading.backend.execution.execution_manager import ExecutionManager
 from sopotek_trading.backend.market.binance_web_socket import BinanceWebSocket
 from sopotek_trading.backend.market.candle_buffer import CandleBuffer
@@ -20,19 +21,28 @@ from sopotek_trading.backend.strategy.strategy import Strategy
 
 class SopotekTrading(QObject):
 
-    candle_signal = Signal(str, object)
-    equity_signal = Signal(float)
-    trade_signal = Signal(dict)
-    ticker_signal = Signal(str, float, float)
-    connection_signal = Signal(str)
 
-    def __init__(self, config):
+    def __init__(self, config,controller):
         super().__init__()
 
+        self.controller = controller
+        self.logger=controller.logger
+        self.ticker_signal = controller.ticker_signal
+        self.equity_signal = controller.equity_signal
+        self.candle_signal = controller.candle_signal
+        self.trade_signal = controller.trade_signal
+        self.connection_signal =controller.connection_signal
+        self.orderbook_signal = controller.orderbook_signal
+
+
+
+        self.config = config
         self.limit = config["limit"] or 1000
         self.equity_refresh = config['equity_refresh'] or 60
-        self.logger =logging.getLogger(__name__)
-        self.config = config
+
+        self.strategy_debug_signal = controller.strategy_debug_signal
+
+
 
         self.time_frame = config.get("time_frame", "1h")
         self.symbols = config.get("symbols", [])[:5]
@@ -41,12 +51,13 @@ class SopotekTrading(QObject):
         self.autotrading_enabled = False
         self.model_trained = {}
         self.spread_pct=0
-        self.performance_engine=PerformanceEngine()
+        self.performance_engine=PerformanceEngine(self.controller)
+
 
 
 
         adapter = BrokerFactory.create(config, logger=self.logger)
-        self.broker = Broker(adapter, logger=self.logger)
+        self.broker = Broker(adapter, logger=self.logger,controller=self.controller)
 
         self.execution_manager = ExecutionManager(
             broker=self.broker,
@@ -66,9 +77,16 @@ class SopotekTrading(QObject):
 
         self.ws_manager = None
         self.current_equity = 0.04
-        self.strategy = Strategy()
+        self.strategy = Strategy(controller=self.controller)
+        self.engine=TradingEngine(controller=self.controller,strategy=self.strategy,
+                                  risk_engine=self.risk_engine,portfolio=self.portfolio,
+                                  execution_manager=self.execution_manager,
+                                  timeframe=self.time_frame,
+                                  limit=self.limit,broker=self.broker,symbols=self.symbols)
 
-        self.orchestrator=TradingOrchestrator(self,self.broker,self.strategy,self.risk_engine,self.portfolio,self.portfolio_manager,self.symbols,self.time_frame,self.equity_refresh,self.limit)
+        self.orchestrator=MultiSymbolOrchestrator(engine=self.engine, symbols=self.symbols,
+                                                  candle_buffer=self.candle_buffer,
+                                                  logger=self.logger, controller=self.controller)
 
         self.logger.info("Sopotek Trading System Ready")
 
@@ -246,13 +264,36 @@ class SopotekTrading(QObject):
 # AUTOTRADING CONTROL
 # ======================================================
 
-    async def start_autotrading(self):
+    async def start_autotrading(self, symbols):
+
+     if not symbols:
+        return
+
      self.autotrading_enabled = True
-     self.logger.info("AutoTrading enabled")
+     self.symbols = symbols
+
+     self.logger.info(f"AutoTrading enabled for {symbols}")
+
+     await self.orchestrator.shutdown()
+
+     self.orchestrator = MultiSymbolOrchestrator(
+        engine=self.engine,
+        symbols=self.symbols,
+        candle_buffer=self.candle_buffer,
+        logger=self.logger,
+        controller=self.controller
+    )
+
+     asyncio.create_task(self.orchestrator.start())
+
+
+
+
 
     async def stop_autotrading(self):
-     self.autotrading_enabled = False
-     self.logger.info("AutoTrading disabled")
+        self.autotrading_enabled = False
+        await self.orchestrator.shutdown()
+        self.logger.info("AutoTrading disabled")
 
     async def run_trade(self, symbol: str, df):
 
@@ -260,17 +301,28 @@ class SopotekTrading(QObject):
         # ---------------------------------
         # 1️⃣ Prediction
         # ---------------------------------
+
+
         analysis = self.ml_model.predict(df)
 
         signal = analysis.get("signal", "HOLD").upper()
-
-        if signal not in ["BUY", "SELL"]:
-            return
-
         entry_price = float(analysis.get("current_price", 0))
         confidence = float(analysis.get("confidence", 0.5))
+        debug_data = {
+            "symbol": symbol,
+            "signal": signal,
+            "entry_price": entry_price,
+            "confidence": confidence,
+            "reason": analysis.get("reason", "ML prediction"),
+        }
+
+        if signal not in ["BUY", "SELL"]:
+            debug_data["status"] = "SKIPPED"
+            self.strategy_debug_signal.emit(debug_data)
+            return
 
         if entry_price <= 0:
+            self.logger.warning(f"Insufficient data for {symbol} price is {entry_price}")
             return
 
         # ---------------------------------
@@ -305,9 +357,18 @@ class SopotekTrading(QObject):
             confidence=confidence,
             volatility=volatility
         )
+        debug_data.update({
+            "volatility": volatility,
+            "stop_price": stop_price,
+            "size": size
+        })
 
         if size <= 0:
-            self.logger.info(f"{symbol}: size too small")
+            debug_data["status"] = "REJECTED_RISK"
+            self.strategy_debug_signal.emit(debug_data)
+            return
+        if self.portfolio.has_position(symbol):
+            self.logger.warning(f"Position {symbol} exists")
             return
 
         # ---------------------------------
@@ -323,7 +384,11 @@ class SopotekTrading(QObject):
         )
 
         if not result:
+            self.logger.info(f"{symbol}: no trade")
+
             return
+        debug_data["status"] = "EXECUTED"
+        self.strategy_debug_signal.emit(debug_data)
 
         # ---------------------------------
         # 5️⃣ Portfolio Update
@@ -343,7 +408,8 @@ class SopotekTrading(QObject):
             "side": signal,
             "price": entry_price,
             "size": size,
-            "confidence": confidence
+            "confidence": confidence,
+            "volatility": volatility
         }
 
         self.trade_signal.emit(trade_data)
@@ -352,7 +418,7 @@ class SopotekTrading(QObject):
         # 7️⃣ Performance Recording (Optional)
         # ---------------------------------
         # If you use PerformanceEngine:
-        # self.performance_engine.record_trade(trade_data)
+        self.performance_engine.record_trade(trade_data)
 
         self.logger.info(
             f"TRADE EXECUTED | {symbol} | {signal} | {size}"
