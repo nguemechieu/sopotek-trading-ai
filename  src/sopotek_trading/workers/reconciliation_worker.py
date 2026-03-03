@@ -39,7 +39,7 @@ def is_stale(order):
 # Reconciliation Task
 # -------------------------------------------------
 @shared_task(bind=True, max_retries=3)
-def reconcile_orders(self):
+def reconcile_orders():
 
     db = SessionLocal()
     repo = OrderRepository(db)
@@ -61,7 +61,7 @@ def reconcile_orders(self):
                 )
 
                 status = exchange_data["status"]
-                filled = float(exchange_data.get("filled", 0))
+                filled = float(exchange_data.get("filled", ohlcv))
 
                 # -------------------------------------------------
                 # Incremental Fill Handling
@@ -76,7 +76,7 @@ def reconcile_orders(self):
                         order.id,
                         OrderState.PARTIALLY_FILLED if filled < order.requested_amount else OrderState.FILLED,
                         filled=filled,
-                        avg_price=exchange_data.get("price"),
+                        avg_price=exchange_data.get("price", ohlcv),
                         raw=exchange_data
                     )
 
@@ -90,7 +90,7 @@ def reconcile_orders(self):
                         order.id,
                         OrderState.FILLED,
                         filled=filled,
-                        avg_price=exchange_data.get("price"),
+                        avg_price=exchange_data.get("price", ohlcv),
                         raw=exchange_data
                     )
 

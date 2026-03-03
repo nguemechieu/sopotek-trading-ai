@@ -1,0 +1,25 @@
+numpy==2.4.2
+pandas
+scikit-learn
+ccxt
+aiohttp
+websockets
+websocket-client
+SQLAlchemy
+python-dotenv
+joblib
+arch
+ta
+oandapyV20
+
+# ML
+tensorflow-cpu==2.20.0
+
+# GUI
+PyQt5
+pyqtgraph
+qasync
+tensorflow==2.21.0rc0
+python-qt5
+pyside6
+kafka-python
