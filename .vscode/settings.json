@@ -1,0 +1,6 @@
+{
+    "python.analysis.extraPaths": [
+        "./out/production/sopotek-trading-ai"
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:system"
+}

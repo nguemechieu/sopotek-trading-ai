@@ -1,0 +1,15 @@
+{
+  "binance_abcd12": {
+    "broker": {
+      "type": "crypto",
+      "exchange": "binance",
+      "api_key": "...",
+      "secret": "...",
+      "mode": "live"
+    },
+    "risk": {
+      "risk_percent": 2
+    },
+    "strategy": "EMA_CROSS"
+  }
+}

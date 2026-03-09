@@ -1,0 +1,14 @@
+class EventType:
+    MARKET_TICK = "MARKET_TICK"
+
+    CANDLE = "CANDLE"
+
+    SIGNAL = "SIGNAL"
+
+    ORDER = "ORDER"
+
+    FILL = "FILL"
+
+    POSITION = "POSITION"
+
+    RISK_ALERT = "RISK_ALERT"

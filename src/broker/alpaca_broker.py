@@ -1,0 +1,100 @@
+import alpaca_trade_api as tradeapi
+
+from broker.base_broker import BaseBroker
+
+
+class AlpacaBroker(BaseBroker):
+
+    def __init__(self, api_key, secret, paper=True):
+        base_url = "https://paper-api.alpaca.markets" if paper else "https://api.alpaca.markets"
+
+        self.api = tradeapi.REST(
+            api_key,
+            secret,
+            base_url,
+            api_version="v2"
+        )
+
+    # =================================
+    # CONNECT
+    # =================================
+
+    async def connect(self):
+        account = self.api.get_account()
+
+        print("Connected to Alpaca")
+        print("Account status:", account.status)
+
+    async def close(self):
+        self.logger.info("Closing Alpaca")
+        self.api.close()
+
+    # =================================
+    # MARKET DATA
+    # =================================
+
+    async def fetch_ticker(self, symbol):
+        bar = self.api.get_latest_trade(symbol)
+
+        return {
+            "symbol": symbol,
+            "price": bar.price
+        }
+
+    async def fetch_order_book(self, symbol, limit=10):
+        quote = self.api.get_latest_quote(symbol)
+
+        return {
+            "bid": quote.bid_price,
+            "ask": quote.ask_price
+        }
+
+    # =================================
+    # ORDERS
+    # =================================
+
+    async def create_order(
+            self,
+            symbol="EURUSD",
+            side="HOLD",
+            amount=12,
+            type="market",
+            price=0,
+            stop_loss=10,
+            take_profit=100,
+            slippage=0
+    ):
+        order = self.api.submit_order(
+            symbol=symbol,
+            qty=amount,
+            side=side.lower(),
+            type=type,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            slippage =slippage,
+            time_in_force="gtc"
+        )
+
+        return order
+
+    async def cancel_order(self, order_id, symbol):
+        return self.api.cancel_order(order_id)
+
+    # =================================
+    # ACCOUNT
+    # =================================
+
+    async def fetch_balance(self):
+        account = self.api.get_account()
+
+        return {
+            "equity": float(account.equity),
+            "cash": float(account.cash)
+        }
+
+    async def fetch_position(self,symbol):
+        account = self.api.get_position(symbol)
+
+    async def fetch_symbol(self):
+        symbols=[self.api.get_account()["symbol"]]
+        return symbols
