@@ -1,22 +1,20 @@
-import pandas as pd
+import asyncio
 
-from sopotek_trading_ai.src.sopotek_trading_ai.strategy.momentum_strategy import MomentumStrategy
+from event_bus.event_bus import EventBus
+from strategy.momentum_strategy import MomentumStrategy
 
 
+def test_momentum_strategy_emits_order_after_enough_ticks():
+    async def scenario():
+        bus = EventBus()
+        strategy = MomentumStrategy(bus)
 
-def test_momentum_signal():
+        for price in range(100, 120):
+            event = type("Event", (), {"data": {"symbol": "BTC/USDT", "price": float(price)}})()
+            await strategy.on_tick(event)
 
-    strategy = MomentumStrategy(None)
+        order_event = await bus.queue.get()
+        assert order_event.data["symbol"] == "BTC/USDT"
+        assert order_event.data["side"] in {"BUY", "SELL"}
 
-    data = pd.DataFrame({
-        "close": [
-            100,101,102,103,104,
-            105,106,107,108,109,
-            110,111,112,113,114,
-            115,116,117,118,119
-        ]
-    })
-
-    signal = strategy.on_bar(data.iloc[-1])
-
-    assert signal is None or signal["side"] in ["BUY", "SELL"]
+    asyncio.run(scenario())

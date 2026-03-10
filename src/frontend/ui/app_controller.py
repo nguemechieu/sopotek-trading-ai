@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import sys
+import time
 import traceback
 from datetime import datetime, timezone
 
@@ -111,6 +112,8 @@ class AppController(QMainWindow):
         self.candle_buffers = {}
         self.orderbook_buffer = OrderBookBuffer()
         self.ticker_buffer = TickerBuffer(max_length=self.limit)
+        self._orderbook_tasks = {}
+        self._orderbook_last_request_at = {}
 
         self.symbols = ["BTC/USDT", "ETH/USDT", "XLM/USDT"]
 
@@ -213,7 +216,7 @@ class AppController(QMainWindow):
 
                 raw_symbols = await self._fetch_symbols(self.broker)
                 filtered_symbols = self._filter_symbols_for_trading(raw_symbols, broker_type, exchange)
-                self.symbols = await self._select_trade_symbols(filtered_symbols, broker_type)
+                self.symbols = await self._select_trade_symbols(filtered_symbols, broker_type, exchange)
 
                 self.balances = await self._fetch_balances(self.broker)
                 self.balance = self.balances
@@ -228,6 +231,8 @@ class AppController(QMainWindow):
                 )
 
                 self.trading_system = SopotekTrading(self)
+                portfolio_manager = getattr(self.trading_system, "portfolio", None)
+                self.portfolio = getattr(portfolio_manager, "portfolio", None)
                 self.connected = True
 
                 self.connection_signal.emit("connected")
@@ -272,7 +277,19 @@ class AppController(QMainWindow):
 
     def _filter_symbols_for_trading(self, symbols, broker_type, exchange=None):
         if str(exchange or "").lower() == "stellar":
-            return list(dict.fromkeys(symbols))
+            filtered = []
+            for symbol in symbols:
+                if not isinstance(symbol, str) or "/" not in symbol:
+                    continue
+
+                base, quote = symbol.upper().split("/", 1)
+                if not re.fullmatch(r"[A-Z]{2,12}", base):
+                    continue
+                if not re.fullmatch(r"[A-Z]{2,12}", quote):
+                    continue
+                filtered.append(f"{base}/{quote}")
+
+            return list(dict.fromkeys(filtered))
 
         if broker_type != "crypto":
             return list(dict.fromkeys(symbols))
@@ -298,7 +315,10 @@ class AppController(QMainWindow):
 
         return list(dict.fromkeys(filtered))
 
-    async def _select_trade_symbols(self, symbols, broker_type):
+    async def _select_trade_symbols(self, symbols, broker_type, exchange=None):
+        if str(exchange or "").lower() == "stellar":
+            return list(dict.fromkeys(symbols))[:80]
+
         if broker_type != "crypto":
             return symbols[:50]
 
@@ -614,15 +634,41 @@ class AppController(QMainWindow):
         if not symbol:
             return
 
-        orderbook = await self._safe_fetch_orderbook(symbol, limit=limit)
-        bids = orderbook.get("bids") if isinstance(orderbook, dict) else []
-        asks = orderbook.get("asks") if isinstance(orderbook, dict) else []
+        now = time.monotonic()
+        broker_name = str(getattr(getattr(self, "broker", None), "exchange_name", "") or "").lower()
+        min_interval = 4.0 if broker_name == "stellar" else 1.0
 
-        bids = bids or []
-        asks = asks or []
+        in_flight = self._orderbook_tasks.get(symbol)
+        if in_flight and not in_flight.done():
+            return
 
-        self.orderbook_buffer.update(symbol, bids, asks)
-        self.orderbook_signal.emit(symbol, bids, asks)
+        cached = self.orderbook_buffer.get(symbol) or {}
+        last_requested = self._orderbook_last_request_at.get(symbol, 0.0)
+        if cached and (now - last_requested) < min_interval:
+            bids = cached.get("bids") or []
+            asks = cached.get("asks") or []
+            self.orderbook_signal.emit(symbol, bids, asks)
+            return
+
+        self._orderbook_last_request_at[symbol] = now
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._orderbook_tasks[symbol] = current_task
+
+        try:
+            orderbook = await self._safe_fetch_orderbook(symbol, limit=limit)
+            bids = orderbook.get("bids") if isinstance(orderbook, dict) else []
+            asks = orderbook.get("asks") if isinstance(orderbook, dict) else []
+
+            bids = bids or []
+            asks = asks or []
+
+            self.orderbook_buffer.update(symbol, bids, asks)
+            self.orderbook_signal.emit(symbol, bids, asks)
+        finally:
+            active_task = self._orderbook_tasks.get(symbol)
+            if active_task is current_task:
+                self._orderbook_tasks.pop(symbol, None)
 
     def publish_ai_signal(self, symbol, signal, candles=None):
         if not symbol or not isinstance(signal, dict):

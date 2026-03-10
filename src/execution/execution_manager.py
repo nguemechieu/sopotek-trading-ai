@@ -263,7 +263,7 @@ class ExecutionManager:
                 EventType.FILL,
                 {
                     "symbol": symbol,
-                    "side": prepared_order["side"],
+                    "side": str(prepared_order["side"]).upper(),
                     "qty": prepared_order["amount"],
                     "price": execution.get("price", price),
                 },

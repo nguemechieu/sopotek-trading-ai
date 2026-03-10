@@ -1,6 +1,6 @@
 import os
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtGui import QMovie, QPixmap
 from PySide6.QtWidgets import (
     QBoxLayout,
@@ -26,8 +26,8 @@ from frontend.ui.i18n import iter_supported_languages
 
 
 BASE_DIR = "src"
-LOGO_PATH = os.path.join(BASE_DIR, "assets", "logo.png")
-SPINNER_PATH = os.path.join(BASE_DIR, "assets", "spinner.gif")
+LOGO_PATH =  "assets/logo.png"
+SPINNER_PATH = "assets/spinner.gif"
 
 EXCHANGE_MAP = {
     "crypto": [
@@ -65,6 +65,7 @@ STRATEGY_COPY = {
 
 class Dashboard(QWidget):
     login_requested = Signal(object)
+    LAST_PROFILE_SETTING = "dashboard/last_profile"
 
     def __init__(self, controller):
         super().__init__()
@@ -72,6 +73,7 @@ class Dashboard(QWidget):
         self.controller = controller
         self._field_blocks = {}
         self._current_layout_mode = None
+        self.settings = getattr(controller, "settings", None) or QSettings("Sopotek", "TradingPlatform")
 
         self.setWindowTitle("Sopotek AI Trading Platform")
         self.resize(1320, 880)
@@ -95,8 +97,9 @@ class Dashboard(QWidget):
         self.setStyleSheet(
             """
             QWidget {
-                background-color: #edf3f7;
-                color: #17324a;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #f8f1e5, stop:0.46 #f4efe9, stop:1 #e3edf6);
+                color: #19344b;
                 font-family: "Aptos", "Bahnschrift", "Segoe UI", sans-serif;
             }
             QScrollArea {
@@ -105,162 +108,168 @@ class Dashboard(QWidget):
             }
             QFrame#heroPanel {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #ddebf7, stop:0.5 #c7def0, stop:1 #b1d0ea);
-                border: 1px solid rgba(95, 133, 166, 0.18);
+                    stop:0 #fff8ef, stop:0.48 #f5efe4, stop:1 #dbe7f3);
+                border: 1px solid rgba(126, 149, 168, 0.18);
                 border-radius: 30px;
             }
             QFrame#connectPanel {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #f8f3e8, stop:1 #efe6d6);
-                color: #102131;
+                    stop:0 #fffdf8, stop:1 #f4ecdf);
+                color: #163048;
+                border: 1px solid rgba(140, 126, 104, 0.12);
                 border-radius: 30px;
             }
             QFrame#glassCard {
-                background-color: rgba(255, 255, 255, 0.55);
-                border: 1px solid rgba(99, 135, 167, 0.14);
+                background-color: rgba(255, 255, 255, 0.72);
+                border: 1px solid rgba(118, 144, 165, 0.12);
                 border-radius: 20px;
             }
             QFrame#marketStrip {
-                background-color: rgba(255, 255, 255, 0.62);
-                border: 1px solid rgba(116, 150, 180, 0.14);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(255,255,255,0.92), stop:1 rgba(235,244,250,0.88));
+                border: 1px solid rgba(124, 155, 181, 0.13);
                 border-radius: 18px;
             }
             QFrame#summaryCard {
-                background-color: rgba(255, 255, 255, 0.42);
-                border: 1px solid rgba(16, 33, 49, 0.1);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(255,255,255,0.84), stop:1 rgba(248,241,230,0.92));
+                border: 1px solid rgba(121, 135, 151, 0.11);
                 border-radius: 22px;
             }
             QFrame#statPill {
-                background-color: rgba(255, 255, 255, 0.52);
-                border: 1px solid rgba(107, 145, 178, 0.18);
+                background: rgba(255, 255, 255, 0.62);
+                border: 1px solid rgba(129, 154, 176, 0.16);
                 border-radius: 16px;
             }
             QLabel#eyebrow {
-                color: #3574a5;
+                color: #8a5b3b;
                 font-size: 12px;
                 font-weight: 800;
                 letter-spacing: 0.18em;
                 text-transform: uppercase;
             }
             QLabel#heroTitle {
-                font-size: 38px;
+                font-size: 40px;
                 font-weight: 800;
-                color: #12324d;
+                color: #19314a;
             }
             QLabel#heroLead {
                 font-size: 15px;
                 line-height: 1.5;
-                color: #4b647b;
+                color: #5b6f81;
             }
             QLabel#heroSectionTitle {
-                color: #17324a;
+                color: #21405b;
                 font-size: 18px;
                 font-weight: 800;
             }
             QLabel#heroSectionBody {
-                color: #567086;
+                color: #61778c;
                 font-size: 13px;
             }
             QLabel#panelTitle {
-                color: #102131;
+                color: #183349;
                 font-size: 30px;
                 font-weight: 800;
             }
             QLabel#panelBody {
-                color: #586a7d;
+                color: #6a7784;
                 font-size: 14px;
             }
             QLabel#sectionLabel {
-                color: #24384d;
+                color: #7a6048;
                 font-size: 12px;
                 font-weight: 800;
                 letter-spacing: 0.12em;
                 text-transform: uppercase;
             }
             QLabel#fieldLabel {
-                color: #31475f;
+                color: #41576c;
                 font-size: 12px;
                 font-weight: 700;
                 letter-spacing: 0.05em;
                 text-transform: uppercase;
             }
             QLabel#hintLabel {
-                color: #506578;
+                color: #687887;
                 font-size: 12px;
             }
             QLabel#pillLabel {
-                color: #48647d;
+                color: #6b7d8d;
                 font-size: 12px;
                 font-weight: 700;
             }
             QLabel#pillValue {
-                color: #17324a;
+                color: #18364f;
                 font-size: 20px;
                 font-weight: 800;
             }
             QLabel#summaryTitle {
-                color: #102131;
+                color: #183349;
                 font-size: 18px;
                 font-weight: 800;
             }
             QLabel#summaryBody {
-                color: #4c5d70;
+                color: #5d6f80;
                 font-size: 13px;
             }
             QLabel#summaryMeta {
-                color: #27425f;
+                color: #8a5b3b;
                 font-size: 12px;
                 font-weight: 700;
             }
             QLabel#marketTitle {
-                color: #17324a;
+                color: #21405b;
                 font-size: 15px;
                 font-weight: 800;
             }
             QLabel#marketBody {
-                color: #5a7389;
+                color: #61798f;
                 font-size: 12px;
             }
             QLabel#checkTitle {
-                color: #27425e;
+                color: #2d4963;
                 font-size: 13px;
             }
             QLabel#checkStateGood {
-                color: #6bf0bd;
+                color: #2d9b74;
                 font-size: 12px;
                 font-weight: 800;
             }
             QLabel#checkStateWarn {
-                color: #ffd084;
+                color: #ca8751;
                 font-size: 12px;
                 font-weight: 800;
             }
             QLineEdit, QComboBox, QSpinBox {
-                background-color: #ffffff;
-                color: #102131;
-                border: 1px solid #c6d0d8;
+                background-color: rgba(255, 252, 246, 0.98);
+                color: #163048;
+                border: 1px solid #d8d0c4;
                 border-radius: 15px;
                 padding: 11px 12px;
                 min-height: 22px;
                 font-size: 14px;
             }
+            QLineEdit:hover, QComboBox:hover, QSpinBox:hover {
+                border-color: #bfad93;
+            }
             QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
-                border: 2px solid #257cff;
+                border: 2px solid #c56a4a;
             }
             QComboBox::drop-down {
                 border: 0;
                 width: 26px;
             }
             QCheckBox {
-                color: #31475f;
+                color: #425a6f;
                 font-size: 13px;
                 spacing: 8px;
             }
             QPushButton#presetButton,
             QPushButton#secondaryButton {
-                background-color: rgba(16, 33, 49, 0.05);
-                color: #16304c;
-                border: 1px solid rgba(16, 33, 49, 0.1);
+                background: rgba(255, 255, 255, 0.72);
+                color: #21405b;
+                border: 1px solid rgba(146, 160, 171, 0.18);
                 border-radius: 14px;
                 padding: 10px 14px;
                 font-size: 12px;
@@ -268,11 +277,13 @@ class Dashboard(QWidget):
             }
             QPushButton#presetButton:hover,
             QPushButton#secondaryButton:hover {
-                background-color: rgba(16, 33, 49, 0.1);
+                background: rgba(240, 246, 251, 0.96);
+                border-color: rgba(102, 137, 165, 0.32);
             }
             QPushButton#connectButton {
-                background-color: #10253d;
-                color: #f5fbff;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #d46e50, stop:1 #bf5238);
+                color: #fffaf6;
                 border: 0;
                 border-radius: 18px;
                 padding: 15px 20px;
@@ -280,7 +291,11 @@ class Dashboard(QWidget):
                 font-weight: 800;
             }
             QPushButton#connectButton:hover {
-                background-color: #193652;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #ca6244, stop:1 #ad432d);
+            }
+            QPushButton#connectButton:pressed {
+                background: #a6402b;
             }
             """
         )
@@ -294,6 +309,85 @@ class Dashboard(QWidget):
         if not hasattr(self, "language_box") or self.language_box is None:
             return None
         return self.language_box.currentData()
+
+    def _credential_field_schema(self):
+        broker_type = self.exchange_type_box.currentText() if hasattr(self, "exchange_type_box") else ""
+        exchange = self.exchange_box.currentText() if hasattr(self, "exchange_box") else ""
+
+        schema = {
+            "api_label": self._tr("dashboard.api_key"),
+            "api_placeholder": "Public key or broker token",
+            "secret_label": self._tr("dashboard.secret"),
+            "secret_placeholder": "Secret key",
+            "secret_echo": QLineEdit.Password,
+            "account_label": self._tr("dashboard.account_id"),
+            "account_placeholder": "Required for Oanda",
+        }
+
+        if exchange == "stellar":
+            schema.update(
+                {
+                    "api_label": "Public Key",
+                    "api_placeholder": "Stellar public key",
+                    "secret_label": "Private Key",
+                    "secret_placeholder": "Stellar private key",
+                    "secret_echo": QLineEdit.Password,
+                }
+            )
+        elif exchange == "oanda" or broker_type == "forex":
+            schema.update(
+                {
+                    "api_label": "Account ID",
+                    "api_placeholder": "Oanda account ID",
+                    "secret_label": "API Key",
+                    "secret_placeholder": "Oanda API key",
+                    "secret_echo": QLineEdit.Normal,
+                }
+            )
+
+        return schema
+
+    def _apply_credential_field_schema(self):
+        schema = self._credential_field_schema()
+
+        api_block = self._field_blocks.get("api")
+        if api_block is not None:
+            api_block.label_widget.setText(schema["api_label"])
+        self.api_input.setPlaceholderText(schema["api_placeholder"])
+
+        secret_block = self._field_blocks.get("secret")
+        if secret_block is not None:
+            secret_block.label_widget.setText(schema["secret_label"])
+        self.secret_input.setPlaceholderText(schema["secret_placeholder"])
+        self.secret_input.setEchoMode(schema["secret_echo"])
+
+        account_block = self._field_blocks.get("account_id")
+        if account_block is not None:
+            account_block.label_widget.setText(schema["account_label"])
+        self.account_id_input.setPlaceholderText(schema["account_placeholder"])
+
+    def _resolved_broker_inputs(self):
+        broker_type = self.exchange_type_box.currentText()
+        exchange = self.exchange_box.currentText()
+        api_value = self.api_input.text().strip()
+        secret_value = self.secret_input.text().strip()
+        password_value = self.password_input.text().strip()
+        account_value = self.account_id_input.text().strip()
+
+        if exchange == "oanda" or broker_type == "forex":
+            return {
+                "api_key": secret_value,
+                "secret": None,
+                "password": password_value or None,
+                "account_id": api_value or None,
+            }
+
+        return {
+            "api_key": api_value or None,
+            "secret": secret_value or None,
+            "password": password_value or None,
+            "account_id": account_value or None,
+        }
 
     def _build_ui(self):
         root_layout = QVBoxLayout(self)
@@ -348,7 +442,7 @@ class Dashboard(QWidget):
         self.eyebrow_label.setObjectName("eyebrow")
         headline_col.addWidget(self.eyebrow_label)
 
-        self.hero_title_label = QLabel("Design a dashboard that feels ready before you even press connect.")
+        self.hero_title_label = QLabel("Dashboard that feels ready before you even press connect.")
         self.hero_title_label.setObjectName("heroTitle")
         self.hero_title_label.setWordWrap(True)
         headline_col.addWidget(self.hero_title_label)
@@ -791,10 +885,8 @@ class Dashboard(QWidget):
             if block is not None:
                 block.label_widget.setText(self._tr(key))
 
-        self.api_input.setPlaceholderText("Public key or broker token")
-        self.secret_input.setPlaceholderText("Secret key")
         self.password_input.setPlaceholderText("Exchange passphrase when required")
-        self.account_id_input.setPlaceholderText("Required for Oanda")
+        self._apply_credential_field_schema()
 
         if self.language_box is not None:
             current_code = getattr(self.controller, "language_code", self._language_box_current_code())
@@ -858,12 +950,19 @@ class Dashboard(QWidget):
         if not creds:
             return
 
+        CredentialManager.touch_account(account_name)
+        self.settings.setValue(self.LAST_PROFILE_SETTING, account_name)
+
         broker = creds.get("broker", {})
         self.exchange_type_box.setCurrentText(broker.get("type", "crypto"))
         self._update_exchange_list(broker.get("type", "crypto"))
         self.exchange_box.setCurrentText(broker.get("exchange", ""))
-        self.api_input.setText(broker.get("api_key", ""))
-        self.secret_input.setText(broker.get("secret", ""))
+        if broker.get("exchange") == "oanda" or broker.get("type") == "forex":
+            self.api_input.setText(broker.get("account_id", ""))
+            self.secret_input.setText(broker.get("api_key", ""))
+        else:
+            self.api_input.setText(broker.get("api_key", ""))
+            self.secret_input.setText(broker.get("secret", ""))
         self.password_input.setText(broker.get("password") or broker.get("passphrase", ""))
         self.account_id_input.setText(broker.get("account_id", ""))
         self.mode_box.setCurrentText(broker.get("mode", "paper"))
@@ -878,8 +977,10 @@ class Dashboard(QWidget):
         accounts = CredentialManager.list_accounts()
         if not accounts:
             return
-        self.saved_account_box.setCurrentText(accounts[0])
-        self._load_selected_account(accounts[0])
+        saved_last = str(self.settings.value(self.LAST_PROFILE_SETTING, "") or "").strip()
+        target = saved_last if saved_last in accounts else accounts[0]
+        self.saved_account_box.setCurrentText(target)
+        self._load_selected_account(target)
 
     def _apply_preset(self, preset_name):
         if preset_name == "paper":
@@ -940,6 +1041,8 @@ class Dashboard(QWidget):
         else:
             self.mode_box.setEnabled(True)
 
+        self._apply_credential_field_schema()
+
     def _update_broker_hint(self):
         broker_type = self.exchange_type_box.currentText()
         exchange = self.exchange_box.currentText()
@@ -949,7 +1052,12 @@ class Dashboard(QWidget):
         if exchange:
             copy = f"{exchange.upper()} in {mode.upper()} mode. {copy}"
         if exchange == "stellar":
-            copy += " Use your Stellar public key in API Key and your secret seed in Secret."
+            copy += (
+                " Use your Stellar public key in the first field. "
+                "The private key is optional for read-only market data, but required for order execution."
+            )
+        elif exchange == "oanda" or broker_type == "forex":
+            copy += " Enter Oanda account ID in the first field and API key in the second field."
         self.broker_hint.setText(copy)
 
     def _set_check_state(self, row, text, is_ready):
@@ -970,16 +1078,23 @@ class Dashboard(QWidget):
         needs_account_id = broker_type == "forex" or exchange == "oanda"
         needs_password = exchange in {"coinbase", "okx", "kucoin"} and not is_paper
 
-        has_api = bool(self.api_input.text().strip())
-        has_secret = bool(self.secret_input.text().strip())
-        has_account_id = bool(self.account_id_input.text().strip())
-        has_password = bool(self.password_input.text().strip())
+        resolved = self._resolved_broker_inputs()
+        has_api = bool(resolved.get("api_key"))
+        has_secret = bool(resolved.get("secret"))
+        has_account_id = bool(resolved.get("account_id"))
+        has_password = bool(resolved.get("password"))
+        if exchange == "oanda" or broker_type == "forex":
+            credentials_ready = has_api and has_account_id
+        elif exchange == "stellar":
+            credentials_ready = has_api
+        else:
+            credentials_ready = not needs_credentials or (has_api and has_secret and (not needs_password or has_password))
 
         readiness = 20
         readiness += 20 if exchange else 0
         readiness += 15 if strategy else 0
         readiness += 15 if risk_value <= 3 else 8
-        readiness += 20 if (not needs_credentials or (has_api and has_secret)) else 0
+        readiness += 20 if credentials_ready else 0
         readiness += 10 if (not needs_account_id or has_account_id) else 0
         readiness = max(0, min(100, readiness))
 
@@ -1007,7 +1122,6 @@ class Dashboard(QWidget):
             f"Risk budget is {risk_value}%. Profiles are {'saved' if self.remember_checkbox.isChecked() else 'temporary'} for this session."
         )
 
-        credentials_ready = not needs_credentials or (has_api and has_secret and (not needs_password or has_password))
         broker_ready = bool(exchange)
         strategy_ready = bool(strategy)
         risk_ready = risk_value <= 3
@@ -1057,18 +1171,15 @@ class Dashboard(QWidget):
     def _on_connect(self):
         exchange = self.exchange_box.currentText()
         broker_type = self.exchange_type_box.currentText()
-        api_key = self.api_input.text().strip()
-        secret = self.secret_input.text().strip()
-        password = self.password_input.text().strip()
-        account_id = self.account_id_input.text().strip()
+        resolved = self._resolved_broker_inputs()
+        api_key = resolved.get("api_key")
+        secret = resolved.get("secret")
+        password = resolved.get("password")
+        account_id = resolved.get("account_id")
 
         if exchange != "paper" and broker_type != "paper" and not api_key:
             QMessageBox.warning(self, "Missing Credentials", "API credentials are required for this broker.")
             return
-        if exchange == "stellar" and not secret:
-            QMessageBox.warning(self, "Missing Secret Seed", "Stellar requires the account secret seed to sign offers.")
-            return
-
         if broker_type == "forex" and not account_id:
             QMessageBox.warning(self, "Missing Account ID", "Account ID is required for Oanda sessions.")
             return
@@ -1094,6 +1205,7 @@ class Dashboard(QWidget):
             profile_name = f"{exchange}_{api_key[:6] if api_key else 'paper'}"
             payload = config.model_dump() if hasattr(config, "model_dump") else config.dict()
             CredentialManager.save_account(profile_name, payload)
+            self.settings.setValue(self.LAST_PROFILE_SETTING, profile_name)
             self._load_accounts_index()
             self.saved_account_box.setCurrentText(profile_name)
 

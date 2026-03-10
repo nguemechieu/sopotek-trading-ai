@@ -26,16 +26,35 @@ class CredentialManager:
             )
 
             accounts = CredentialManager.list_accounts()
+            if account_name in accounts:
+                accounts.remove(account_name)
+            accounts.insert(0, account_name)
 
+            keyring.set_password(
+                CredentialManager.SERVICE_NAME,
+                CredentialManager.ACCOUNT_INDEX,
+                json.dumps(accounts)
+            )
+
+        except Exception:
+            traceback.print_exc()
+
+    @staticmethod
+    def touch_account(account_name: str):
+
+        try:
+            accounts = CredentialManager.list_accounts()
             if account_name not in accounts:
+                return
 
-                accounts.append(account_name)
+            accounts.remove(account_name)
+            accounts.insert(0, account_name)
 
-                keyring.set_password(
-                    CredentialManager.SERVICE_NAME,
-                    CredentialManager.ACCOUNT_INDEX,
-                    json.dumps(accounts)
-                )
+            keyring.set_password(
+                CredentialManager.SERVICE_NAME,
+                CredentialManager.ACCOUNT_INDEX,
+                json.dumps(accounts)
+            )
 
         except Exception:
             traceback.print_exc()

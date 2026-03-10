@@ -52,6 +52,7 @@ def test_execute_accepts_keyword_order_arguments():
     fill_event = asyncio.run(bus.queue.get())
     assert fill_event.type == EventType.FILL
     assert fill_event.data["symbol"] == "BTC/USDT"
+    assert fill_event.data["side"] == "BUY"
     assert fill_event.data["qty"] == 0.01
 
 

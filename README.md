@@ -1,6 +1,6 @@
 # Sopotek Trading AI
 
-<img alt="logo" height="170" src="../sopotek-trading-ai/src/assets/logo_170X170.png" width="170"/>
+<img alt="Sopotek Trading AI logo" height="170" src="src/assets/logo_170X170.png" width="170"/>
 
 
 Sopotek Trading AI is a modular, event-driven algorithmic trading platform for crypto, forex, and equities.
@@ -54,4 +54,3 @@ MIT. See [LICENSE](LICENSE).
 
 ## Documentation
 - Full application guide: [docs/FULL_APP_GUIDE.md](docs/FULL_APP_GUIDE.md)
-

@@ -219,6 +219,7 @@ def test_paper_broker_exposes_normalized_api(monkeypatch):
         assert order["status"] == "filled"
         assert (await broker.fetch_balance())["free"]["USDT"] == 900.0
         assert (await broker.fetch_positions())[0]["symbol"] == "BTC/USDT"
+        assert (await broker.fetch_positions(symbols=["BTC/USDT"]))[0]["symbol"] == "BTC/USDT"
         await broker.close()
 
     asyncio.run(scenario())
@@ -288,5 +289,117 @@ def test_paper_broker_bootstraps_public_market_data(monkeypatch):
 
         await broker.close()
         assert broker.market_data_broker is None
+
+    asyncio.run(scenario())
+
+
+def test_base_broker_close_all_positions_uses_opposite_side():
+    class DummyBroker(PaperBroker):
+        def __init__(self):
+            controller = SimpleNamespace(
+                logger=None,
+                paper_balance=1000.0,
+                symbols=["BTC/USDT"],
+                candle_buffers={},
+                ticker_buffer=TickerBuffer(),
+                ticker_stream=SimpleNamespace(get=lambda symbol: None),
+                time_frame="1h",
+                broker=None,
+            )
+            super().__init__(controller)
+            self.orders_sent = []
+            self.positions = {
+                "BTC/USDT": {
+                    "symbol": "BTC/USDT",
+                    "amount": 2.0,
+                    "entry_price": 100.0,
+                    "side": "long",
+                }
+            }
+
+        async def connect(self):
+            return True
+
+        async def close(self):
+            return True
+
+        async def create_order(self, symbol, side, amount, type="market", price=None, params=None, **kwargs):
+            order = {
+                "symbol": symbol,
+                "side": side,
+                "amount": amount,
+                "type": type,
+            }
+            self.orders_sent.append(order)
+            return order
+
+    async def scenario():
+        broker = DummyBroker()
+        results = await broker.close_all_positions()
+        assert len(results) == 1
+        assert broker.orders_sent[0]["symbol"] == "BTC/USDT"
+        assert broker.orders_sent[0]["side"] == "sell"
+        assert broker.orders_sent[0]["amount"] == 2.0
+
+    asyncio.run(scenario())
+
+
+def test_paper_broker_falls_back_for_xlm_usdt_daily_history(monkeypatch):
+    class FakeMarketDataBroker:
+        def __init__(self, config):
+            self.config = config
+            self.exchange = config.exchange
+
+        async def connect(self):
+            return True
+
+        async def close(self):
+            return True
+
+        async def fetch_ticker(self, symbol):
+            if self.exchange == "binanceus" and symbol == "XLM/USDT":
+                raise RuntimeError("symbol not available")
+            return {"symbol": symbol, "last": 0.125, "bid": 0.124, "ask": 0.126}
+
+        async def fetch_ohlcv(self, symbol, timeframe="1h", limit=100):
+            if self.exchange == "binanceus" and symbol == "XLM/USDT":
+                return []
+            return [[1710000000000, 0.10, 0.13, 0.09, 0.125, 1000000.0]]
+
+        async def fetch_symbols(self):
+            if self.exchange == "binanceus":
+                return ["BTC/USDT"]
+            return ["BTC/USDT", "XLM/USDT"]
+
+    class DummyController:
+        def __init__(self):
+            self.logger = None
+            self.paper_balance = 1000.0
+            self.symbols = ["XLM/USDT"]
+            self.candle_buffers = {}
+            self.ticker_buffer = TickerBuffer()
+            self.ticker_stream = SimpleNamespace(get=lambda symbol: None, update=lambda symbol, ticker: None)
+            self.time_frame = "1d"
+            self.broker = None
+            self.config = SimpleNamespace(
+                broker=SimpleNamespace(params={"paper_data_exchanges": ["binanceus", "binance"]})
+            )
+
+    monkeypatch.setattr(paper_module, "CCXTBroker", FakeMarketDataBroker)
+
+    async def scenario():
+        controller = DummyController()
+        broker = PaperBroker(controller)
+        controller.broker = broker
+        await broker.connect()
+
+        candles = await broker.fetch_ohlcv("XLM/USDT", timeframe="1d", limit=300)
+        ticker = await broker.fetch_ticker("XLM/USDT")
+
+        assert candles[0][4] == 0.125
+        assert ticker["last"] == 0.125
+        assert broker.market_data_exchange == "binance"
+
+        await broker.close()
 
     asyncio.run(scenario())

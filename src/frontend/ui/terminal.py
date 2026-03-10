@@ -25,11 +25,13 @@ from frontend.ui.chart.chart_widget import ChartWidget
 from frontend.ui.i18n import iter_supported_languages
 from frontend.ui.panels.orderbook_panel import OrderBookPanel
 
-def global_exception_hook(exctype, value, tb):    # Suppress noisy shutdown interrupts (e.g., Ctrl+C/app exit).`n    if exctype in (KeyboardInterrupt, SystemExit):`n        return`n`n    print("UNCAUGHT EXCEPTION:")`n
-   traceback.print_exception(exctype, value, tb)
+def global_exception_hook(exctype, value, tb):
+    # Ignore expected shutdown interrupts so the terminal closes quietly.
+    if exctype in (KeyboardInterrupt, SystemExit):
+        return
 
-def candles_to_df(df):
-    raise NotImplementedError
+    print("UNCAUGHT EXCEPTION:")
+    traceback.print_exception(exctype, value, tb)
 
 
 
@@ -124,6 +126,142 @@ class Terminal(QMainWindow):
         if hasattr(self.controller, "tr"):
             return self.controller.tr(key, **kwargs)
         return key
+
+    def _active_exchange_name(self):
+        broker = getattr(self.controller, "broker", None)
+        if broker is not None:
+            name = getattr(broker, "exchange_name", None)
+            if name:
+                return str(name).lower()
+
+        config = getattr(self.controller, "config", None)
+        broker_config = getattr(config, "broker", None)
+        if broker_config is not None:
+            exchange = getattr(broker_config, "exchange", None)
+            if exchange:
+                return str(exchange).lower()
+
+        if hasattr(self, "symbols_table") and self.symbols_table is not None:
+            name = self.symbols_table.accessibleName()
+            if name:
+                return str(name).lower()
+
+        return ""
+
+    def _is_stellar_market_watch(self):
+        return self._active_exchange_name() == "stellar"
+
+    def _market_watch_headers(self):
+        if self._is_stellar_market_watch():
+            return ["Symbol", "Bid", "Ask", "USD Value", "AI Training"]
+        return ["Symbol", "Bid", "Ask", "AI Training"]
+
+    def _market_watch_status_column(self):
+        return 4 if self._is_stellar_market_watch() else 3
+
+    def _market_watch_usd_column(self):
+        return 3 if self._is_stellar_market_watch() else None
+
+    def _configure_market_watch_table(self):
+        if not hasattr(self, "symbols_table") or self.symbols_table is None:
+            return
+        headers = self._market_watch_headers()
+        self.symbols_table.setColumnCount(len(headers))
+        self.symbols_table.setHorizontalHeaderLabels(headers)
+
+    def _stable_usd_assets(self):
+        return {"USD", "USDC", "USDT", "USDP", "FDUSD", "TUSD", "BUSD"}
+
+    def _ticker_mid_price(self, ticker):
+        if not isinstance(ticker, dict):
+            return None
+
+        try:
+            bid = float(ticker.get("bid") or ticker.get("bidPrice") or ticker.get("bp") or 0)
+            ask = float(ticker.get("ask") or ticker.get("askPrice") or ticker.get("ap") or 0)
+            last = float(ticker.get("last") or ticker.get("price") or 0)
+        except Exception:
+            return None
+
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2.0
+        if last > 0:
+            return last
+        if bid > 0:
+            return bid
+        if ask > 0:
+            return ask
+        return None
+
+    def _lookup_symbol_mid_price(self, symbol):
+        ticker_stream = getattr(self.controller, "ticker_stream", None)
+        if ticker_stream is None:
+            return None
+        ticker = ticker_stream.get(symbol)
+        return self._ticker_mid_price(ticker)
+
+    def _asset_to_usd_rate(self, asset_code):
+        code = str(asset_code or "").upper().strip()
+        if not code:
+            return None
+        if code in self._stable_usd_assets():
+            return 1.0
+
+        for stable in sorted(self._stable_usd_assets()):
+            direct = self._lookup_symbol_mid_price(f"{code}/{stable}")
+            if direct and direct > 0:
+                return direct
+
+            inverse = self._lookup_symbol_mid_price(f"{stable}/{code}")
+            if inverse and inverse > 0:
+                return 1.0 / inverse
+
+        return None
+
+    def _stellar_usd_value(self, symbol, bid, ask):
+        if not self._is_stellar_market_watch():
+            return None
+        if not isinstance(symbol, str) or "/" not in symbol:
+            return None
+
+        try:
+            mid = (float(bid) + float(ask)) / 2.0
+        except Exception:
+            return None
+        if mid <= 0:
+            return None
+
+        _base, quote = symbol.upper().split("/", 1)
+        quote_to_usd = self._asset_to_usd_rate(quote)
+        if quote_to_usd is None:
+            return None
+        return mid * quote_to_usd
+
+    def _format_market_watch_number(self, value):
+        if value is None:
+            return "-"
+        try:
+            numeric = float(value)
+        except Exception:
+            return "-"
+        if numeric >= 1000:
+            return f"{numeric:,.2f}"
+        if numeric >= 1:
+            return f"{numeric:,.4f}"
+        return f"{numeric:,.6f}"
+
+    def _format_market_watch_usd(self, value):
+        if value is None:
+            return "-"
+        try:
+            numeric = float(value)
+        except Exception:
+            return "-"
+        if numeric >= 1000:
+            return f"${numeric:,.2f}"
+        if numeric >= 1:
+            return f"${numeric:,.4f}"
+        return f"${numeric:,.6f}"
 
     def _is_qt_object_alive(self, obj):
         try:
@@ -322,18 +460,21 @@ class Terminal(QMainWindow):
 
         self.trading_menu = menu_bar.addMenu("")
         self.action_start_trading = QAction(self)
-        self.action_start_trading.triggered.connect(self._toggle_autotrading)
+        self.action_start_trading.triggered.connect(lambda: self._set_autotrading_enabled(True))
         self.action_start_trading.setShortcut("Ctrl+T")
         self.trading_menu.addAction(self.action_start_trading)
         self.action_stop_trading = QAction(self)
+        self.action_stop_trading.triggered.connect(lambda: self._set_autotrading_enabled(False))
         self.trading_menu.addAction(self.action_stop_trading)
         self.action_manual_trade = QAction(self)
         self.action_manual_trade.triggered.connect(self._open_manual_trade)
         self.trading_menu.addAction(self.action_manual_trade)
         self.trading_menu.addSeparator()
         self.action_close_all = QAction(self)
+        self.action_close_all.triggered.connect(self._close_all_positions)
         self.trading_menu.addAction(self.action_close_all)
         self.action_cancel_orders = QAction(self)
+        self.action_cancel_orders.triggered.connect(self._cancel_all_orders)
         self.trading_menu.addAction(self.action_cancel_orders)
 
         self.backtest_menu = menu_bar.addMenu("")
@@ -646,38 +787,44 @@ class Terminal(QMainWindow):
     # AUTOTRADING
     # ==========================================================
 
+    def _set_autotrading_enabled(self, enabled):
+        target = bool(enabled)
+        if self.autotrading_enabled == target:
+            return
+        self._toggle_autotrading()
+
     def _toggle_autotrading(self):
 
-     self.autotrading_enabled = not self.autotrading_enabled
+        self.autotrading_enabled = not self.autotrading_enabled
 
-     if self.autotrading_enabled:
+        if self.autotrading_enabled:
 
-        if not self.controller.trading_system:
-            self.logger.error("Trading system is not initialized yet")
-            QMessageBox.warning(
-                self,
-                self._tr("terminal.warning.trading_not_ready_title"),
-                self._tr("terminal.warning.trading_not_ready_body"),
-            )
-            self.autotrading_enabled = False
+            if not self.controller.trading_system:
+                self.logger.error("Trading system is not initialized yet")
+                QMessageBox.warning(
+                    self,
+                    self._tr("terminal.warning.trading_not_ready_title"),
+                    self._tr("terminal.warning.trading_not_ready_body"),
+                )
+                self.autotrading_enabled = False
+                self._update_autotrade_button()
+                self.autotrade_toggle.emit(False)
+                return
+
             self._update_autotrade_button()
+
+            loop = asyncio.get_event_loop()
+            loop.create_task(self.controller.trading_system.start())
+            self.autotrade_toggle.emit(True)
+
+        else:
+
+            self._update_autotrade_button()
+
+            if self.controller.trading_system:
+                asyncio.create_task(self.controller.trading_system.stop())
+
             self.autotrade_toggle.emit(False)
-            return
-
-        self._update_autotrade_button()
-
-        loop = asyncio.get_event_loop()
-        loop.create_task(self.controller.trading_system.start())
-        self.autotrade_toggle.emit(True)
-
-     else:
-
-        self._update_autotrade_button()
-
-        if self.controller.trading_system:
-            asyncio.create_task(self.controller.trading_system.stop())
-
-        self.autotrade_toggle.emit(False)
 
     # ==========================================================
     # CHARTS
@@ -699,7 +846,10 @@ class Terminal(QMainWindow):
         self.symbols_table.setItem(row, 0, QTableWidgetItem(symbol))
         self.symbols_table.setItem(row, 1, QTableWidgetItem("-"))
         self.symbols_table.setItem(row, 2, QTableWidgetItem("-"))
-        self.symbols_table.setItem(row, 3, QTableWidgetItem("? Training..."))
+        usd_column = self._market_watch_usd_column()
+        if usd_column is not None:
+            self.symbols_table.setItem(row, usd_column, QTableWidgetItem("-"))
+        self.symbols_table.setItem(row, self._market_watch_status_column(), QTableWidgetItem("? Training..."))
         self.chart_tabs.addTab(chart, f"{symbol} ({timeframe})")
         chart.link_all_charts(self.chart_tabs.count())
         self.chart_tabs.setCurrentWidget(chart)
@@ -800,6 +950,8 @@ class Terminal(QMainWindow):
             return
 
         chart.timeframe = tf
+        if hasattr(chart, "refresh_context_display"):
+            chart.refresh_context_display()
 
         self.chart_tabs.setTabText(
             index,
@@ -879,10 +1031,18 @@ class Terminal(QMainWindow):
             target_row = self.symbols_table.rowCount()
             self.symbols_table.insertRow(target_row)
             self.symbols_table.setItem(target_row, 0, QTableWidgetItem(str(symbol)))
-            self.symbols_table.setItem(target_row, 3, QTableWidgetItem("Live"))
+            usd_column = self._market_watch_usd_column()
+            if usd_column is not None:
+                self.symbols_table.setItem(target_row, usd_column, QTableWidgetItem("-"))
+            self.symbols_table.setItem(target_row, self._market_watch_status_column(), QTableWidgetItem("Live"))
 
-        self.symbols_table.setItem(target_row, 1, QTableWidgetItem(str(bid)))
-        self.symbols_table.setItem(target_row, 2, QTableWidgetItem(str(ask)))
+        self.symbols_table.setItem(target_row, 1, QTableWidgetItem(self._format_market_watch_number(bid)))
+        self.symbols_table.setItem(target_row, 2, QTableWidgetItem(self._format_market_watch_number(ask)))
+
+        usd_column = self._market_watch_usd_column()
+        if usd_column is not None:
+            usd_value = self._stellar_usd_value(symbol, bid, ask)
+            self.symbols_table.setItem(target_row, usd_column, QTableWidgetItem(self._format_market_watch_usd(usd_value)))
 
         try:
             mid = (float(bid) + float(ask)) / 2
@@ -908,10 +1068,7 @@ class Terminal(QMainWindow):
     def _create_market_watch_panel(self):
         dock = QDockWidget("Market Watch", self)
         self.symbols_table = QTableWidget()
-        self.symbols_table.setColumnCount(4)
-        self.symbols_table.setHorizontalHeaderLabels(
-            ["Symbol", "Bid", "Ask", "AI Training"]
-        )
+        self._configure_market_watch_table()
         dock.setWidget(self.symbols_table)
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
 
@@ -1255,6 +1412,7 @@ class Terminal(QMainWindow):
                 )
 
     def _update_training_status(self, symbol, status):
+        status_column = self._market_watch_status_column()
 
         for row in range(self.symbols_table.rowCount()):
             if self.symbols_table.item(row, 0).text() == symbol:
@@ -1278,7 +1436,7 @@ class Terminal(QMainWindow):
                 else:
                     item = QTableWidgetItem(status)
 
-                self.symbols_table.setItem(row, 3, item)
+                self.symbols_table.setItem(row, status_column, item)
                 break
 
     def _rotate_spinner(self):
@@ -1293,9 +1451,10 @@ class Terminal(QMainWindow):
         icon = self._spinner_frames[self._spinner_index % len(self._spinner_frames)]
 
         rows = self.symbols_table.rowCount()
+        status_column = self._market_watch_status_column()
 
         for row in range(rows):
-            status_item = self.symbols_table.item(row, 3)
+            status_item = self.symbols_table.item(row, status_column)
 
             if not status_item:
                 continue
@@ -1386,6 +1545,7 @@ class Terminal(QMainWindow):
 
         self.symbols_table.setRowCount(0)
         self.symbols_table.setAccessibleName(exchange)
+        self._configure_market_watch_table()
         if self.symbol_picker is not None:
             current_symbol = self.symbol_picker.currentText()
             self.symbol_picker.blockSignals(True)
@@ -1404,10 +1564,100 @@ class Terminal(QMainWindow):
             self.symbols_table.setItem(row, 0, QTableWidgetItem(symbol))
             self.symbols_table.setItem(row, 1, QTableWidgetItem("-"))
             self.symbols_table.setItem(row, 2, QTableWidgetItem("-"))
-            self.symbols_table.setItem(row, 3, QTableWidgetItem("⏳"))
+            usd_column = self._market_watch_usd_column()
+            if usd_column is not None:
+                self.symbols_table.setItem(row, usd_column, QTableWidgetItem("-"))
+            self.symbols_table.setItem(row, self._market_watch_status_column(), QTableWidgetItem("⏳"))
 
     def _open_manual_trade(self):
-        pass
+        if not getattr(self.controller, "broker", None):
+            QMessageBox.warning(self, "Manual Order", "Connect a broker before placing an order.")
+            return
+
+        symbol_options = list(getattr(self.controller, "symbols", []) or [])
+        default_symbol = self._current_chart_symbol() or getattr(self, "symbol", None) or ""
+        if default_symbol and default_symbol not in symbol_options:
+            symbol_options.insert(0, default_symbol)
+        if not symbol_options:
+            symbol_options = [default_symbol] if default_symbol else []
+
+        if symbol_options:
+            default_index = max(symbol_options.index(default_symbol), 0) if default_symbol in symbol_options else 0
+            symbol, ok = QInputDialog.getItem(
+                self,
+                "Manual Order",
+                "Symbol:",
+                symbol_options,
+                default_index,
+                True,
+            )
+            if not ok:
+                return
+            symbol = str(symbol).strip()
+        else:
+            symbol, ok = QInputDialog.getText(self, "Manual Order", "Symbol:")
+            if not ok:
+                return
+            symbol = str(symbol).strip()
+
+        if not symbol:
+            QMessageBox.warning(self, "Manual Order", "A symbol is required.")
+            return
+
+        side, ok = QInputDialog.getItem(
+            self,
+            "Manual Order",
+            "Side:",
+            ["buy", "sell"],
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        order_type, ok = QInputDialog.getItem(
+            self,
+            "Manual Order",
+            "Order Type:",
+            ["market", "limit"],
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        amount, ok = QInputDialog.getDouble(
+            self,
+            "Manual Order",
+            "Amount:",
+            1.0,
+            0.0,
+            1_000_000_000.0,
+            8,
+        )
+        if not ok:
+            return
+
+        price = None
+        if order_type == "limit":
+            price, ok = QInputDialog.getDouble(
+                self,
+                "Manual Order",
+                "Limit Price:",
+                0.0,
+                0.0,
+                1_000_000_000.0,
+                8,
+            )
+            if not ok:
+                return
+            if price <= 0:
+                QMessageBox.warning(self, "Manual Order", "Limit orders require a positive price.")
+                return
+
+        asyncio.get_event_loop().create_task(
+            self._submit_manual_trade(symbol=symbol, side=side, amount=amount, order_type=order_type, price=price)
+        )
 
     def _optimize_strategy(self):
         self._open_text_window(
@@ -2068,13 +2318,207 @@ class Terminal(QMainWindow):
         )
 
     def _close_all_positions(self):
-        pass
+        broker = getattr(self.controller, "broker", None)
+        if broker is None:
+            QMessageBox.warning(self, "Close Positions", "Connect a broker before closing positions.")
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Close Positions",
+            "Close all tracked positions with market orders?",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        asyncio.get_event_loop().create_task(self._close_all_positions_async())
 
     def _export_trades(self):
-        pass
+        try:
+            try:
+                import pandas as pd
+            except Exception:
+                pd = None
+
+            trades = getattr(self, "results", None)
+            if trades is None or getattr(trades, "empty", True):
+                QMessageBox.information(self, "Export Trades", "No trades are available to export yet.")
+                return
+
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export Trades",
+                "trades.csv",
+                "CSV Files (*.csv)",
+            )
+            if not path:
+                return
+
+            # Backtest results are already dataframe-like, but we normalize defensively
+            # so export still works if the table source changes later.
+            if pd is not None and not hasattr(trades, "to_csv"):
+                trades = pd.DataFrame(trades)
+            trades.to_csv(path, index=False)
+            self.system_console.log(f"Trades exported to {path}", "INFO")
+            QMessageBox.information(self, "Export Trades", f"Trades exported to:\n{path}")
+        except Exception as exc:
+            self.logger.exception("Export trades failed")
+            self.system_console.log(f"Trade export failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Export Trades Failed", str(exc))
 
     def _cancel_all_orders(self):
-        pass
+        broker = getattr(self.controller, "broker", None)
+        if broker is None:
+            QMessageBox.warning(self, "Cancel Orders", "Connect a broker before canceling orders.")
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Cancel Orders",
+            "Cancel all open orders for the connected broker?",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        asyncio.get_event_loop().create_task(self._cancel_all_orders_async())
+
+    async def _submit_manual_trade(self, symbol, side, amount, order_type="market", price=None):
+        try:
+            trading_system = getattr(self.controller, "trading_system", None)
+            execution_manager = getattr(trading_system, "execution_manager", None)
+            if execution_manager is not None:
+                order = await execution_manager.execute(
+                    symbol=symbol,
+                    side=side,
+                    amount=amount,
+                    type=order_type,
+                    price=price,
+                )
+            else:
+                order = await self.controller.broker.create_order(
+                    symbol=symbol,
+                    side=side,
+                    amount=amount,
+                    type=order_type,
+                    price=price,
+                )
+
+            if not order:
+                QMessageBox.information(
+                    self,
+                    "Manual Order",
+                    f"The order for {symbol} was skipped by broker safety checks.",
+                )
+                return
+
+            self.system_console.log(
+                f"Manual order submitted: {side.upper()} {amount} {symbol} ({order_type})",
+                "INFO",
+            )
+            QMessageBox.information(
+                self,
+                "Manual Order",
+                f"Submitted {side.upper()} {amount} {symbol}.",
+            )
+        except Exception as exc:
+            self.logger.exception("Manual order failed")
+            self.system_console.log(f"Manual order failed for {symbol}: {exc}", "ERROR")
+            QMessageBox.critical(self, "Manual Order Failed", str(exc))
+
+    def _tracked_app_positions(self):
+        trading_system = getattr(self.controller, "trading_system", None)
+        portfolio_manager = getattr(trading_system, "portfolio", None)
+        portfolio = getattr(portfolio_manager, "portfolio", None)
+        positions = getattr(portfolio, "positions", {}) if portfolio is not None else {}
+        tracked = []
+        if not isinstance(positions, dict):
+            return tracked
+
+        for symbol, position in positions.items():
+            quantity = float(getattr(position, "quantity", 0) or 0)
+            if quantity == 0:
+                continue
+            tracked.append(
+                {
+                    "symbol": symbol,
+                    "amount": abs(quantity),
+                    "side": "long" if quantity > 0 else "short",
+                }
+            )
+        return tracked
+
+    async def _close_all_positions_async(self):
+        broker = getattr(self.controller, "broker", None)
+        if broker is None:
+            return
+
+        try:
+            results = []
+            if hasattr(broker, "close_all_positions"):
+                results = await broker.close_all_positions()
+
+            if not results:
+                for position in self._tracked_app_positions():
+                    symbol = position.get("symbol")
+                    amount = float(position.get("amount", 0) or 0)
+                    if not symbol or amount <= 0:
+                        continue
+                    close_side = "sell" if position.get("side") != "short" else "buy"
+                    order = await broker.create_order(
+                        symbol=symbol,
+                        side=close_side,
+                        amount=amount,
+                        type="market",
+                    )
+                    if order:
+                        results.append(order)
+
+            count = len(results or [])
+            if count == 0:
+                QMessageBox.information(
+                    self,
+                    "Close Positions",
+                    "No open positions were found to close.",
+                )
+                return
+
+            self.system_console.log(f"Closed {count} position(s).", "INFO")
+            QMessageBox.information(
+                self,
+                "Close Positions",
+                f"Submitted {count} closing order(s).",
+            )
+        except Exception as exc:
+            self.logger.exception("Close-all positions failed")
+            self.system_console.log(f"Close positions failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Close Positions Failed", str(exc))
+
+    async def _cancel_all_orders_async(self):
+        broker = getattr(self.controller, "broker", None)
+        if broker is None:
+            return
+
+        try:
+            results = await broker.cancel_all_orders()
+            if results is True:
+                count = 1
+            elif isinstance(results, list):
+                count = len(results)
+            elif results:
+                count = 1
+            else:
+                count = 0
+
+            self.system_console.log(f"Canceled {count} open order(s).", "INFO")
+            QMessageBox.information(
+                self,
+                "Cancel Orders",
+                "Canceled all open orders." if count else "No open orders were found.",
+            )
+        except Exception as exc:
+            self.logger.exception("Cancel-all orders failed")
+            self.system_console.log(f"Cancel orders failed: {exc}", "ERROR")
+            QMessageBox.critical(self, "Cancel Orders Failed", str(exc))
 
     def _open_docs(self):
         self._open_text_window(
@@ -2504,6 +2948,29 @@ class Terminal(QMainWindow):
         label.setText(display)
         label.setToolTip(tooltip or str(value))
 
+    def _system_status_exchange_display(self):
+        broker = getattr(self.controller, "broker", None)
+        config = getattr(self.controller, "config", None)
+        broker_config = getattr(config, "broker", None)
+
+        exchange = getattr(broker, "exchange_name", None)
+        if not exchange and broker_config is not None:
+            exchange = getattr(broker_config, "exchange", None)
+
+        normalized = str(exchange or "Unknown").strip()
+        normalized_lower = normalized.lower()
+
+        if normalized_lower == "stellar":
+            horizon_url = getattr(broker, "horizon_url", "")
+            if horizon_url:
+                return "Stellar Horizon", horizon_url
+            return "Stellar Horizon", "stellar"
+
+        if not normalized:
+            return "Unknown", "Unknown"
+
+        return normalized, normalized
+
     def _refresh_terminal(self):
 
         try:
@@ -2515,7 +2982,7 @@ class Terminal(QMainWindow):
             spread = getattr(controller, "spread_pct", 0)
             positions = getattr(controller.portfolio, "positions", {})
             symbols = getattr(controller, "symbols", [])
-            exchange = getattr(controller.broker, "exchange_name", "Unknown")
+            exchange_display, exchange_tooltip = self._system_status_exchange_display()
 
             free = balance.get("free", 0) if isinstance(balance, dict) else 0
             used = balance.get("used", 0) if isinstance(balance, dict) else 0
@@ -2528,7 +2995,7 @@ class Terminal(QMainWindow):
                 used if isinstance(used, dict) else {"USDT": used}
             )
 
-            self._set_status_value("Exchange", exchange)
+            self._set_status_value("Exchange", exchange_display, exchange_tooltip)
 
             self._set_status_value("Symbols Loaded", len(symbols))
 
@@ -2564,6 +3031,7 @@ class Terminal(QMainWindow):
     def _refresh_markets(self):
 
         self.symbols_table.setRowCount(0)
+        self._configure_market_watch_table()
 
         for symbol in self.controller.symbols:
 
@@ -2573,7 +3041,10 @@ class Terminal(QMainWindow):
             self.symbols_table.setItem(row, 0, QTableWidgetItem(symbol))
             self.symbols_table.setItem(row, 1, QTableWidgetItem("-"))
             self.symbols_table.setItem(row, 2, QTableWidgetItem("-"))
-            self.symbols_table.setItem(row, 3, QTableWidgetItem("⏳"))
+            usd_column = self._market_watch_usd_column()
+            if usd_column is not None:
+                self.symbols_table.setItem(row, usd_column, QTableWidgetItem("-"))
+            self.symbols_table.setItem(row, self._market_watch_status_column(), QTableWidgetItem("⏳"))
 
     def _create_system_status_panel(self):
 
@@ -3362,14 +3833,16 @@ def _hotfix_apply_settings_values(self, values, persist=True, reload_chart=False
     if hasattr(self, "orderbook_timer") and self.orderbook_timer is not None:
         self.orderbook_timer.start(orderbook_interval_ms)
 
-    if self.chart_tabs.count() > 0:
-        current_index = self.chart_tabs.currentIndex()
-        current_chart = self.chart_tabs.widget(current_index)
-        if isinstance(current_chart, ChartWidget):
-            current_chart.timeframe = timeframe
-            self.chart_tabs.setTabText(current_index, f"{current_chart.symbol} ({timeframe})")
-            if reload_chart and hasattr(self.controller, "request_candle_data"):
-                asyncio.get_event_loop().create_task(
+        if self.chart_tabs.count() > 0:
+            current_index = self.chart_tabs.currentIndex()
+            current_chart = self.chart_tabs.widget(current_index)
+            if isinstance(current_chart, ChartWidget):
+                current_chart.timeframe = timeframe
+                if hasattr(current_chart, "refresh_context_display"):
+                    current_chart.refresh_context_display()
+                self.chart_tabs.setTabText(current_index, f"{current_chart.symbol} ({timeframe})")
+                if reload_chart and hasattr(self.controller, "request_candle_data"):
+                    asyncio.get_event_loop().create_task(
                     self.controller.request_candle_data(
                         symbol=current_chart.symbol,
                         timeframe=timeframe,

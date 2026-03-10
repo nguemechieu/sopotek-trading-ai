@@ -1,33 +1,15 @@
+from types import SimpleNamespace
+
 import pytest
-from sopotek_trading_ai.src.sopotek_trading_ai.broker.ccxt_broker import CCXTBroker
+
+from broker.ccxt_broker import CCXTBroker
 
 
-
-@pytest.mark.asyncio
-async def test_fetch_ticker():
-
-    broker = CCXTBroker("binance")
-
-    await broker.connect()
-
-    ticker = await broker.fetch_ticker("BTC/USDT")
-
-    assert ticker is not None
-    assert "symbol" in ticker or "last" in ticker
-
-    await broker.close()
+def test_ccxt_broker_requires_exchange_name():
+    with pytest.raises(ValueError):
+        CCXTBroker(SimpleNamespace(exchange=None))
 
 
-@pytest.mark.asyncio
-async def test_fetch_order_book():
-
-    broker = CCXTBroker("binance")
-
-    await broker.connect()
-
-    orderbook = await broker.fetch_order_book("BTC/USDT")
-
-    assert "bids" in orderbook
-    assert "asks" in orderbook
-
-    await broker.close()
+def test_ccxt_broker_stores_exchange_name_from_config():
+    broker = CCXTBroker(SimpleNamespace(exchange="binance", api_key=None, secret=None, mode="live"))
+    assert broker.exchange_name == "binance"

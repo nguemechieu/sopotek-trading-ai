@@ -1,7 +1,7 @@
 import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore
-from PySide6.QtWidgets import QSplitter, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QLabel, QHBoxLayout, QSplitter, QVBoxLayout, QWidget
 from pyqtgraph import DateAxisItem, InfiniteLine, PlotWidget, ScatterPlotItem, SignalProxy, TextItem, mkPen
 
 from frontend.ui.chart.chart_items import CandlestickItem
@@ -27,10 +27,42 @@ class ChartWidget(QWidget):
         self.heatmap_buffer = []
         self.max_heatmap_rows = 220
         self.max_heatmap_levels = 120
+        self._last_df = None
+        self._last_x = None
+        self._watermark_initialized = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setSpacing(6)
+
+        self.info_bar = QFrame()
+        self.info_bar.setStyleSheet(
+            """
+            QFrame {
+                background-color: #0d1728;
+                border: 1px solid #1e324d;
+                border-radius: 10px;
+            }
+            """
+        )
+        info_layout = QHBoxLayout(self.info_bar)
+        info_layout.setContentsMargins(12, 8, 12, 8)
+        info_layout.setSpacing(14)
+
+        self.market_title_label = QLabel()
+        self.market_title_label.setStyleSheet("color: #eef4ff; font-weight: 700; font-size: 13px;")
+        info_layout.addWidget(self.market_title_label, 1)
+
+        self.market_meta_label = QLabel()
+        self.market_meta_label.setStyleSheet("color: #92a7c7; font-size: 12px;")
+        info_layout.addWidget(self.market_meta_label, 2)
+
+        self.ohlcv_label = QLabel()
+        self.ohlcv_label.setStyleSheet("color: #d8e6ff; font-weight: 600; font-size: 12px;")
+        self.ohlcv_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        info_layout.addWidget(self.ohlcv_label, 3)
+
+        layout.addWidget(self.info_bar)
 
         self.splitter = QSplitter(QtCore.Qt.Orientation.Vertical)
         self.splitter.setChildrenCollapsible(False)
@@ -138,12 +170,25 @@ class ChartWidget(QWidget):
         self.text_item = TextItem(color="#e3f2fd")
         self.price_plot.addItem(self.text_item)
 
+        self.watermark_item = TextItem(
+            html="",
+            anchor=(0.5, 0.5),
+            border=None,
+            fill=None,
+        )
+        self.watermark_item.setZValue(-10)
+        self.price_plot.addItem(self.watermark_item)
+        self.price_plot.getPlotItem().vb.sigRangeChanged.connect(self._update_watermark_position)
+
         self.proxy = SignalProxy(self.price_plot.scene().sigMouseMoved, rateLimit=60, slot=self._mouse_moved)
 
         self.splitter.setStretchFactor(0, 8)
         self.splitter.setStretchFactor(1, 2)
         self.splitter.setStretchFactor(2, 2)
         self.splitter.setSizes([720, 170, 170])
+
+        self._update_chart_header()
+        self._update_watermark_html()
 
     def _mouse_moved(self, evt):
         pos = evt[0]
@@ -158,6 +203,140 @@ class ChartWidget(QWidget):
         self.h_line.setPos(y)
         self.text_item.setHtml(f"<span style='color:#e3f2fd'>Price: {y:.6f}</span>")
         self.text_item.setPos(x, y)
+        self._update_ohlcv_for_x(x)
+
+    def _active_broker_name(self):
+        broker = getattr(self.controller, "broker", None)
+        if broker is not None:
+            name = getattr(broker, "exchange_name", None)
+            if name:
+                return str(name)
+
+        config = getattr(self.controller, "config", None)
+        broker_config = getattr(config, "broker", None)
+        if broker_config is not None:
+            exchange = getattr(broker_config, "exchange", None)
+            if exchange:
+                return str(exchange)
+
+        return "Broker"
+
+    def _symbol_parts(self):
+        if "/" not in str(self.symbol):
+            return str(self.symbol).upper(), ""
+        base, quote = str(self.symbol).upper().split("/", 1)
+        return base, quote
+
+    def _timeframe_description(self):
+        mapping = {
+            "1m": "1 minute chart",
+            "5m": "5 minute chart",
+            "15m": "15 minute chart",
+            "30m": "30 minute chart",
+            "1h": "1 hour chart",
+            "4h": "4 hour chart",
+            "1d": "1 day chart",
+            "1w": "1 week chart",
+            "1mn": "1 month chart",
+        }
+        return mapping.get(str(self.timeframe).lower(), f"{self.timeframe} chart")
+
+    def _update_chart_header(self):
+        base, quote = self._symbol_parts()
+        broker_name = self._active_broker_name().upper()
+        self.market_title_label.setText(f"{self.symbol}  {self.timeframe.upper()}  |  {broker_name}")
+
+        if quote:
+            self.market_meta_label.setText(
+                f"{base} priced in {quote}  |  Quote asset {quote} against base asset {base}  |  {self._timeframe_description()}"
+            )
+        else:
+            self.market_meta_label.setText(self._timeframe_description())
+
+    def _update_watermark_html(self):
+        base, quote = self._symbol_parts()
+        description = f"{base} in {quote}" if quote else base
+        self.watermark_item.setHtml(
+            (
+                "<div style='text-align:center;'>"
+                f"<div style='color: rgba(210,225,255,0.12); font-size: 34px; font-weight: 700;'>{self.symbol}</div>"
+                f"<div style='color: rgba(160,188,230,0.10); font-size: 22px; font-weight: 600;'>{self.timeframe.upper()}</div>"
+                f"<div style='color: rgba(160,188,230,0.10); font-size: 12px;'>{description}</div>"
+                "</div>"
+            )
+        )
+
+    def refresh_context_display(self):
+        self._update_chart_header()
+        self._update_watermark_html()
+        self._update_watermark_position()
+
+    def _update_watermark_position(self, *_args):
+        try:
+            x_range, y_range = self.price_plot.viewRange()
+            center_x = (float(x_range[0]) + float(x_range[1])) / 2.0
+            center_y = (float(y_range[0]) + float(y_range[1])) / 2.0
+            self.watermark_item.setPos(center_x, center_y)
+            self._watermark_initialized = True
+        except Exception:
+            return
+
+    def _format_metric(self, value, digits=6):
+        try:
+            numeric = float(value)
+        except Exception:
+            return "-"
+        if abs(numeric) >= 1000:
+            return f"{numeric:,.2f}"
+        if abs(numeric) >= 1:
+            return f"{numeric:,.{min(digits, 4)}f}"
+        return f"{numeric:,.{digits}f}"
+
+    def _format_volume(self, value):
+        try:
+            numeric = float(value)
+        except Exception:
+            return "-"
+        if numeric >= 1_000_000_000:
+            return f"{numeric / 1_000_000_000:.2f}B"
+        if numeric >= 1_000_000:
+            return f"{numeric / 1_000_000:.2f}M"
+        if numeric >= 1_000:
+            return f"{numeric / 1_000:.2f}K"
+        return f"{numeric:.2f}"
+
+    def _set_ohlcv_from_row(self, row):
+        if row is None:
+            self.ohlcv_label.setText("O -  H -  L -  C -  V -")
+            return
+
+        self.ohlcv_label.setText(
+            "  ".join(
+                [
+                    f"O {self._format_metric(row.get('open', 0.0))}",
+                    f"H {self._format_metric(row.get('high', 0.0))}",
+                    f"L {self._format_metric(row.get('low', 0.0))}",
+                    f"C {self._format_metric(row.get('close', 0.0))}",
+                    f"V {self._format_volume(row.get('volume', 0.0))}",
+                ]
+            )
+        )
+
+    def _update_ohlcv_for_x(self, x_value):
+        if self._last_df is None or self._last_x is None or len(self._last_x) == 0:
+            self._set_ohlcv_from_row(None)
+            return
+
+        try:
+            index = int(np.nanargmin(np.abs(self._last_x - float(x_value))))
+        except Exception:
+            index = len(self._last_df) - 1
+
+        if index < 0 or index >= len(self._last_df):
+            return
+
+        row = self._last_df.iloc[index]
+        self._set_ohlcv_from_row(row)
 
     def _extract_time_axis(self, df):
         if "timestamp" not in df.columns:
@@ -179,7 +358,7 @@ class ChartWidget(QWidget):
             import pandas as pd
 
             dt = pd.to_datetime(ts, errors="coerce", utc=True)
-            x = (dt.view("int64") / 1e9).to_numpy(dtype=float)
+            x = (dt.astype("int64") / 1e9).to_numpy(dtype=float)
             if np.isnan(x).all():
                 return np.arange(len(df), dtype=float)
             return x
@@ -496,6 +675,8 @@ class ChartWidget(QWidget):
 
         x = self._extract_time_axis(df)
         width = self._infer_candle_width(x)
+        self._last_df = df.copy()
+        self._last_x = np.array(x, dtype=float)
 
         candles = np.column_stack(
             [
@@ -522,6 +703,8 @@ class ChartWidget(QWidget):
         self._update_indicators(df, x)
 
         self.price_plot.enableAutoRange()
+        self.refresh_context_display()
+        self._update_ohlcv_for_x(self._last_x[-1] if len(self._last_x) else 0.0)
 
     def update_price_lines(self, bid: float, ask: float, last: float | None = None):
         try:
