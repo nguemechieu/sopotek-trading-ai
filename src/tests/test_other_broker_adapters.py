@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -398,6 +399,58 @@ def test_oanda_broker_cancels_orders(monkeypatch):
         all_canceled = await broker.cancel_all_orders(symbol="EUR/USD")
         assert len(all_canceled) == 1
         assert all_canceled[0]["status"] == "canceled"
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_oanda_broker_surfaces_reject_reason(monkeypatch):
+    import aiohttp
+    import broker.oanda_broker as oanda_module
+
+    class RejectResponse(FakeResponse):
+        def __init__(self, payload, status=400, message="Bad Request"):
+            super().__init__(payload)
+            self.status = status
+            self.message = message
+
+        def raise_for_status(self):
+            raise aiohttp.ClientResponseError(
+                request_info=None,
+                history=(),
+                status=self.status,
+                message=self.message,
+                headers=None,
+            )
+
+        async def text(self):
+            return json.dumps(self.payload)
+
+    class RejectSession(FakeOandaSession):
+        def request(self, method, url, headers=None, params=None, json=None):
+            if url.endswith("/instruments"):
+                return FakeResponse({"instruments": [{"name": "EUR_USD"}]})
+            if url.endswith("/orders") and method == "POST":
+                return RejectResponse(
+                    {
+                        "errorMessage": "The account has insufficient margin available.",
+                        "orderRejectTransaction": {"rejectReason": "INSUFFICIENT_MARGIN"},
+                    }
+                )
+            return super().request(method, url, headers=headers, params=params, json=json)
+
+    monkeypatch.setattr(oanda_module.aiohttp, "ClientSession", RejectSession)
+
+    async def scenario():
+        broker = OandaBroker(SimpleNamespace(api_key="token", account_id="acct-1", mode="live"))
+        try:
+            await broker.create_order("EUR/USD", "buy", 1, type="market")
+        except RuntimeError as exc:
+            message = str(exc)
+            assert "insufficient margin available" in message.lower()
+            assert "insufficient_margin" in message.lower()
+        else:
+            raise AssertionError("Expected Oanda rejection to raise RuntimeError")
         await broker.close()
 
     asyncio.run(scenario())

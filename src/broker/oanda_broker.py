@@ -1,3 +1,4 @@
+import json
 import logging
 
 import aiohttp
@@ -69,11 +70,33 @@ class OandaBroker(BaseBroker):
                 response.raise_for_status()
             except aiohttp.ClientResponseError as exc:
                 detail = ""
+                payload_json = {}
                 try:
                     payload_text = await response.text()
                     detail = payload_text.strip()
+                    if detail:
+                        payload_json = json.loads(detail)
                 except Exception:
                     detail = ""
+                    payload_json = {}
+
+                if isinstance(payload_json, dict):
+                    detail_parts = []
+                    error_message = payload_json.get("errorMessage") or payload_json.get("message")
+                    reject_transaction = payload_json.get("orderRejectTransaction") or {}
+                    reject_reason = ""
+                    if isinstance(reject_transaction, dict):
+                        reject_reason = (
+                            reject_transaction.get("rejectReason")
+                            or reject_transaction.get("reason")
+                            or ""
+                        )
+                    if error_message:
+                        detail_parts.append(str(error_message).strip())
+                    if reject_reason:
+                        detail_parts.append(str(reject_reason).strip())
+                    if detail_parts:
+                        detail = " | ".join(part for part in detail_parts if part)
 
                 message = f"{exc.status} {exc.message}"
                 if detail:

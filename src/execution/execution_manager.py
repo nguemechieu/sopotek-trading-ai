@@ -508,12 +508,36 @@ class ExecutionManager:
             except Exception as exc:
                 message = str(exc)
                 lowered = message.lower()
-                if any(
-                    token in lowered
-                    for token in ("market is closed", "min_notional", "insufficient balance", "too many requests", "429")
-                ):
+                if any(token in lowered for token in ("too many requests", "429")):
                     self._set_cooldown(symbol, 300, message)
                     return None
+                if any(token in lowered for token in ("market is closed", "min_notional", "insufficient balance")):
+                    self._set_cooldown(symbol, 300, message)
+                    return None
+                if any(
+                    token in lowered
+                    for token in (
+                        "insufficient margin",
+                        "insufficient funds",
+                        "order rejected",
+                        "rejected",
+                        "rejectreason",
+                    )
+                ):
+                    prepared_order["timestamp"] = datetime.now(timezone.utc).isoformat()
+                    rejected_execution = {
+                        "symbol": symbol,
+                        "side": normalized_order["side"],
+                        "amount": prepared_order.get("amount"),
+                        "type": prepared_order.get("type", order_type),
+                        "price": prepared_order.get("price"),
+                        "status": "rejected",
+                        "reason": message,
+                        "raw": {"error": message},
+                    }
+                    self._set_cooldown(symbol, 120, message)
+                    await self._handle_order_update(rejected_execution, prepared_order, allow_tracking=False)
+                    return rejected_execution
                 raise
             prepared_order["timestamp"] = datetime.now(timezone.utc).isoformat()
             await self._handle_order_update(execution, prepared_order)

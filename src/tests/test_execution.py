@@ -68,6 +68,21 @@ class RateLimitedBroker(MockBroker):
         raise RuntimeError("429 Too Many Requests")
 
 
+class RejectedOrderBroker(MockBroker):
+    async def create_order(
+        self,
+        symbol,
+        side,
+        amount,
+        type="market",
+        price=None,
+        params=None,
+        stop_loss=None,
+        take_profit=None,
+    ):
+        raise RuntimeError("400 Bad Request: Order rejected | INSUFFICIENT_MARGIN")
+
+
 class TrackingBroker(MockBroker):
     def __init__(self, balance=None, markets=None):
         super().__init__(balance=balance, markets=markets)
@@ -190,6 +205,22 @@ def test_execute_cools_down_on_rate_limit():
 
     assert order is None
     assert manager._cooldown_remaining("BTC/USDT") > 0
+
+
+def test_execute_returns_rejected_order_for_insufficient_margin():
+    broker = RejectedOrderBroker(balance={"free": {"USDT": 1000}})
+    bus = EventBus()
+    notifications = []
+    manager = ExecutionManager(broker, bus, OrderRouter(broker), trade_notifier=notifications.append)
+
+    order = asyncio.run(
+        manager.execute(symbol="BTC/USDT", side="buy", amount=0.01, price=100)
+    )
+
+    assert order["status"] == "rejected"
+    assert notifications[-1]["status"] == "rejected"
+    assert manager._cooldown_remaining("BTC/USDT") > 0
+    assert bus.queue.empty()
 
 
 def test_execute_propagates_stop_loss_and_take_profit():
