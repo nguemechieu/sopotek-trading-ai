@@ -14,7 +14,7 @@ class BrokerConfig(BaseModel):
 
     exchange: Optional[str] = Field(
         default=None,
-        description="Exchange name (binance, coinbase, alpaca, oanda)"
+        description="Exchange name (binance, coinbase, stellar, alpaca, oanda)"
     )
 
     mode: str = Field(
@@ -24,7 +24,14 @@ class BrokerConfig(BaseModel):
 
     api_key: Optional[str] = None
     secret: Optional[str] = None
+    password: Optional[str] = None
+    passphrase: Optional[str] = None
+    uid: Optional[str] = None
     account_id: Optional[str] = None
+    sandbox: bool = False
+    timeout: int = 30000
+    options: dict = Field(default_factory=dict)
+    params: dict = Field(default_factory=dict)
     close: float = Field( default=None,
         description="Close broker"
     )

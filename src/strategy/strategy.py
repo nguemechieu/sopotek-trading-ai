@@ -27,11 +27,32 @@ class Strategy:
     # ==========================================================
 
     def compute_features(self, candles):
+        if not candles:
+            return pd.DataFrame(
+                columns=["timestamp", "open", "high", "low", "close", "volume"]
+            )
+
+        normalized = []
+        for row in candles:
+            if isinstance(row, (list, tuple)) and len(row) >= 6:
+                normalized.append(list(row[:6]))
+
+        if not normalized:
+            return pd.DataFrame(
+                columns=["timestamp", "open", "high", "low", "close", "volume"]
+            )
 
         df = pd.DataFrame(
-            candles,
+            normalized,
             columns=["timestamp", "open", "high", "low", "close", "volume"]
         )
+
+        numeric_cols = ["open", "high", "low", "close", "volume"]
+        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < max(self.ema_slow, self.atr_period, self.rsi_period):
+            return pd.DataFrame(columns=df.columns)
 
         # Indicators
         df["rsi"] = RSIIndicator(df["close"], self.rsi_period).rsi()

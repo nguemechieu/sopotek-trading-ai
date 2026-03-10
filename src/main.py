@@ -1,6 +1,5 @@
 import asyncio
 import sys
-import traceback
 
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QIcon
@@ -16,8 +15,15 @@ app = QApplication(sys.argv)
 loop = QEventLoop(app)
 asyncio.set_event_loop(loop)
 
+
+def _stop_loop():
+    if loop.is_running():
+        loop.stop()
+
+
 window = AppController()
 window.setIconSize(QSize(48, 48))
+app.aboutToQuit.connect(_stop_loop)
 if __name__ == "__main__":
  window.setWindowIcon(QIcon("./assets/logo.ico"))
  window.setWindowIconText("Sopotek Trading AI Platform")
@@ -25,6 +31,9 @@ if __name__ == "__main__":
 
  window.show()
 
-with loop:
-    loop.run_forever()
+try:
+    with loop:
+        loop.run_forever()
+except KeyboardInterrupt:
+    pass
 

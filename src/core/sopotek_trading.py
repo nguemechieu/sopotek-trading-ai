@@ -22,20 +22,18 @@ class SopotekTrading:
         # =========================
 
         self.broker = getattr(controller, "broker", None)
-        self.broker = getattr(controller, "broker", None)
-
-        if self.broker is None:
-          raise RuntimeError("Broker not initialized")
-
-        if hasattr(self.broker, "exchange"):
-          pass
-        else:
-         raise RuntimeError("Controller broker is not a valid broker instance")
-        self.symbols = getattr(controller, "symbols", ["BTC/USDT", "ETH/USDT"])
-
 
         if self.broker is None:
             raise RuntimeError("Broker not initialized")
+
+        required_methods = ("fetch_ohlcv", "fetch_balance", "create_order")
+        missing = [name for name in required_methods if not hasattr(self.broker, name)]
+        if missing:
+            raise RuntimeError(
+                "Controller broker is missing required capabilities: " + ", ".join(missing)
+            )
+
+        self.symbols = getattr(controller, "symbols", ["BTC/USDT", "ETH/USDT"])
 
         # =========================
         # CORE COMPONENTS
@@ -62,8 +60,8 @@ class SopotekTrading:
         # SYSTEM SETTINGS
         # =========================
 
-        self.time_frame = "1d"
-        self.limit = 1000
+        self.time_frame = getattr(controller, "time_frame", "1h")
+        self.limit = getattr(controller, "limit", 300)
         self.running = False
 
         self.logger.info("Sopotek Trading System initialized")
@@ -79,17 +77,29 @@ class SopotekTrading:
 
 
 
-        balance = getattr(self.controller, "balances",...)
-        equity = 12#balance.get("total", {}).get("USDT", 10)
+        balance = getattr(self.controller, "balances", {}) or {}
+        equity = float(getattr(self.controller, "initial_capital", 10000) or 10000)
+        if isinstance(balance, dict):
+            total = balance.get("total")
+            if isinstance(total, dict):
+                for currency in ("USDT", "USD", "USDC", "BUSD"):
+                    value = total.get(currency)
+                    if value is None:
+                        continue
+                    try:
+                        equity = float(value)
+                        break
+                    except Exception:
+                        continue
 
 
 
         self.risk_engine = RiskEngine(
             account_equity=equity,
-            max_portfolio_risk=100,
-            max_risk_per_trade=50,
-            max_position_size_pct=25,
-            max_gross_exposure_pct=30
+            max_portfolio_risk=getattr(self.controller, "max_portfolio_risk", 100),
+            max_risk_per_trade=getattr(self.controller, "max_risk_per_trade", 50),
+            max_position_size_pct=getattr(self.controller, "max_position_size_pct", 25),
+            max_gross_exposure_pct=getattr(self.controller, "max_gross_exposure_pct", 30),
         )
 
         self.orchestrator = MultiSymbolOrchestrator(controller=self.controller,

@@ -30,6 +30,7 @@ ccxt~=2.9.10
 aiohttp>=3.9
 websockets>=11.0
 oandapyV20>=0.7
+stellar-sdk[aiohttp]>=13,<14
 
 # ==========================================
 # DATABASE

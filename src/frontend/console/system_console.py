@@ -91,6 +91,10 @@ class SystemConsole(QWidget):
     # External logging
     # ------------------------------------------------
 
-    def log(self, message):
+    def log(self, message, level=None):
+
+        if level:
+            self.log_signal.emit(f"[{level}] {message}")
+            return
 
         self.log_signal.emit(message)

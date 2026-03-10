@@ -7,7 +7,7 @@ import traceback
 from datetime import datetime, timezone
 
 import pandas as pd
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QSettings, Signal
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QStackedWidget
 
 from broker.broker_factory import BrokerFactory
@@ -16,9 +16,11 @@ from core.sopotek_trading import SopotekTrading
 from event_bus.event_bus import EventBus
 from event_bus.event_types import EventType
 from frontend.ui.dashboard import Dashboard
+from frontend.ui.i18n import DEFAULT_LANGUAGE, normalize_language_code, translate
 from frontend.ui.terminal import Terminal
 from manager.broker_manager import BrokerManager
 from market_data.candle_buffer import CandleBuffer
+from market_data.orderbook_buffer import OrderBookBuffer
 from market_data.ticker_buffer import TickerBuffer
 from market_data.ticker_stream import TickerStream
 from market_data.websocket.alpaca_web_socket import AlpacaWebSocket
@@ -37,16 +39,23 @@ class AppController(QMainWindow):
     ticker_signal = Signal(str, float, float)
     connection_signal = Signal(str)
     orderbook_signal = Signal(str, list, list)
+    ai_signal_monitor = Signal(dict)
 
     strategy_debug_signal = Signal(dict)
     autotrade_toggle = Signal(bool)
 
     logout_requested = Signal(str)
     training_status_signal = Signal(str, str)
+    language_changed = Signal(str)
 
     ALLOWED_CRYPTO_QUOTES = {"USDT", "USD", "USDC", "BUSD", "BTC", "ETH"}
     BANNED_BASE_TOKENS = {"USD4", "FAKE", "TEST"}
     BANNED_BASE_SUFFIXES = {"UP", "DOWN", "BULL", "BEAR", "3L", "3S", "5L", "5S"}
+    PREFERRED_BASES = [
+        "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX",
+        "DOT", "LINK", "LTC", "ATOM", "AAVE", "NEAR", "UNI", "MKR",
+    ]
+    QUOTE_PRIORITY = {"USDT": 0, "USD": 1, "USDC": 2, "BUSD": 3, "BTC": 4, "ETH": 5}
 
     def __init__(self):
         super().__init__()
@@ -58,6 +67,11 @@ class AppController(QMainWindow):
         self._ws_task = None
         self._ws_bus_task = None
         self.ws_bus = None
+        self.ws_manager = None
+        self.settings = QSettings("Sopotek", "TradingPlatform")
+        self.language_code = normalize_language_code(
+            self.settings.value("ui/language", DEFAULT_LANGUAGE)
+        )
 
         self.logger = logging.getLogger("AppController")
         self.logger.setLevel(logging.INFO)
@@ -95,6 +109,7 @@ class AppController(QMainWindow):
 
         self.candle_buffer = CandleBuffer(max_length=self.limit)
         self.candle_buffers = {}
+        self.orderbook_buffer = OrderBookBuffer()
         self.ticker_buffer = TickerBuffer(max_length=self.limit)
 
         self.symbols = ["BTC/USDT", "ETH/USDT", "XLM/USDT"]
@@ -106,8 +121,22 @@ class AppController(QMainWindow):
             self._setup_paths()
             self._setup_data()
             self._setup_ui(self.controller)
+            self.setWindowTitle(self.tr("app.window_title"))
         except Exception:
             traceback.print_exc()
+
+    def tr(self, key, **kwargs):
+        return translate(self.language_code, key, **kwargs)
+
+    def set_language(self, language_code):
+        normalized = normalize_language_code(language_code)
+        if normalized == self.language_code:
+            return
+
+        self.language_code = normalized
+        self.settings.setValue("ui/language", normalized)
+        self.setWindowTitle(self.tr("app.window_title"))
+        self.language_changed.emit(normalized)
 
     def _setup_paths(self):
         self.data_dir = "data"
@@ -183,7 +212,7 @@ class AppController(QMainWindow):
                 await self.broker.connect()
 
                 raw_symbols = await self._fetch_symbols(self.broker)
-                filtered_symbols = self._filter_symbols_for_trading(raw_symbols, broker_type)
+                filtered_symbols = self._filter_symbols_for_trading(raw_symbols, broker_type, exchange)
                 self.symbols = await self._select_trade_symbols(filtered_symbols, broker_type)
 
                 self.balances = await self._fetch_balances(self.broker)
@@ -241,7 +270,10 @@ class AppController(QMainWindow):
 
         return [s for s in symbols if s]
 
-    def _filter_symbols_for_trading(self, symbols, broker_type):
+    def _filter_symbols_for_trading(self, symbols, broker_type, exchange=None):
+        if str(exchange or "").lower() == "stellar":
+            return list(dict.fromkeys(symbols))
+
         if broker_type != "crypto":
             return list(dict.fromkeys(symbols))
 
@@ -270,8 +302,21 @@ class AppController(QMainWindow):
         if broker_type != "crypto":
             return symbols[:50]
 
-        ranked = await self._rank_symbols_by_risk_return(symbols, max_candidates=120, top_n=30)
-        return ranked if ranked else symbols[:30]
+        prioritized = self._prioritize_symbols_for_trading(symbols, top_n=30)
+        return prioritized if prioritized else symbols[:30]
+
+    def _prioritize_symbols_for_trading(self, symbols, top_n=30):
+        def sort_key(symbol):
+            if not isinstance(symbol, str) or "/" not in symbol:
+                return (99, 99, symbol)
+
+            base, quote = symbol.upper().split("/", 1)
+            preferred_rank = self.PREFERRED_BASES.index(base) if base in self.PREFERRED_BASES else len(self.PREFERRED_BASES)
+            quote_rank = self.QUOTE_PRIORITY.get(quote, 99)
+            return (quote_rank, preferred_rank, base, quote)
+
+        ordered = sorted(dict.fromkeys(symbols), key=sort_key)
+        return ordered[:top_n]
 
     async def _rank_symbols_by_risk_return(self, symbols, max_candidates=120, top_n=30):
         candidates = symbols[:max_candidates]
@@ -357,7 +402,14 @@ class AppController(QMainWindow):
 
         # Oanda stays on polling as requested.
         if exchange == "oanda":
+            self.ws_manager = None
             self.logger.info("Using polling market data for Oanda")
+            await self._start_ticker_polling()
+            return
+
+        if exchange == "stellar":
+            self.ws_manager = None
+            self.logger.info("Using polling market data for Stellar Horizon")
             await self._start_ticker_polling()
             return
 
@@ -367,9 +419,11 @@ class AppController(QMainWindow):
 
             ws_client = self._build_ws_client(exchange)
             if ws_client is None:
+                self.ws_manager = None
                 await self._start_ticker_polling()
                 return
 
+            self.ws_manager = ws_client
             self._ws_bus_task = self._create_task(self.ws_bus.start(), "ws_event_bus")
             self._ws_task = self._create_task(ws_client.connect(), "ws_connect")
 
@@ -482,22 +536,28 @@ class AppController(QMainWindow):
             return None
 
         if hasattr(self.broker, "fetch_ticker"):
-            tick = await self.broker.fetch_ticker(symbol)
-            if isinstance(tick, dict):
-                return tick
+            try:
+                tick = await self.broker.fetch_ticker(symbol)
+                if isinstance(tick, dict):
+                    return tick
+            except Exception as exc:
+                self.logger.debug("Ticker fetch failed for %s: %s", symbol, exc)
 
         if hasattr(self.broker, "fetch_price"):
-            price = await self.broker.fetch_price(symbol)
-            if price is None:
-                return None
-            price = float(price)
-            return {
-                "symbol": symbol,
-                "price": price,
-                "bid": price * 0.9998,
-                "ask": price * 1.0002,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
+            try:
+                price = await self.broker.fetch_price(symbol)
+                if price is None:
+                    return None
+                price = float(price)
+                return {
+                    "symbol": symbol,
+                    "price": price,
+                    "bid": price * 0.9998,
+                    "ask": price * 1.0002,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            except Exception as exc:
+                self.logger.debug("Price fetch failed for %s: %s", symbol, exc)
 
         return None
 
@@ -522,6 +582,129 @@ class AppController(QMainWindow):
 
         now = datetime.now(timezone.utc).isoformat()
         return [[now, price, price, price, price, 0.0] for _ in range(min(limit, 50))]
+
+    async def _safe_fetch_orderbook(self, symbol, limit=20):
+        if self.broker and hasattr(self.broker, "fetch_orderbook"):
+            try:
+                book = await self.broker.fetch_orderbook(symbol, limit=limit)
+                if isinstance(book, dict):
+                    return book
+            except Exception as exc:
+                self.logger.debug("Orderbook fetch failed for %s: %s", symbol, exc)
+
+        tick = await self._safe_fetch_ticker(symbol)
+        if not isinstance(tick, dict):
+            return {"bids": [], "asks": []}
+
+        bid = float(tick.get("bid") or tick.get("price") or tick.get("last") or 0)
+        ask = float(tick.get("ask") or tick.get("price") or tick.get("last") or 0)
+        if bid <= 0 and ask <= 0:
+            return {"bids": [], "asks": []}
+
+        if bid <= 0:
+            bid = ask * 0.999
+        if ask <= 0:
+            ask = bid * 1.001
+
+        bids = [[bid * (1 - (i * 0.0005)), max(1.0, 10 - i)] for i in range(min(limit, 10))]
+        asks = [[ask * (1 + (i * 0.0005)), max(1.0, 10 - i)] for i in range(min(limit, 10))]
+        return {"bids": bids, "asks": asks}
+
+    async def request_orderbook(self, symbol, limit=20):
+        if not symbol:
+            return
+
+        orderbook = await self._safe_fetch_orderbook(symbol, limit=limit)
+        bids = orderbook.get("bids") if isinstance(orderbook, dict) else []
+        asks = orderbook.get("asks") if isinstance(orderbook, dict) else []
+
+        bids = bids or []
+        asks = asks or []
+
+        self.orderbook_buffer.update(symbol, bids, asks)
+        self.orderbook_signal.emit(symbol, bids, asks)
+
+    def publish_ai_signal(self, symbol, signal, candles=None):
+        if not symbol or not isinstance(signal, dict):
+            return
+
+        side = str(signal.get("side", "hold")).upper()
+        confidence = float(signal.get("confidence", 0.0) or 0.0)
+
+        closes = []
+        for row in candles or []:
+            if isinstance(row, (list, tuple)) and len(row) >= 5:
+                try:
+                    closes.append(float(row[4]))
+                except Exception:
+                    continue
+
+        volatility = 0.0
+        if len(closes) >= 2:
+            returns = []
+            for i in range(1, len(closes)):
+                prev = closes[i - 1]
+                cur = closes[i]
+                if prev:
+                    returns.append((cur - prev) / prev)
+            if returns:
+                mean_ret = sum(returns) / len(returns)
+                variance = sum((r - mean_ret) ** 2 for r in returns) / max(len(returns) - 1, 1)
+                volatility = variance ** 0.5
+
+        regime = "RANGE"
+        if side == "BUY":
+            regime = "TREND_UP"
+        elif side == "SELL":
+            regime = "TREND_DOWN"
+
+        payload = {
+            "symbol": symbol,
+            "signal": side,
+            "confidence": confidence,
+            "regime": regime,
+            "volatility": round(float(volatility), 6),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        self.ai_signal_monitor.emit(payload)
+
+    def publish_strategy_debug(self, symbol, signal, candles=None, features=None):
+        if not symbol or not isinstance(signal, dict):
+            return
+
+        feature_row = None
+        if features is not None:
+            try:
+                if not features.empty:
+                    feature_row = features.iloc[-1]
+            except Exception:
+                feature_row = None
+
+        index_value = len(candles or []) - 1
+        price_value = 0.0
+        if candles:
+            last_row = candles[-1]
+            if isinstance(last_row, (list, tuple)) and len(last_row) >= 5:
+                index_value = last_row[0]
+                try:
+                    price_value = float(last_row[4])
+                except Exception:
+                    price_value = 0.0
+
+        payload = {
+            "symbol": symbol,
+            "index": index_value,
+            "price": price_value,
+            "signal": str(signal.get("side", "hold")).upper(),
+            "rsi": round(float(feature_row["rsi"]), 4) if feature_row is not None and "rsi" in feature_row else 0.0,
+            "ema_fast": round(float(feature_row["ema_fast"]), 6) if feature_row is not None and "ema_fast" in feature_row else 0.0,
+            "ema_slow": round(float(feature_row["ema_slow"]), 6) if feature_row is not None and "ema_slow" in feature_row else 0.0,
+            "ml_probability": round(float(signal.get("confidence", 0.0) or 0.0), 4),
+            "reason": str(signal.get("reason", "")),
+        }
+
+        self.strategy_debug_signal.emit(payload)
 
     async def request_candle_data(self, symbol, timeframe="1h", limit=300):
         if not symbol:
@@ -557,10 +740,11 @@ class AppController(QMainWindow):
         self.candle_signal.emit(symbol, df)
 
     async def _warmup_visible_candles(self):
-        # Preload first symbols so initial chart has data immediately.
+        # Preload a very small working set so startup stays responsive.
+        warm_symbols = list(dict.fromkeys(self.symbols[:2]))
         tasks = [
-            self.request_candle_data(symbol=s, timeframe=self.time_frame, limit=300)
-            for s in self.symbols[:8]
+            self.request_candle_data(symbol=s, timeframe=self.time_frame, limit=180)
+            for s in warm_symbols
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -578,6 +762,7 @@ class AppController(QMainWindow):
                 self._ws_bus_task.cancel()
             self._ws_bus_task = None
             self.ws_bus = None
+            self.ws_manager = None
 
             if stop_trading and self.trading_system:
                 await self.trading_system.stop()
@@ -594,6 +779,13 @@ class AppController(QMainWindow):
 
         except Exception as e:
             self.logger.error("Cleanup error: %s", e)
+
+    def get_market_stream_status(self):
+        if self._ws_task and not self._ws_task.done():
+            return "Running"
+        if self._ticker_task and not self._ticker_task.done():
+            return "Polling"
+        return "Stopped"
 
     async def logout(self):
         try:

@@ -1,46 +1,154 @@
+from datetime import datetime
+from pathlib import Path
+
 import pandas as pd
-import numpy as np
 
 
 class ReportGenerator:
+    def __init__(self, trades=None, equity_history=None, output_dir="reports"):
+        self.trades = self._normalize_trades(trades)
+        self.equity_history = list(equity_history or [])
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ====================================
-    # PERFORMANCE REPORT
-    # ====================================
+    def _normalize_trades(self, trades):
+        if trades is None:
+            return pd.DataFrame()
+        if isinstance(trades, pd.DataFrame):
+            return trades.copy()
+        return pd.DataFrame(trades)
 
-    def generate(self, trades):
-        if trades.empty:
-            return {}
+    def generate(self, trades=None, equity_history=None):
+        trades_df = self._normalize_trades(trades) if trades is not None else self.trades
+        equity_curve = list(equity_history) if equity_history is not None else list(self.equity_history)
 
-        pnl = trades["pnl"].dropna()
+        if trades_df.empty:
+            return {
+                "total_trades": 0,
+                "closed_trades": 0,
+                "total_profit": 0.0,
+                "win_rate": 0.0,
+                "avg_profit": 0.0,
+                "sharpe_ratio": 0.0,
+                "max_drawdown": 0.0,
+                "final_equity": float(equity_curve[-1]) if equity_curve else 0.0,
+            }
 
-        total_profit = pnl.sum()
+        pnl = pd.to_numeric(trades_df.get("pnl", pd.Series(dtype=float)), errors="coerce").dropna()
+        closed_trade_count = int((trades_df.get("type") == "EXIT").sum()) if "type" in trades_df else len(pnl)
 
-        win_rate = (pnl > 0).mean()
+        total_profit = float(pnl.sum()) if not pnl.empty else 0.0
+        win_rate = float((pnl > 0).mean()) if not pnl.empty else 0.0
+        avg_profit = float(pnl.mean()) if not pnl.empty else 0.0
+        sharpe = float(pnl.mean() / pnl.std()) if len(pnl) > 1 and float(pnl.std()) != 0 else 0.0
 
-        avg_profit = pnl.mean()
+        if not equity_curve and "equity" in trades_df:
+            equity_curve = pd.to_numeric(trades_df["equity"], errors="coerce").dropna().tolist()
 
-        sharpe = pnl.mean() / pnl.std() if pnl.std() != 0 else 0
-
-        max_drawdown = self._max_drawdown(pnl)
+        max_drawdown = float(self._max_drawdown(equity_curve))
+        final_equity = float(equity_curve[-1]) if equity_curve else 0.0
 
         return {
+            "total_trades": int(len(trades_df)),
+            "closed_trades": int(closed_trade_count),
             "total_profit": total_profit,
             "win_rate": win_rate,
             "avg_profit": avg_profit,
             "sharpe_ratio": sharpe,
-            "max_drawdown": max_drawdown
+            "max_drawdown": max_drawdown,
+            "final_equity": final_equity,
         }
 
-    # ====================================
-    # MAX DRAWDOWN
-    # ====================================
+    def _max_drawdown(self, equity_curve):
+        if not equity_curve:
+            return 0.0
 
-    def _max_drawdown(self, pnl):
-        cumulative = pnl.cumsum()
+        series = pd.Series(equity_curve, dtype=float)
+        peak = series.cummax()
+        drawdown = peak - series
+        return float(drawdown.max())
 
-        peak = cumulative.cummax()
+    def _timestamped_path(self, suffix):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return self.output_dir / f"backtest_report_{stamp}.{suffix}"
 
-        drawdown = peak - cumulative
+    def export_excel(self, path=None):
+        report = self.generate()
+        trades_df = self.trades.copy()
+        summary_df = pd.DataFrame([report])
 
-        return drawdown.max()
+        path = Path(path) if path else self._timestamped_path("xlsx")
+        try:
+            with pd.ExcelWriter(path) as writer:
+                trades_df.to_excel(writer, sheet_name="trades", index=False)
+                summary_df.to_excel(writer, sheet_name="summary", index=False)
+        except Exception:
+            path = path.with_suffix(".csv")
+            merged = trades_df.copy()
+            for key, value in report.items():
+                merged[key] = value
+            merged.to_csv(path, index=False)
+        return path
+
+    def export_pdf(self, path=None):
+        report = self.generate()
+        lines = [
+            "Sopotek Backtest Report",
+            "",
+        ]
+        for key, value in report.items():
+            lines.append(f"{key.replace('_', ' ').title()}: {value}")
+
+        path = Path(path) if path else self._timestamped_path("pdf")
+        self._write_simple_pdf(path, lines)
+        return path
+
+    def _write_simple_pdf(self, path, lines):
+        escaped = []
+        for line in lines:
+            escaped.append(
+                str(line).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            )
+
+        content_parts = ["BT", "/F1 12 Tf", "72 760 Td"]
+        for index, line in enumerate(escaped):
+            if index > 0:
+                content_parts.append("0 -16 Td")
+            content_parts.append(f"({line}) Tj")
+        content_parts.append("ET")
+        content = "\n".join(content_parts).encode("latin-1", errors="replace")
+
+        objects = []
+        objects.append(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+        objects.append(b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n")
+        objects.append(
+            b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >> endobj\n"
+        )
+        objects.append(
+            f"4 0 obj << /Length {len(content)} >> stream\n".encode("latin-1")
+            + content
+            + b"\nendstream endobj\n"
+        )
+        objects.append(b"5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n")
+
+        output = bytearray(b"%PDF-1.4\n")
+        offsets = [0]
+        for obj in objects:
+            offsets.append(len(output))
+            output.extend(obj)
+
+        xref_start = len(output)
+        output.extend(f"xref\n0 {len(objects) + 1}\n".encode("latin-1"))
+        output.extend(b"0000000000 65535 f \n")
+        for offset in offsets[1:]:
+            output.extend(f"{offset:010d} 00000 n \n".encode("latin-1"))
+
+        output.extend(
+            (
+                f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\n"
+                f"startxref\n{xref_start}\n%%EOF"
+            ).encode("latin-1")
+        )
+
+        path.write_bytes(output)

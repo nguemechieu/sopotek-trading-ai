@@ -2,6 +2,7 @@ from broker.ccxt_broker import CCXTBroker
 from broker.oanda_broker import OandaBroker
 from broker.alpaca_broker import AlpacaBroker
 from broker.paper_broker import PaperBroker
+from broker.stellar_broker import StellarBroker
 from config.config_validator import ConfigValidator
 
 
@@ -26,6 +27,8 @@ class BrokerFactory:
         # Special handling for paper trading
         if broker_cfg.exchange == "paper":
             return PaperBroker(broker_cfg)
+        if broker_cfg.exchange == "stellar":
+            return StellarBroker(broker_cfg)
 
         broker_class = BROKER_REGISTRY.get(broker_cfg.type)
 

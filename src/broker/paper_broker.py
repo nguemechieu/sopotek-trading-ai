@@ -1,7 +1,10 @@
+import logging
 from abc import ABC
+from types import SimpleNamespace
 from typing import Dict, Optional
 
 from broker.base_broker import BaseBroker
+from broker.ccxt_broker import CCXTBroker
 
 
 class PaperBroker(BaseBroker, ABC):
@@ -11,15 +14,21 @@ class PaperBroker(BaseBroker, ABC):
         super().__init__()
 
         self.controller = controller
-        self.logger = getattr(controller, "logger", None)
+        self.config = controller
+        self.logger = getattr(controller, "logger", None) or logging.getLogger("PaperBroker")
 
-        self.balance = getattr(controller, "paper_balance", 10000.0)
+        self.balance = getattr(controller, "paper_balance", None)
+        if self.balance is None:
+            self.balance = getattr(controller, "initial_balance", 10000.0)
+        self.mode = getattr(controller, "mode", "paper")
 
         self.positions: Dict = {}
         self.orders: Dict = {}
 
         self.order_id = 0
         self._connected = False
+        self.market_data_broker = None
+        self.market_data_exchange = self._resolve_market_data_exchange()
 
     # ======================================================
     # CONNECT
@@ -28,6 +37,8 @@ class PaperBroker(BaseBroker, ABC):
     async def connect(self):
 
         self._connected = True
+
+        await self._ensure_market_data_broker()
 
         if self.logger:
             self.logger.info("PaperBroker connected.")
@@ -47,8 +58,9 @@ class PaperBroker(BaseBroker, ABC):
 
         return {
             "equity": self.balance + self._unrealized_pnl(),
-            "free": self.balance,
-            "used": used,
+            "free": {currency: self.balance},
+            "used": {currency: used},
+            "total": {currency: self.balance + self._unrealized_pnl()},
             "currency": currency
         }
 
@@ -56,16 +68,231 @@ class PaperBroker(BaseBroker, ABC):
 
         return list(self.positions.values())
 
+    async def fetch_position(self, symbol):
+        return self.positions.get(symbol)
+
     # ======================================================
     # MARKET DATA (Delegated to Controller Price Feed)
     # ======================================================
 
-    async def fetch_price(self, symbol):
+    def _resolve_market_data_exchange(self):
+        broker_cfg = getattr(getattr(self.controller, "config", None), "broker", None)
+        params = dict(getattr(broker_cfg, "params", None) or getattr(self.controller, "params", None) or {})
+        exchange = (
+            params.get("paper_data_exchange")
+            or params.get("market_data_exchange")
+            or getattr(self.controller, "paper_data_exchange", None)
+        )
+        if exchange:
+            return str(exchange).lower()
+        return "binanceus"
 
-        if hasattr(self.controller, "get_price"):
+    def _supports_public_market_data(self, symbol=None):
+        if symbol and "/" in str(symbol):
+            return True
+        symbols = getattr(self.controller, "symbols", None) or []
+        return any("/" in str(item) for item in symbols)
+
+    def _build_market_data_config(self):
+        return SimpleNamespace(
+            exchange=self.market_data_exchange,
+            api_key=None,
+            secret=None,
+            password=None,
+            passphrase=None,
+            uid=None,
+            account_id=None,
+            wallet=None,
+            # Paper trading still needs public production market data.
+            mode="live",
+            sandbox=False,
+            timeout=30000,
+            options={},
+            params={},
+        )
+
+    async def _ensure_market_data_broker(self, symbol=None):
+        if self.market_data_broker is not None:
+            return self.market_data_broker
+
+        if not self._supports_public_market_data(symbol):
+            return None
+
+        try:
+            broker = CCXTBroker(self._build_market_data_config())
+            await broker.connect()
+            self.market_data_broker = broker
+        except Exception as exc:
+            self.market_data_broker = None
+            if self.logger:
+                self.logger.warning(
+                    "Paper market data bootstrap failed for %s: %s",
+                    self.market_data_exchange,
+                    exc,
+                )
+
+        return self.market_data_broker
+
+    def _update_local_ticker_cache(self, symbol, ticker):
+        controller = self.controller
+        if not isinstance(ticker, dict):
+            return
+
+        ticker_buffer = getattr(controller, "ticker_buffer", None)
+        if ticker_buffer and hasattr(ticker_buffer, "update"):
+            ticker_buffer.update(symbol, ticker)
+
+        ticker_stream = getattr(controller, "ticker_stream", None)
+        if ticker_stream and hasattr(ticker_stream, "update"):
+            ticker_stream.update(symbol, ticker)
+
+    def _extract_price(self, payload):
+        if payload is None:
+            return None
+
+        if isinstance(payload, dict):
+            for key in ("price", "last", "close", "bid", "ask"):
+                value = payload.get(key)
+                if value is None:
+                    continue
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+
+        return None
+
+    def _price_from_frame(self, frame):
+        if frame is None:
+            return None
+
+        try:
+            if getattr(frame, "empty", False):
+                return None
+
+            if hasattr(frame, "iloc"):
+                last_row = frame.iloc[-1]
+                if hasattr(last_row, "get"):
+                    for key in ("close", "price", "last"):
+                        value = last_row.get(key)
+                        if value is None:
+                            continue
+                        return float(value)
+
+                if hasattr(last_row, "__len__") and len(last_row) >= 5:
+                    return float(last_row.iloc[4])
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None
+
+        return None
+
+    def _cached_price(self, symbol):
+        controller = self.controller
+
+        ticker_buffer = getattr(controller, "ticker_buffer", None)
+        if ticker_buffer and hasattr(ticker_buffer, "latest"):
+            price = self._extract_price(ticker_buffer.latest(symbol))
+            if price is not None:
+                return price
+
+        ticker_stream = getattr(controller, "ticker_stream", None)
+        if ticker_stream and hasattr(ticker_stream, "get"):
+            price = self._extract_price(ticker_stream.get(symbol))
+            if price is not None:
+                return price
+
+        candle_buffers = getattr(controller, "candle_buffers", None) or {}
+        symbol_bucket = candle_buffers.get(symbol, {})
+        preferred_frame = getattr(controller, "time_frame", None) or getattr(controller, "timeframe", None)
+        if preferred_frame:
+            price = self._price_from_frame(symbol_bucket.get(preferred_frame))
+            if price is not None:
+                return price
+
+        for frame in symbol_bucket.values():
+            price = self._price_from_frame(frame)
+            if price is not None:
+                return price
+
+        candle_buffer = getattr(controller, "candle_buffer", None)
+        if candle_buffer and hasattr(candle_buffer, "get"):
+            price = self._price_from_frame(candle_buffer.get(symbol))
+            if price is not None:
+                return price
+
+        return None
+
+    async def fetch_price(self, symbol):
+        market_data_broker = await self._ensure_market_data_broker(symbol)
+        if market_data_broker and hasattr(market_data_broker, "fetch_ticker"):
+            try:
+                ticker = await market_data_broker.fetch_ticker(symbol)
+                if isinstance(ticker, dict):
+                    self._update_local_ticker_cache(symbol, ticker)
+                    price = self._extract_price(ticker)
+                    if price is not None:
+                        return price
+            except Exception:
+                pass
+
+        cached_price = self._cached_price(symbol)
+        if cached_price is not None:
+            return cached_price
+
+        controller_broker = getattr(self.controller, "broker", None)
+        if controller_broker is not self and hasattr(self.controller, "get_price"):
             return await self.controller.get_price(symbol)
 
         raise RuntimeError("Controller must provide price feed")
+
+    async def fetch_ticker(self, symbol):
+        market_data_broker = await self._ensure_market_data_broker(symbol)
+        if market_data_broker and hasattr(market_data_broker, "fetch_ticker"):
+            try:
+                ticker = await market_data_broker.fetch_ticker(symbol)
+                if isinstance(ticker, dict):
+                    self._update_local_ticker_cache(symbol, ticker)
+                    return ticker
+            except Exception:
+                pass
+
+        price = await self.fetch_price(symbol)
+        return {"symbol": symbol, "last": float(price), "bid": float(price), "ask": float(price)}
+
+    async def fetch_orderbook(self, symbol, limit=50):
+        market_data_broker = await self._ensure_market_data_broker(symbol)
+        if market_data_broker and hasattr(market_data_broker, "fetch_orderbook"):
+            try:
+                orderbook = await market_data_broker.fetch_orderbook(symbol, limit=limit)
+                if isinstance(orderbook, dict):
+                    return orderbook
+            except Exception:
+                pass
+
+        ticker = await self.fetch_ticker(symbol)
+        return {
+            "symbol": symbol,
+            "bids": [[ticker["bid"], 0.0]],
+            "asks": [[ticker["ask"], 0.0]],
+        }
+
+    async def fetch_ohlcv(self, symbol, timeframe="1h", limit=100):
+        market_data_broker = await self._ensure_market_data_broker(symbol)
+        if market_data_broker and hasattr(market_data_broker, "fetch_ohlcv"):
+            try:
+                rows = await market_data_broker.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+                if rows:
+                    return rows
+            except Exception:
+                pass
+
+        if hasattr(self.controller, "candle_buffers"):
+            symbol_bucket = self.controller.candle_buffers.get(symbol, {})
+            frame = symbol_bucket.get(timeframe)
+            if frame is not None and hasattr(frame, "values"):
+                rows = frame.values.tolist()
+                return rows[-limit:]
+        return []
 
     # ======================================================
     # TRADING
@@ -75,9 +302,10 @@ class PaperBroker(BaseBroker, ABC):
             self,
             symbol: str,
             side: str,
-            order_type: str,
             amount: float,
+            type: str = "market",
             price: Optional[float] = None,
+            params: Optional[dict] = None,
             stop_loss: Optional[float] = None,
             take_profit: Optional[float] = None,
             slippage: Optional[float] = None
@@ -144,6 +372,7 @@ class PaperBroker(BaseBroker, ABC):
             "id": order_id,
             "symbol": symbol,
             "side": side,
+            "type": type,
             "price": price,
             "amount": amount,
             "status": "filled"
@@ -157,18 +386,32 @@ class PaperBroker(BaseBroker, ABC):
     # ORDER MANAGEMENT
     # ======================================================
 
-    async def fetch_open_orders(self):
+    async def fetch_orders(self, symbol=None, limit=None):
+        orders = list(self.orders.values())
+        if symbol is not None:
+            orders = [order for order in orders if order["symbol"] == symbol]
+        if limit is not None:
+            orders = orders[:limit]
+        return orders
 
-        return [
+    async def fetch_open_orders(self, symbol=None, limit=None):
+
+        orders = [
             o for o in self.orders.values()
-            if o["status"] == "open"
+            if o["status"] == "open" and (symbol is None or o["symbol"] == symbol)
         ]
+        if limit is not None:
+            orders = orders[:limit]
+        return orders
 
-    async def fetch_order(self, order_id):
+    async def fetch_order(self, order_id, symbol=None):
 
-        return self.orders.get(order_id)
+        order = self.orders.get(order_id)
+        if order and (symbol is None or order["symbol"] == symbol):
+            return order
+        return None
 
-    async def cancel_order(self, order_id):
+    async def cancel_order(self, order_id, symbol=None):
 
         order = self.orders.get(order_id)
 
@@ -177,11 +420,11 @@ class PaperBroker(BaseBroker, ABC):
 
         return order
 
-    async def cancel_all_orders(self):
+    async def cancel_all_orders(self, symbol=None):
 
         for order in self.orders.values():
 
-            if order["status"] == "open":
+            if order["status"] == "open" and (symbol is None or order["symbol"] == symbol):
                 order["status"] = "canceled"
 
         return True
@@ -191,21 +434,18 @@ class PaperBroker(BaseBroker, ABC):
     # ======================================================
 
     def _unrealized_pnl(self):
-
         pnl = 0
-
-        if not hasattr(self.controller, "price_cache"):
-            return 0
+        price_cache = getattr(self.controller, "price_cache", {}) or {}
 
         for symbol, position in self.positions.items():
-
-            price = self.controller.price_cache.get(symbol)
+            price = price_cache.get(symbol)
+            if price is None:
+                price = self._cached_price(symbol)
 
             if price:
-
                 pnl += (
-                               price - position["entry_price"]
-                       ) * position["amount"]
+                    price - position["entry_price"]
+                ) * position["amount"]
 
         return pnl
 
@@ -214,17 +454,37 @@ class PaperBroker(BaseBroker, ABC):
     # ======================================================
 
     async def fetch_symbols(self):
+        market_data_broker = await self._ensure_market_data_broker()
+        if market_data_broker and hasattr(market_data_broker, "fetch_symbols"):
+            try:
+                symbols = await market_data_broker.fetch_symbols()
+                if symbols:
+                    return symbols
+            except Exception:
+                pass
 
         if hasattr(self.controller, "symbols"):
             return self.controller.symbols
 
         return []
 
+    async def fetch_symbol(self):
+        return await self.fetch_symbols()
+
+    async def fetch_status(self):
+        return {"status": "ok" if self._connected else "disconnected", "broker": "paper"}
+
     # ======================================================
     # CLOSE
     # ======================================================
 
     async def close(self):
+        if self.market_data_broker is not None:
+            try:
+                await self.market_data_broker.close()
+            except Exception:
+                pass
+            self.market_data_broker = None
 
         self._connected = False
 

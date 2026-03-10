@@ -6,7 +6,18 @@ import logging
 
 class SymbolWorker:
 
-    def __init__(self, symbol, broker, strategy, execution_manager,timeframe,limit):
+    def __init__(
+        self,
+        symbol,
+        broker,
+        strategy,
+        execution_manager,
+        timeframe,
+        limit,
+        controller=None,
+        startup_delay=0.0,
+        poll_interval=2.0,
+    ):
         self.logger=logging.getLogger("SymbolWorker")
 
         self.symbol = symbol
@@ -15,10 +26,15 @@ class SymbolWorker:
         self.execution_manager = execution_manager
         self.timeframe = timeframe
         self.limit = limit
+        self.controller = controller
         self.running = True
+        self.startup_delay = max(0.0, float(startup_delay))
+        self.poll_interval = max(2.0, float(poll_interval))
 
 
     async def run(self):
+        if self.startup_delay > 0:
+            await asyncio.sleep(self.startup_delay)
 
         while self.running:
 
@@ -33,6 +49,21 @@ class SymbolWorker:
                 signal = self.strategy.generate_signal(candles)
 
                 if signal:
+                    if self.controller and hasattr(self.controller, "publish_ai_signal"):
+                        self.controller.publish_ai_signal(self.symbol, signal, candles=candles)
+                    if self.controller and hasattr(self.controller, "publish_strategy_debug"):
+                        features = None
+                        if hasattr(self.strategy, "compute_features"):
+                            try:
+                                features = self.strategy.compute_features(candles)
+                            except Exception:
+                                features = None
+                        self.controller.publish_strategy_debug(
+                            self.symbol,
+                            signal,
+                            candles=candles,
+                            features=features,
+                        )
 
                     await self.execution_manager.execute(
                         symbol=self.symbol,
@@ -41,7 +72,8 @@ class SymbolWorker:
                         price=signal.get("price")
                     )
 
-                await asyncio.sleep(2)
+                await asyncio.sleep(self.poll_interval)
 
             except Exception as e:
                 self.logger.error(f"Worker error {self.symbol}: {e}")
+                await asyncio.sleep(self.poll_interval)

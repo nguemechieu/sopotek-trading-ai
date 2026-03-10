@@ -39,15 +39,20 @@ class MultiSymbolOrchestrator:
             raise RuntimeError("No symbols provided")
 
         tasks = []
-        timeframe="1h"
-        limit =1000
-        for symbol in symbols:
+        timeframe = "1h"
+        limit = 240
+        for offset, symbol in enumerate(symbols):
 
             worker = SymbolWorker(
                 symbol,
                 self.broker,
                 self.strategy,
-                self.execution_manager,timeframe,limit
+                self.execution_manager,
+                timeframe,
+                limit,
+                controller=self.controller,
+                startup_delay=(offset % 6) * 0.35,
+                poll_interval=6.0,
             )
 
             self.workers.append(worker)
