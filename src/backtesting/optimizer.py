@@ -4,6 +4,7 @@ import itertools
 import pandas as pd
 
 from backtesting.backtest_engine import BacktestEngine
+from backtesting.experiment_tracker import ExperimentTracker
 from backtesting.report_generator import ReportGenerator
 from backtesting.simulator import Simulator
 
@@ -12,6 +13,7 @@ class StrategyOptimizer:
     def __init__(self, strategy, initial_balance=10000):
         self.strategy = strategy
         self.initial_balance = float(initial_balance)
+        self.experiment_tracker = ExperimentTracker()
 
     def _resolve_strategy(self, strategy_name=None):
         if hasattr(self.strategy, "_resolve_strategy"):
@@ -63,7 +65,17 @@ class StrategyOptimizer:
                 continue
             yield params
 
-    def optimize(self, data, symbol="BACKTEST", strategy_name=None, param_grid=None):
+    def optimize(
+        self,
+        data,
+        symbol="BACKTEST",
+        strategy_name=None,
+        param_grid=None,
+        timeframe="1h",
+        commission_bps=0.0,
+        slippage_bps=0.0,
+        experiment_name=None,
+    ):
         grid = param_grid or self.default_param_grid(strategy_name)
         rows = []
 
@@ -74,9 +86,18 @@ class StrategyOptimizer:
 
             engine = BacktestEngine(
                 strategy=strategy_instance,
-                simulator=Simulator(initial_balance=self.initial_balance),
+                simulator=Simulator(
+                    initial_balance=self.initial_balance,
+                    commission_bps=commission_bps,
+                    slippage_bps=slippage_bps,
+                ),
+                metadata={
+                    "strategy_name": strategy_name or getattr(strategy_instance, "strategy_name", None),
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                },
             )
-            trades = engine.run(data, symbol=symbol)
+            trades = engine.run(data, symbol=symbol, strategy_name=strategy_name)
             report = ReportGenerator(
                 trades=trades,
                 equity_history=engine.equity_curve,
@@ -84,7 +105,22 @@ class StrategyOptimizer:
 
             row = dict(params)
             row.update(report)
+            row["symbol"] = symbol
+            row["strategy_name"] = strategy_name or getattr(strategy_instance, "strategy_name", None)
+            row["timeframe"] = timeframe
+            row["commission_bps"] = float(commission_bps or 0.0)
+            row["slippage_bps"] = float(slippage_bps or 0.0)
             rows.append(row)
+            self.experiment_tracker.add_record(
+                name=experiment_name or f"optimizer-{strategy_name or getattr(strategy_instance, 'strategy_name', 'strategy')}",
+                strategy_name=strategy_name or getattr(strategy_instance, "strategy_name", None),
+                symbol=symbol,
+                timeframe=timeframe,
+                parameters=params,
+                dataset_metadata={"rows": len(data) if hasattr(data, "__len__") else 0},
+                metrics=report,
+                notes="optimizer_run",
+            )
 
         if not rows:
             return pd.DataFrame()

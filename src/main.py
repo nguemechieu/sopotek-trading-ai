@@ -1,5 +1,9 @@
 import asyncio
+import faulthandler
+import os
+import socket
 import sys
+from pathlib import Path
 
 import qasync
 from PySide6.QtCore import QSize
@@ -67,6 +71,75 @@ def _patch_qasync_timer_cleanup():
 
 _patch_qasync_timer_cleanup()
 
+_FAULTHANDLER_STREAM = None
+
+
+def _install_faulthandler():
+    global _FAULTHANDLER_STREAM
+
+    if faulthandler.is_enabled():
+        return
+
+    try:
+        log_dir = Path("logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _FAULTHANDLER_STREAM = open(log_dir / "native_crash.log", "a", encoding="utf-8", buffering=1)
+        _FAULTHANDLER_STREAM.write(
+            f"\n=== Native crash trace session pid={os.getpid()} ===\n"
+        )
+        faulthandler.enable(file=_FAULTHANDLER_STREAM, all_threads=True)
+    except Exception:
+        try:
+            faulthandler.enable(all_threads=True)
+        except Exception:
+            pass
+
+
+_install_faulthandler()
+
+
+def _is_dns_resolution_noise(context):
+    message = str((context or {}).get("message") or "").lower()
+    exception = (context or {}).get("exception")
+    future = (context or {}).get("future")
+    future_repr = str(future or "").lower()
+
+    details = []
+    for item in (exception, getattr(exception, "__cause__", None), getattr(exception, "__context__", None)):
+        if item is not None:
+            details.append(str(item).lower())
+
+    if isinstance(exception, socket.gaierror):
+        return True
+
+    haystack = " ".join([message, future_repr, *details])
+    return any(
+        token in haystack
+        for token in (
+            "getaddrinfo failed",
+            "could not contact dns servers",
+            "dns lookup failed",
+            "clientconnectordnserror",
+        )
+    )
+
+
+def _install_asyncio_exception_filter(loop, logger=None):
+    previous_handler = loop.get_exception_handler()
+
+    def handler(active_loop, context):
+        if _is_dns_resolution_noise(context):
+            if logger is not None:
+                logger.debug("Suppressed transient DNS resolver noise: %s", context.get("message") or context.get("exception"))
+            return
+
+        if previous_handler is not None:
+            previous_handler(active_loop, context)
+        else:
+            active_loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
+
 
 app = QApplication(sys.argv)
 
@@ -80,6 +153,7 @@ def _stop_loop():
 
 
 window = AppController()
+_install_asyncio_exception_filter(loop, logger=getattr(window, "logger", None))
 window.setIconSize(QSize(48, 48))
 app.aboutToQuit.connect(_stop_loop)
 if __name__ == "__main__":

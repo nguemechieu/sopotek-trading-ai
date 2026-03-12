@@ -31,6 +31,25 @@ def test_strategy_registry_can_switch_active_strategy():
     assert resolved.strategy_name == "Mean Reversion"
 
 
+def test_strategy_registry_includes_expanded_strategy_library():
+    registry = StrategyRegistry()
+
+    available = set(registry.list())
+
+    assert {
+        "Trend Following",
+        "Mean Reversion",
+        "Breakout",
+        "AI Hybrid",
+        "EMA Cross",
+        "Momentum Continuation",
+        "Pullback Trend",
+        "Volatility Breakout",
+        "MACD Trend",
+        "Range Fade",
+    }.issubset(available)
+
+
 def test_breakout_strategy_generates_buy_signal_on_range_break():
     strategy = Strategy(strategy_name="Breakout")
     strategy.rsi_period = 2
@@ -56,3 +75,28 @@ def test_breakout_strategy_generates_buy_signal_on_range_break():
 
     assert signal is not None
     assert signal["side"] == "buy"
+
+
+def test_ema_cross_strategy_generates_buy_signal_on_bullish_cross():
+    strategy = Strategy(strategy_name="EMA Cross")
+    strategy.rsi_period = 2
+    strategy.ema_fast = 2
+    strategy.ema_slow = 4
+    strategy.atr_period = 2
+
+    candles = []
+    base = 1700000000000
+    closes = [105.0, 104.0, 103.0, 102.0, 103.0, 104.5]
+    prev_close = closes[0]
+    for index, close in enumerate(closes):
+        open_ = prev_close
+        high = max(open_, close) + 0.6
+        low = min(open_, close) - 0.6
+        candles.append([base + index * 3600000, open_, high, low, close, 10 + index])
+        prev_close = close
+
+    signal = strategy.generate_signal(candles)
+
+    assert signal is not None
+    assert signal["side"] == "buy"
+    assert "EMA fast crossed above EMA slow" in signal["reason"]

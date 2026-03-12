@@ -50,7 +50,7 @@
 - testing a new symbol list
 - validating UI state updates
 - testing strategy parameters
-- validating screenshots, Telegram, or ChatGPT flows
+- validating screenshots, Telegram, or Sopotek Pilot flows
 - checking order-state transitions without risking capital
 
 ### Use Practice Or Sandbox When

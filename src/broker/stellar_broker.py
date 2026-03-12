@@ -150,6 +150,9 @@ class StellarBroker(BaseBroker):
         self._load_config_assets()
         self._load_cached_assets()
 
+    def supported_market_venues(self):
+        return ["auto", "spot"]
+
     def _default_network_passphrase(self) -> str:
         if Network is None:
             return "Test SDF Network ; September 2015" if self.sandbox else "Public Global Stellar Network ; September 2015"
@@ -1133,10 +1136,23 @@ class StellarBroker(BaseBroker):
                 return order
         return None
 
-    async def create_order(self, symbol, side, amount, type="market", price=None, params=None, stop_loss=None, take_profit=None):
+    async def create_order(
+        self,
+        symbol,
+        side,
+        amount,
+        type="market",
+        price=None,
+        stop_price=None,
+        params=None,
+        stop_loss=None,
+        take_profit=None,
+    ):
         base_asset, quote_asset = self._resolve_symbol_assets(symbol)
         order_side = str(side).lower()
         order_type = str(type or "market").lower()
+        if order_type == "stop_limit":
+            raise NotImplementedError("Stellar broker does not support stop_limit orders natively.")
         params = dict(params or {})
         slippage_pct = float(params.pop("slippage_pct", self.default_slippage_pct))
 

@@ -516,6 +516,38 @@ def test_broker_factory_routes_stellar_exchange(monkeypatch):
     assert broker == ("stellar", "stellar")
 
 
+def test_broker_factory_rejects_binance_for_us_customers():
+    config = AppConfig(
+        broker=BrokerConfig(type="crypto", exchange="binance", customer_region="us", api_key="a", secret="b"),
+        risk=RiskConfig(),
+        system=SystemConfig(),
+        strategy="LSTM",
+    )
+
+    try:
+        BrokerFactory.create(config)
+    except ValueError as exc:
+        assert "Binance.com is not available for US customers" in str(exc)
+    else:
+        raise AssertionError("Expected US Binance jurisdiction validation to reject binance.com")
+
+
+def test_broker_factory_rejects_binanceus_for_non_us_customers():
+    config = AppConfig(
+        broker=BrokerConfig(type="crypto", exchange="binanceus", customer_region="global", api_key="a", secret="b"),
+        risk=RiskConfig(),
+        system=SystemConfig(),
+        strategy="LSTM",
+    )
+
+    try:
+        BrokerFactory.create(config)
+    except ValueError as exc:
+        assert "Binance US is only available for US customers" in str(exc)
+    else:
+        raise AssertionError("Expected non-US Binance jurisdiction validation to reject Binance US")
+
+
 def test_stellar_broker_rejects_invalid_public_key():
     try:
         StellarBroker(

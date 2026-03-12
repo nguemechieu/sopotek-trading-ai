@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
 
+from broker.market_venues import supported_market_venues_for_profile
+
 
 class BaseBroker(ABC):
 
@@ -58,6 +60,7 @@ class BaseBroker(ABC):
         amount,
         type="market",
         price=None,
+        stop_price=None,
         params=None,
         stop_loss=None,
         take_profit=None,
@@ -178,6 +181,35 @@ class BaseBroker(ABC):
     async def fetch_open_orders(self, symbol=None, limit=None):
         raise NotImplementedError("fetch_open_orders is not implemented for this broker")
 
+    async def fetch_open_orders_snapshot(self, symbols=None, limit=None):
+        if not symbols:
+            return await self.fetch_open_orders(limit=limit)
+
+        snapshot = []
+        seen = set()
+        for symbol in dict.fromkeys(str(item).strip() for item in (symbols or []) if str(item).strip()):
+            try:
+                orders = await self.fetch_open_orders(symbol=symbol, limit=limit)
+            except TypeError:
+                orders = await self.fetch_open_orders(symbol)
+
+            for order in orders or []:
+                if isinstance(order, dict):
+                    key = (
+                        str(order.get("id") or ""),
+                        str(order.get("clientOrderId") or ""),
+                        str(order.get("symbol") or symbol),
+                        str(order.get("status") or ""),
+                    )
+                else:
+                    key = (str(order), "", symbol, "")
+                if key in seen:
+                    continue
+                seen.add(key)
+                snapshot.append(order)
+
+        return snapshot
+
     async def fetch_closed_orders(self, symbol=None, limit=None):
         raise NotImplementedError("fetch_closed_orders is not implemented for this broker")
 
@@ -186,6 +218,16 @@ class BaseBroker(ABC):
 
     async def fetch_symbols(self):
         return await self.fetch_symbol()
+
+    def supported_market_venues(self):
+        config = getattr(self, "config", None)
+        return supported_market_venues_for_profile(
+            getattr(config, "type", None),
+            getattr(config, "exchange", None),
+        )
+
+    def apply_market_preference(self, preference=None):
+        return []
 
     async def withdraw(self, code, amount, address, tag=None, params=None):
         raise NotImplementedError("withdraw is not implemented for this broker")

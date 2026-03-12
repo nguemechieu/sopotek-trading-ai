@@ -2,10 +2,10 @@ from datetime import datetime, timezone
 
 from sqlalchemy import BigInteger, Column, DateTime, Float, Integer, String, and_, or_, select
 
-from storage.database import Base, SessionLocal
+from storage import database as storage_db
 
 
-class Candle(Base):
+class Candle(storage_db.Base):
     __tablename__ = "candles"
 
     id = Column(Integer, primary_key=True)
@@ -119,7 +119,7 @@ class MarketDataRepository:
         exchange_value = normalized_rows[0]["exchange"]
         timestamp_values = [row["timestamp_ms"] for row in normalized_rows]
 
-        with SessionLocal() as session:
+        with storage_db.SessionLocal() as session:
             stmt = select(Candle.timestamp_ms).where(
                 Candle.symbol == str(symbol),
                 Candle.timeframe == str(timeframe or "1h"),
@@ -143,7 +143,7 @@ class MarketDataRepository:
             return len(pending)
 
     def get_candles(self, symbol, timeframe="1h", limit=300, exchange=None):
-        with SessionLocal() as session:
+        with storage_db.SessionLocal() as session:
             stmt = select(Candle).where(Candle.symbol == str(symbol))
 
             timeframe_value = str(timeframe or "1h")
@@ -168,4 +168,3 @@ class MarketDataRepository:
                 ]
                 for row in rows
             ]
-

@@ -4,9 +4,10 @@ import pandas as pd
 class BacktestEngine:
     REQUIRED_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
 
-    def __init__(self, strategy, simulator):
+    def __init__(self, strategy, simulator, metadata=None):
         self.strategy = strategy
         self.simulator = simulator
+        self.metadata = dict(metadata or {})
         self.results = []
         self.equity_curve = []
 
@@ -58,10 +59,13 @@ class BacktestEngine:
                 return self.strategy.generate_signal(candles)
         return None
 
-    def run(self, data, symbol="BACKTEST", strategy_name=None, stop_event=None):
+    def run(self, data, symbol="BACKTEST", strategy_name=None, stop_event=None, metadata=None):
         df = self._normalize_frame(data)
         self.results = []
         self.equity_curve = []
+        run_metadata = dict(self.metadata)
+        if isinstance(metadata, dict):
+            run_metadata.update(metadata)
 
         if df.empty:
             return pd.DataFrame()
@@ -86,6 +90,8 @@ class BacktestEngine:
 
             trade = self.simulator.execute(signal, row, symbol=symbol)
             if trade:
+                if run_metadata:
+                    trade.update(run_metadata)
                 self.results.append(trade)
 
             self.equity_curve.append(
@@ -96,6 +102,8 @@ class BacktestEngine:
         close_reason = "stopped" if stopped_early else "end_of_test"
         final_trade = self.simulator.close_open_position(close_row, symbol=symbol, reason=close_reason)
         if final_trade:
+            if run_metadata:
+                final_trade.update(run_metadata)
             self.results.append(final_trade)
             final_close = float(close_row["close"])
             if self.equity_curve:

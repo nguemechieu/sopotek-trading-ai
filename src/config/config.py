@@ -17,6 +17,11 @@ class BrokerConfig(BaseModel):
         description="Exchange name (binance, coinbase, stellar, alpaca, oanda)"
     )
 
+    customer_region: Optional[str] = Field(
+        default=None,
+        description="Customer jurisdiction hint such as us or global"
+    )
+
     mode: str = Field(
         default="paper",
         description="paper or live trading"

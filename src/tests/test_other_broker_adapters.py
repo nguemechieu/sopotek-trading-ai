@@ -31,7 +31,7 @@ class FakeResponse:
 
 
 class FakeOandaSession:
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self.closed = False
         self.last_order_payload = None
 
@@ -120,6 +120,7 @@ class FakeAlpacaREST:
             qty=str(kwargs["qty"]),
             filled_qty="0",
             limit_price=str(kwargs.get("limit_price", 0)),
+            stop_price=str(kwargs.get("stop_price", 0)),
             filled_avg_price="0",
         )
 
@@ -181,10 +182,29 @@ def test_alpaca_broker_normalizes_common_methods(monkeypatch):
         assert (await broker.fetch_positions())[0]["symbol"] == "AAPL"
         order = await broker.create_order("AAPL", "buy", 2, type="limit", price=200)
         assert order["symbol"] == "AAPL"
+        stop_limit = await broker.create_order("AAPL", "buy", 1, type="stop_limit", price=200, stop_price=201)
+        assert stop_limit["type"] == "stop_limit"
+        assert stop_limit["stop_price"] == 201.0
         assert len(await broker.fetch_closed_orders(limit=5)) == 1
         await broker.close()
 
     asyncio.run(scenario())
+
+
+def test_non_ccxt_brokers_report_supported_market_venues(monkeypatch):
+    import broker.oanda_broker as oanda_module
+    import broker.alpaca_broker as alpaca_module
+
+    monkeypatch.setattr(oanda_module.aiohttp, "ClientSession", FakeOandaSession)
+    monkeypatch.setattr(alpaca_module, "tradeapi", SimpleNamespace(REST=FakeAlpacaREST))
+
+    oanda = OandaBroker(SimpleNamespace(api_key="token", account_id="acct-1", mode="practice"))
+    alpaca = AlpacaBroker(SimpleNamespace(api_key="key", secret="secret", mode="paper", sandbox=False))
+    paper = PaperBroker(SimpleNamespace(logger=None, paper_balance=1000.0, initial_balance=1000.0, mode="paper", params={}))
+
+    assert oanda.supported_market_venues() == ["auto", "otc"]
+    assert alpaca.supported_market_venues() == ["auto", "spot"]
+    assert paper.supported_market_venues() == ["auto", "spot", "derivative", "option", "otc"]
 
 
 def test_paper_broker_exposes_normalized_api(monkeypatch):
@@ -220,6 +240,9 @@ def test_paper_broker_exposes_normalized_api(monkeypatch):
         assert orderbook["bids"][0][0] == 100.0
         order = await broker.create_order("BTC/USDT", "buy", 1, type="market")
         assert order["status"] == "filled"
+        stop_limit = await broker.create_order("BTC/USDT", "buy", 1, type="stop_limit", price=99.0, stop_price=101.0)
+        assert stop_limit["status"] == "open"
+        assert stop_limit["stop_price"] == 101.0
         assert (await broker.fetch_balance())["free"]["USDT"] == 900.0
         assert (await broker.fetch_positions())[0]["symbol"] == "BTC/USDT"
         assert (await broker.fetch_positions(symbols=["BTC/USDT"]))[0]["symbol"] == "BTC/USDT"
@@ -368,6 +391,12 @@ def test_oanda_broker_formats_order_payload(monkeypatch):
         assert payload["units"] == "-2"
         assert payload["price"] == "1.23456"
 
+        await broker.create_order("EUR/USD", "buy", 1, type="stop_limit", price=1.24001, stop_price=1.23501)
+        payload = broker.session.last_order_payload["order"]
+        assert payload["type"] == "STOP"
+        assert payload["price"] == "1.23501"
+        assert payload["priceBound"] == "1.24001"
+
         await broker.create_order(
             "EUR/USD",
             "buy",
@@ -460,7 +489,7 @@ def test_oanda_broker_paginates_ohlcv_history(monkeypatch):
     import broker.oanda_broker as oanda_module
 
     class PagingOandaSession:
-        def __init__(self):
+        def __init__(self, *args, **kwargs):
             self.closed = False
             self.calls = []
 

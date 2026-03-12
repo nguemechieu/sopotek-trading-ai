@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 import time
 import traceback
 from datetime import datetime, timezone
@@ -12,9 +13,22 @@ from pathlib import Path
 import aiohttp
 import pandas as pd
 from PySide6.QtCore import QSettings, Signal
-from PySide6.QtWidgets import QMainWindow, QMessageBox, QStackedWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QStackedWidget,
+    QTextBrowser,
+    QVBoxLayout,
+)
 
 from broker.broker_factory import BrokerFactory
+from broker.market_venues import normalize_market_venue, supported_market_venues_for_profile
 from broker.rate_limiter import RateLimiter
 from core.sopotek_trading import SopotekTrading
 from event_bus.event_bus import EventBus
@@ -22,7 +36,9 @@ from event_bus.event_types import EventType
 from frontend.ui.dashboard import Dashboard
 from frontend.ui.i18n import DEFAULT_LANGUAGE, normalize_language_code, translate
 from frontend.ui.terminal import Terminal
+from integrations.news_service import NewsService
 from integrations.telegram_service import TelegramService
+from integrations.voice_service import VoiceService
 from engines.performance_engine import PerformanceEngine
 from manager.broker_manager import BrokerManager
 from market_data.candle_buffer import CandleBuffer
@@ -33,13 +49,33 @@ from market_data.websocket.alpaca_web_socket import AlpacaWebSocket
 from market_data.websocket.binanceus_web_socket import BinanceUsWebSocket
 from market_data.websocket.coinbase_web_socket import CoinbaseWebSocket
 from market_data.websocket.paper_web_socket import PaperWebSocket
-from storage.database import init_database
+from licensing.license_manager import LicenseManager
+from storage.database import configure_database, get_database_url, init_database
 from storage.market_data_repository import MarketDataRepository
 from storage.trade_repository import TradeRepository
 from strategy.strategy import Strategy
 
+try:
+    import winsound
+except Exception:  # pragma: no cover - non-Windows fallback
+    winsound = None
+
 
 class AppController(QMainWindow):
+    OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
+    OPENAI_TTS_VOICES = [
+        "alloy",
+        "ash",
+        "ballad",
+        "coral",
+        "echo",
+        "fable",
+        "nova",
+        "onyx",
+        "sage",
+        "shimmer",
+        "verse",
+    ]
 
     symbols_signal = Signal(str, list)
     candle_signal = Signal(str, object)
@@ -49,10 +85,13 @@ class AppController(QMainWindow):
     ticker_signal = Signal(str, float, float)
     connection_signal = Signal(str)
     orderbook_signal = Signal(str, list, list)
+    recent_trades_signal = Signal(str, list)
+    news_signal = Signal(str, list)
     ai_signal_monitor = Signal(dict)
 
     strategy_debug_signal = Signal(dict)
     autotrade_toggle = Signal(bool)
+    license_changed = Signal(dict)
 
     logout_requested = Signal(str)
     training_status_signal = Signal(str, str)
@@ -91,6 +130,9 @@ class AppController(QMainWindow):
             self.logger.addHandler(logging.StreamHandler(sys.stdout))
             self.logger.addHandler(logging.FileHandler("logs/app.log"))
 
+        self.license_manager = LicenseManager(self.settings, logger=self.logger)
+        self.license_status = self.license_manager.status()
+
         self.broker_manager = BrokerManager()
         self.rate_limiter = RateLimiter()
 
@@ -98,11 +140,19 @@ class AppController(QMainWindow):
         self.trading_system = None
         self.terminal = None
         self.telegram_service = None
+        self.behavior_guard = None
+        self.portfolio_allocator = None
+        self.institutional_risk_engine = None
+        self.quant_allocation_snapshot = {}
+        self.quant_risk_snapshot = {}
+        self.health_check_report = []
+        self.health_check_summary = "Not run"
 
-        self.max_portfolio_risk = 1700
-        self.max_risk_per_trade = 20
-        self.max_position_size_pct = 100
-        self.max_gross_exposure_pct = 34
+        self.risk_profile_name = str(self.settings.value("risk/profile_name", "Balanced") or "Balanced").strip() or "Balanced"
+        self.max_portfolio_risk = float(self.settings.value("risk/max_portfolio_risk", 0.10) or 0.10)
+        self.max_risk_per_trade = float(self.settings.value("risk/max_risk_per_trade", 0.02) or 0.02)
+        self.max_position_size_pct = float(self.settings.value("risk/max_position_size_pct", 0.10) or 0.10)
+        self.max_gross_exposure_pct = float(self.settings.value("risk/max_gross_exposure_pct", 2.0) or 2.0)
         self.confidence = 0
         self.volatility = 0
         self.order_type = "limit"
@@ -115,6 +165,34 @@ class AppController(QMainWindow):
         self.telegram_chat_id = str(self.settings.value("integrations/telegram_chat_id", "") or "").strip()
         self.openai_api_key = str(self.settings.value("integrations/openai_api_key", "") or "").strip()
         self.openai_model = str(self.settings.value("integrations/openai_model", "gpt-5-mini") or "gpt-5-mini").strip()
+        self.voice_provider = str(self.settings.value("integrations/voice_provider", "windows") or "windows").strip().lower()
+        if self.voice_provider not in {"windows", "google"}:
+            self.voice_provider = "windows"
+        self.voice_output_provider = str(
+            self.settings.value("integrations/voice_output_provider", "windows") or "windows"
+        ).strip().lower()
+        if self.voice_output_provider not in {"windows", "openai"}:
+            self.voice_output_provider = "windows"
+        legacy_voice_name = str(self.settings.value("integrations/voice_name", "") or "").strip()
+        self.voice_windows_name = str(
+            self.settings.value("integrations/voice_windows_name", legacy_voice_name) or legacy_voice_name
+        ).strip()
+        self.voice_openai_name = str(
+            self.settings.value("integrations/voice_openai_name", "alloy") or "alloy"
+        ).strip().lower() or "alloy"
+        if self.voice_openai_name not in self.OPENAI_TTS_VOICES:
+            self.voice_openai_name = "alloy"
+        self.voice_name = self._current_market_chat_voice_name()
+        self.news_enabled = str(self.settings.value("integrations/news_enabled", "true")).lower() in {"1", "true", "yes", "on"}
+        self.news_autotrade_enabled = str(self.settings.value("integrations/news_autotrade_enabled", "false")).lower() in {"1", "true", "yes", "on"}
+        self.news_draw_on_chart = str(self.settings.value("integrations/news_draw_on_chart", "true")).lower() in {"1", "true", "yes", "on"}
+        self.news_feed_url = str(self.settings.value("integrations/news_feed_url", NewsService.DEFAULT_FEED_URL) or NewsService.DEFAULT_FEED_URL).strip()
+        self.market_trade_preference = normalize_market_venue(self.settings.value("trading/market_type", "auto"))
+        self.database_mode = str(self.settings.value("storage/database_mode", "local") or "local").strip().lower()
+        if self.database_mode not in {"local", "remote"}:
+            self.database_mode = "local"
+        self.database_url = str(self.settings.value("storage/database_url", "") or "").strip()
+        self.database_connection_url = ""
         self.autotrade_scope = str(self.settings.value("autotrade/scope", "all") or "all").strip().lower()
         if self.autotrade_scope not in {"all", "selected", "watchlist"}:
             self.autotrade_scope = "all"
@@ -147,6 +225,18 @@ class AppController(QMainWindow):
 
         self.ticker_stream = TickerStream()
         self._performance_recorded_orders = set()
+        self.news_service = NewsService(
+            logger=self.logger,
+            enabled=self.news_enabled,
+            feed_url_template=self.news_feed_url,
+        )
+        self.voice_service = VoiceService(
+            logger=self.logger,
+            voice_name=self.voice_name,
+            recognition_provider=self.voice_provider,
+        )
+        self._news_cache = {}
+        self._news_inflight = {}
 
         self.limit = 50000
         self.initial_capital = 10000
@@ -157,11 +247,15 @@ class AppController(QMainWindow):
         self.ticker_buffer = TickerBuffer(max_length=self.limit)
         self._orderbook_tasks = {}
         self._orderbook_last_request_at = {}
+        self._recent_trades_cache = {}
+        self._recent_trades_tasks = {}
+        self._recent_trades_last_request_at = {}
 
         self.symbols = ["BTC/USDT", "ETH/USDT", "XLM/USDT"]
 
         self.connected = False
         self.config = None
+        self._session_closing = False
 
         try:
             self._setup_paths()
@@ -173,6 +267,157 @@ class AppController(QMainWindow):
 
     def tr(self, key, **kwargs):
         return translate(self.language_code, key, **kwargs)
+
+    def refresh_license_status(self):
+        self.license_status = self.license_manager.status()
+        snapshot = dict(self.license_status)
+        self.license_changed.emit(snapshot)
+        return snapshot
+
+    def get_license_status(self):
+        self.license_status = self.license_manager.status()
+        return dict(self.license_status)
+
+    def license_allows(self, feature):
+        return bool(self.license_manager.allows_feature(feature))
+
+    def activate_license_key(self, key):
+        success, message, _status = self.license_manager.activate_key(key)
+        return success, message, self.refresh_license_status()
+
+    def clear_license(self):
+        self.license_manager.clear_paid_license()
+        return self.refresh_license_status()
+
+    def show_license_dialog(self, parent=None):
+        parent_widget = parent or self.terminal or self.dashboard or self
+        dialog = QDialog(parent_widget)
+        dialog.setWindowTitle("License")
+        dialog.resize(620, 460)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        status_label = QLabel()
+        status_label.setWordWrap(True)
+        status_label.setStyleSheet(
+            "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
+            "border-radius: 12px; padding: 12px; font-size: 13px; font-weight: 600;"
+        )
+        layout.addWidget(status_label)
+
+        details = QTextBrowser()
+        details.setStyleSheet(
+            "QTextBrowser { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; border-radius: 12px; padding: 12px; }"
+        )
+        layout.addWidget(details, 1)
+
+        key_input = QLineEdit()
+        key_input.setPlaceholderText("Enter license key, for example SOPOTEK-SUB-12M-TEAM-001")
+        layout.addWidget(key_input)
+
+        button_row = QHBoxLayout()
+        activate_button = QPushButton("Activate License")
+        community_button = QPushButton("Use Community Mode")
+        close_button = QPushButton("Close")
+        button_row.addWidget(activate_button)
+        button_row.addWidget(community_button)
+        button_row.addStretch(1)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+        def _refresh_dialog():
+            status = self.get_license_status()
+            status_label.setText(
+                f"{status.get('plan_name', 'License')} | {status.get('summary', 'Unknown status')}"
+            )
+            example_html = (
+                "<h3>License Types</h3>"
+                "<ul>"
+                "<li><b>Trial:</b> starts automatically on first run and unlocks live trading for a limited period.</li>"
+                "<li><b>Subscription:</b> activate keys like <code>SOPOTEK-SUB-12M-TEAM-001</code>.</li>"
+                "<li><b>Full License:</b> activate keys like <code>SOPOTEK-FULL-LIFETIME-001</code>.</li>"
+                "<li><b>Community:</b> paper trading, charts, analysis, and research remain available.</li>"
+                "</ul>"
+                f"<p><b>Current status:</b> {status.get('description', '-')}</p>"
+                "<p><b>Notes:</b> This is the local licensing foundation. Payment, customer portal, and online validation can be added later without rewriting the UI flow.</p>"
+            )
+            details.setHtml(example_html)
+
+        def _activate():
+            success, message, _status = self.activate_license_key(key_input.text())
+            if success:
+                QMessageBox.information(dialog, "License Activated", message)
+                key_input.clear()
+            else:
+                QMessageBox.warning(dialog, "License Error", message)
+            _refresh_dialog()
+
+        def _community():
+            self.clear_license()
+            QMessageBox.information(
+                dialog,
+                "Community Mode",
+                "Paid license data was cleared. Community mode remains available for paper trading and analysis.",
+            )
+            _refresh_dialog()
+
+        activate_button.clicked.connect(_activate)
+        community_button.clicked.connect(_community)
+        close_button.clicked.connect(dialog.accept)
+        _refresh_dialog()
+        dialog.exec()
+
+    def _friendly_initialization_error(self, exc):
+        message = str(exc or "").strip()
+        lowered = message.lower()
+
+        if "could not contact dns servers" in lowered or "dns lookup failed" in lowered:
+            return (
+                "Broker connection failed because DNS resolution is not working on this machine right now. "
+                "Check your internet connection, DNS settings, VPN, proxy, or firewall, then try again."
+            )
+
+        if "cannot connect to host" in lowered:
+            return (
+                "Broker connection failed before login completed. "
+                "Check your internet connection, VPN, proxy, or firewall, then try again.\n\n"
+                f"Details: {message}"
+            )
+
+        if "binance.com is not available for us customers" in lowered:
+            return "Binance.com is not available for US customers in Sopotek. Choose Binance US or switch the customer region to Outside US."
+
+        if "binance us is only available for us customers" in lowered:
+            return "Binance US is only available for US customers in Sopotek. Choose Binance for non-US customers or switch the customer region to US."
+
+        if "api-key format invalid" in lowered or "\"code\":-2014" in lowered or "code': -2014" in lowered:
+            return (
+                "The broker rejected the API key format. For Binance US, use a Binance US API key and secret pair, "
+                "not Binance.com credentials. Also make sure the key and secret were pasted without spaces or line breaks."
+            )
+
+        if "coinbase" in lowered and "passphrase" in lowered:
+            return (
+                "Coinbase Advanced Trade in Sopotek uses the API key name and private key."
+            )
+
+        return message or "Unknown initialization error"
+
+    def _broker_is_connected(self, broker):
+        if broker is None:
+            return False
+        for attr in ("_connected", "connected", "is_connected"):
+            value = getattr(broker, attr, None)
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:
+                    continue
+            if isinstance(value, bool):
+                return value
+        return False
 
     def set_language(self, language_code):
         normalized = normalize_language_code(language_code)
@@ -189,13 +434,79 @@ class AppController(QMainWindow):
         os.makedirs(self.data_dir, exist_ok=True)
 
     def _setup_data(self):
-        init_database()
+        self.configure_storage_database(
+            database_mode=getattr(self, "database_mode", "local"),
+            database_url=getattr(self, "database_url", ""),
+            persist=False,
+            raise_on_error=False,
+        )
         self.historical_data = pd.DataFrame(
             columns=["symbol", "timestamp", "open", "high", "low", "close", "volume"]
         )
+        self.performance_engine = PerformanceEngine()
+
+    def _rebind_storage_dependencies(self):
+        trading_system = getattr(self, "trading_system", None)
+        if trading_system is None:
+            return
+
+        data_hub = getattr(trading_system, "data_hub", None)
+        if data_hub is not None:
+            data_hub.market_data_repository = self.market_data_repository
+
+        execution_manager = getattr(trading_system, "execution_manager", None)
+        if execution_manager is not None:
+            execution_manager.trade_repository = self.trade_repository
+
+    @staticmethod
+    def _masked_database_url(database_url):
+        text = str(database_url or "").strip()
+        if not text:
+            return ""
+        return re.sub(r":([^:@/]+)@", ":***@", text, count=1)
+
+    def current_database_label(self):
+        mode = str(getattr(self, "database_mode", "local") or "local").strip().lower()
+        if mode == "remote":
+            masked = self._masked_database_url(getattr(self, "database_url", "") or "")
+            return masked or "Remote URL not set"
+        return "Local SQLite"
+
+    def configure_storage_database(self, database_mode=None, database_url=None, persist=True, raise_on_error=True):
+        mode = str(database_mode or getattr(self, "database_mode", "local") or "local").strip().lower()
+        if mode not in {"local", "remote"}:
+            mode = "local"
+        raw_url = str(database_url if database_url is not None else getattr(self, "database_url", "") or "").strip()
+
+        if mode == "remote" and not raw_url:
+            raise ValueError("Remote database URL is required when remote storage is selected.")
+
+        target_url = raw_url if mode == "remote" else None
+        try:
+            configured_url = configure_database(target_url)
+            init_database()
+        except Exception:
+            if not raise_on_error:
+                self.logger.exception("Storage database configuration failed; falling back to local SQLite")
+                mode = "local"
+                raw_url = ""
+                configured_url = configure_database(None)
+                init_database()
+            else:
+                raise
+
+        self.database_mode = mode
+        self.database_url = raw_url
+        self.database_connection_url = configured_url or get_database_url()
         self.market_data_repository = MarketDataRepository()
         self.trade_repository = TradeRepository()
-        self.performance_engine = PerformanceEngine()
+        self._rebind_storage_dependencies()
+
+        if persist:
+            self.settings.setValue("storage/database_mode", self.database_mode)
+            self.settings.setValue("storage/database_url", self.database_url)
+
+        return self.database_connection_url
 
     def _setup_ui(self, controller):
         self.setWindowTitle("Sopotek Trading AI Platform")
@@ -239,12 +550,30 @@ class AppController(QMainWindow):
 
                 self.dashboard.show_loading()
                 self.config = config
+                broker_mode = str(getattr(config.broker, "mode", "") or "").strip().lower()
+                if broker_mode == "live" and not self.license_allows("live_trading"):
+                    self.dashboard.hide_loading()
+                    QMessageBox.warning(
+                        self,
+                        "License Required",
+                        self.license_manager.feature_message("live_trading"),
+                    )
+                    self.show_license_dialog(self.dashboard)
+                    return
+                self.strategy_name = Strategy.normalize_strategy_name(getattr(config, "strategy", self.strategy_name))
+                self.settings.setValue("strategy/name", self.strategy_name)
+                broker_options = dict(getattr(config.broker, "options", None) or {})
+                self.set_market_trade_preference(broker_options.get("market_type", self.market_trade_preference))
 
                 broker_type = config.broker.type
                 exchange = config.broker.exchange or "unknown"
                 if not broker_type:
                     raise RuntimeError("Broker type missing")
 
+                if self.connected or self.broker is not None or self.terminal is not None:
+                    self.logger.info("Resetting existing session state before login")
+                    self.connected = False
+                    self.connection_signal.emit("disconnected")
                 await self._cleanup_session(stop_trading=True, close_broker=True)
 
                 self.logger.info("Initializing broker %s", exchange)
@@ -259,7 +588,10 @@ class AppController(QMainWindow):
                     broker.logger = self.logger
 
                 self.broker = broker
-                await self.broker.connect()
+                if self._broker_is_connected(self.broker):
+                    self.logger.info("Broker %s is already connected; reusing existing broker session", exchange)
+                else:
+                    await self.broker.connect()
 
                 raw_symbols = await self._fetch_symbols(self.broker)
                 filtered_symbols = self._filter_symbols_for_trading(raw_symbols, broker_type, exchange)
@@ -297,7 +629,12 @@ class AppController(QMainWindow):
                 self.connected = False
                 self.connection_signal.emit("disconnected")
                 self.logger.exception("Initialization failed")
-                QMessageBox.critical(self, "Initialization Failed", str(e))
+                await self._cleanup_session(stop_trading=True, close_broker=True)
+                QMessageBox.critical(
+                    self,
+                    "Initialization Failed",
+                    self._friendly_initialization_error(e),
+                )
             finally:
                 self.dashboard.hide_loading()
 
@@ -501,6 +838,7 @@ class AppController(QMainWindow):
 
         self.balances = await self._fetch_balances(self.broker)
         self.balance = self.balances
+        self._update_behavior_guard_equity(self.balances)
 
     async def initialize_trading(self):
         try:
@@ -513,6 +851,7 @@ class AppController(QMainWindow):
             self.terminal.logout_requested.connect(self._on_logout_requested)
             if hasattr(self.terminal, "load_persisted_runtime_data"):
                 await self.terminal.load_persisted_runtime_data()
+            self._create_task(self.run_startup_health_check(), "startup_health_check")
 
         except Exception as e:
             self.logger.exception("Terminal initialization failed")
@@ -525,6 +864,10 @@ class AppController(QMainWindow):
         telegram_chat_id=None,
         openai_api_key=None,
         openai_model=None,
+        news_enabled=None,
+        news_autotrade_enabled=None,
+        news_draw_on_chart=None,
+        news_feed_url=None,
     ):
         if telegram_enabled is not None:
             self.telegram_enabled = bool(telegram_enabled)
@@ -536,14 +879,159 @@ class AppController(QMainWindow):
             self.openai_api_key = str(openai_api_key or "").strip()
         if openai_model is not None:
             self.openai_model = str(openai_model or "gpt-5-mini").strip() or "gpt-5-mini"
+        if news_enabled is not None:
+            self.news_enabled = bool(news_enabled)
+        if news_autotrade_enabled is not None:
+            self.news_autotrade_enabled = bool(news_autotrade_enabled)
+        if news_draw_on_chart is not None:
+            self.news_draw_on_chart = bool(news_draw_on_chart)
+        if news_feed_url is not None:
+            self.news_feed_url = str(news_feed_url or NewsService.DEFAULT_FEED_URL).strip() or NewsService.DEFAULT_FEED_URL
 
         self.settings.setValue("integrations/telegram_enabled", self.telegram_enabled)
         self.settings.setValue("integrations/telegram_bot_token", self.telegram_bot_token)
         self.settings.setValue("integrations/telegram_chat_id", self.telegram_chat_id)
         self.settings.setValue("integrations/openai_api_key", self.openai_api_key)
         self.settings.setValue("integrations/openai_model", self.openai_model)
+        self.settings.setValue("integrations/voice_name", getattr(self, "voice_name", ""))
+        self.settings.setValue("integrations/voice_windows_name", getattr(self, "voice_windows_name", ""))
+        self.settings.setValue("integrations/voice_openai_name", getattr(self, "voice_openai_name", "alloy"))
+        self.settings.setValue("integrations/voice_provider", getattr(self, "voice_provider", "windows"))
+        self.settings.setValue("integrations/voice_output_provider", getattr(self, "voice_output_provider", "windows"))
+        self.settings.setValue("integrations/news_enabled", self.news_enabled)
+        self.settings.setValue("integrations/news_autotrade_enabled", self.news_autotrade_enabled)
+        self.settings.setValue("integrations/news_draw_on_chart", self.news_draw_on_chart)
+        self.settings.setValue("integrations/news_feed_url", self.news_feed_url)
+        self.news_service.enabled = self.news_enabled
+        self.news_service.feed_url_template = self.news_feed_url
 
         asyncio.get_event_loop().create_task(self._restart_telegram_service())
+
+    def supported_market_venues(self):
+        broker = getattr(self, "broker", None)
+        if broker is not None and hasattr(broker, "supported_market_venues"):
+            try:
+                venues = [
+                    str(item).strip().lower()
+                    for item in (broker.supported_market_venues() or [])
+                    if str(item).strip()
+                ]
+            except Exception:
+                venues = []
+            if venues:
+                return list(dict.fromkeys(venues))
+
+        broker_cfg = getattr(getattr(self, "config", None), "broker", None)
+        broker_type = getattr(broker_cfg, "type", None)
+        exchange = getattr(broker_cfg, "exchange", None)
+        return supported_market_venues_for_profile(broker_type, exchange)
+
+    def set_market_trade_preference(self, preference):
+        normalized = normalize_market_venue(preference)
+        supported = self.supported_market_venues()
+        if normalized not in supported:
+            normalized = "auto" if "auto" in supported else (supported[0] if supported else "auto")
+        self.market_trade_preference = normalized
+        self.settings.setValue("trading/market_type", normalized)
+
+        broker_cfg = getattr(getattr(self, "config", None), "broker", None)
+        if broker_cfg is not None:
+            options = dict(getattr(broker_cfg, "options", None) or {})
+            options["market_type"] = normalized
+            try:
+                broker_cfg.options = options
+            except Exception:
+                pass
+
+        broker = getattr(self, "broker", None)
+        if broker is not None and hasattr(broker, "extra_options"):
+            broker.extra_options["market_type"] = normalized
+            if hasattr(broker, "market_preference"):
+                broker.market_preference = normalized
+            if hasattr(broker, "apply_market_preference"):
+                try:
+                    updated_symbols = broker.apply_market_preference(normalized)
+                except Exception:
+                    updated_symbols = None
+                if updated_symbols:
+                    self.symbols = list(updated_symbols)
+                    exchange_name = getattr(broker, "exchange_name", getattr(broker_cfg, "exchange", "broker")) or "broker"
+                    self.symbols_signal.emit(str(exchange_name), list(self.symbols))
+
+    async def request_news(self, symbol, force=False, max_age_seconds=300):
+        normalized = str(symbol or "").upper().strip()
+        if not normalized or not self.news_enabled:
+            return []
+
+        cached = self._news_cache.get(normalized)
+        if not force and isinstance(cached, dict):
+            cached_at = float(cached.get("fetched_at", 0.0) or 0.0)
+            if (time.monotonic() - cached_at) <= max_age_seconds:
+                events = list(cached.get("events", []) or [])
+                self.news_signal.emit(normalized, events)
+                return events
+
+        existing_task = self._news_inflight.get(normalized)
+        if existing_task is not None and not existing_task.done():
+            try:
+                return await existing_task
+            except Exception:
+                return []
+
+        async def runner():
+            broker_type = getattr(getattr(self, "config", None), "broker", None)
+            broker_type = getattr(broker_type, "type", None)
+            events = await self.news_service.fetch_symbol_news(normalized, broker_type=broker_type, limit=8)
+            self._news_cache[normalized] = {
+                "fetched_at": time.monotonic(),
+                "events": list(events or []),
+            }
+            self.news_signal.emit(normalized, list(events or []))
+            return list(events or [])
+
+        task = asyncio.create_task(runner())
+        self._news_inflight[normalized] = task
+        try:
+            return await task
+        finally:
+            current = self._news_inflight.get(normalized)
+            if current is task:
+                self._news_inflight.pop(normalized, None)
+
+    def get_news_bias(self, symbol):
+        normalized = str(symbol or "").upper().strip()
+        cached = self._news_cache.get(normalized, {})
+        events = list(cached.get("events", []) or [])
+        return self.news_service.summarize_news_bias(events)
+
+    async def apply_news_bias_to_signal(self, symbol, signal):
+        if not isinstance(signal, dict):
+            return None
+        if not self.news_enabled or not self.news_autotrade_enabled:
+            return signal
+
+        events = await self.request_news(symbol)
+        bias = self.news_service.summarize_news_bias(events)
+        direction = str(bias.get("direction", "neutral") or "neutral").lower()
+        score = float(bias.get("score", 0.0) or 0.0)
+
+        updated = dict(signal)
+        base_reason = str(updated.get("reason", "") or "").strip()
+        news_reason = str(bias.get("reason", "") or "").strip()
+        if news_reason:
+            updated["reason"] = f"{base_reason} | News: {news_reason}" if base_reason else f"News: {news_reason}"
+        updated["news_bias"] = direction
+        updated["news_score"] = score
+
+        side = str(updated.get("side", "") or "").lower()
+        if direction in {"buy", "sell"} and direction != side and abs(score) >= 0.35:
+            self.logger.info("Skipping %s %s due to conflicting news bias (%s %.3f)", symbol, side, direction, score)
+            return None
+
+        if direction == side and abs(score) >= 0.2:
+            updated["confidence"] = min(float(updated.get("confidence", 0.0) or 0.0) + 0.08, 0.99)
+
+        return updated
 
     async def _restart_telegram_service(self):
         if self.telegram_service is not None:
@@ -569,6 +1057,1154 @@ class AppController(QMainWindow):
             await self.telegram_service.stop()
         finally:
             self.telegram_service = None
+
+    def telegram_status_snapshot(self):
+        service = getattr(self, "telegram_service", None)
+        running = bool(getattr(service, "_running", False)) if service is not None else False
+        configured = bool(str(getattr(self, "telegram_bot_token", "") or "").strip())
+        chat_id = str(getattr(self, "telegram_chat_id", "") or "").strip()
+        masked_chat = "Not set"
+        if chat_id:
+            masked_chat = chat_id if len(chat_id) <= 6 else f"{chat_id[:3]}...{chat_id[-3:]}"
+        return {
+            "enabled": bool(getattr(self, "telegram_enabled", False)),
+            "configured": configured,
+            "running": running,
+            "chat_id": masked_chat,
+            "can_send": bool(service.can_send()) if service is not None else bool(configured and chat_id),
+        }
+
+    def telegram_management_text(self):
+        snapshot = self.telegram_status_snapshot()
+        return (
+            "Telegram Integration\n"
+            f"Enabled: {'YES' if snapshot['enabled'] else 'NO'}\n"
+            f"Configured: {'YES' if snapshot['configured'] else 'NO'}\n"
+            f"Running: {'YES' if snapshot['running'] else 'NO'}\n"
+            f"Chat ID: {snapshot['chat_id']}\n"
+            f"Can Send Messages: {'YES' if snapshot['can_send'] else 'NO'}"
+        )
+
+    async def _set_telegram_enabled_state(self, enabled):
+        self.telegram_enabled = bool(enabled)
+        self.settings.setValue("integrations/telegram_enabled", self.telegram_enabled)
+        if self.telegram_enabled:
+            await self._restart_telegram_service()
+        else:
+            await self._stop_telegram_service()
+
+    async def send_test_telegram_message(self, text=None):
+        service = getattr(self, "telegram_service", None)
+        if service is None or not service.can_send():
+            return False
+        message = text or (
+            "<b>Sopotek Telegram Test</b>\n"
+            "Sopotek Pilot sent this test message successfully."
+        )
+        return bool(await service.send_message(message))
+
+    async def submit_market_chat_trade(
+        self,
+        symbol,
+        side,
+        amount,
+        order_type="market",
+        price=None,
+        stop_loss=None,
+        take_profit=None,
+    ):
+        broker = getattr(self, "broker", None)
+        if broker is None:
+            raise RuntimeError("Connect a broker before placing a trade from Sopotek Pilot.")
+
+        trading_system = getattr(self, "trading_system", None)
+        execution_manager = getattr(trading_system, "execution_manager", None)
+        if execution_manager is not None:
+            order = await execution_manager.execute(
+                symbol=symbol,
+                side=side,
+                amount=amount,
+                type=order_type,
+                price=price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                source="chatgpt",
+                strategy_name="Sopotek Pilot",
+                reason="Sopotek Pilot trade command",
+                confidence=1.0,
+            )
+        else:
+            order = await broker.create_order(
+                symbol=symbol,
+                side=side,
+                amount=amount,
+                type=order_type,
+                price=price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+            )
+            if isinstance(order, dict):
+                order.setdefault("source", "chatgpt")
+                order.setdefault("strategy_name", "Sopotek Pilot")
+                order.setdefault("reason", "Sopotek Pilot trade command")
+
+        if not order:
+            raise RuntimeError("The order was skipped by broker or safety checks.")
+        return order
+
+    def market_chat_position_summary(self, open_window=True):
+        terminal = getattr(self, "terminal", None)
+        if terminal is None or not hasattr(terminal, "_position_analysis_window_payload"):
+            return None
+
+        try:
+            payload = terminal._position_analysis_window_payload() or {}
+        except Exception:
+            return None
+
+        if open_window and hasattr(terminal, "_open_position_analysis_window"):
+            try:
+                terminal._open_position_analysis_window()
+            except Exception:
+                pass
+
+        if not payload.get("available"):
+            exchange = str(payload.get("exchange") or getattr(getattr(self, "broker", None), "exchange_name", "") or "-")
+            return f"Position analysis is not available because no broker is currently connected. Last broker context: {exchange}."
+
+        positions = list(payload.get("positions", []) or [])
+        broker_label = str(payload.get("exchange") or "-").upper()
+        if not positions:
+            nav = payload.get("nav")
+            balance = payload.get("balance")
+            return (
+                "Position Analysis window opened.\n"
+                f"Broker: {broker_label} | Equity/NAV: {nav if nav is not None else '-'} | Balance/Cash: {balance if balance is not None else '-'}\n"
+                "No open positions were found."
+            )
+
+        total_unrealized = sum(float(item.get("pnl", 0.0) or 0.0) for item in positions)
+        total_realized = sum(float(item.get("realized_pnl", 0.0) or 0.0) for item in positions)
+        total_margin = sum(float(item.get("margin_used", 0.0) or 0.0) for item in positions)
+        total_value = sum(abs(float(item.get("value", 0.0) or 0.0)) for item in positions)
+        winner = max(positions, key=lambda item: float(item.get("pnl", 0.0) or 0.0))
+        loser = min(positions, key=lambda item: float(item.get("pnl", 0.0) or 0.0))
+        largest = max(positions, key=lambda item: abs(float(item.get("value", 0.0) or 0.0)))
+        long_count = sum(1 for item in positions if str(item.get("side", "")).lower() == "long")
+        short_count = sum(1 for item in positions if str(item.get("side", "")).lower() == "short")
+        closeout = payload.get("margin_closeout_percent")
+
+        lines = [
+            "Position Analysis window opened.",
+            (
+                f"Broker: {broker_label}"
+                f" | Equity/NAV: {payload.get('nav', '-')}"
+                f" | Balance/Cash: {payload.get('balance', '-')}"
+                f" | Unrealized P/L: {total_unrealized:.2f}"
+                f" | Realized P/L: {total_realized:.2f}"
+            ),
+            (
+                f"Open positions: {len(positions)}"
+                f" | Long: {long_count}"
+                f" | Short: {short_count}"
+                f" | Margin Used: {total_margin:.2f}"
+                f" | Total Exposure: {total_value:.2f}"
+            ),
+            (
+                f"Biggest winner: {winner.get('symbol', '-')} {float(winner.get('pnl', 0.0) or 0.0):.2f}"
+                f" | Biggest loser: {loser.get('symbol', '-')} {float(loser.get('pnl', 0.0) or 0.0):.2f}"
+            ),
+            f"Largest exposure: {largest.get('symbol', '-')} value {float(largest.get('value', 0.0) or 0.0):.2f}",
+        ]
+        if closeout is not None:
+            lines.append(f"Margin closeout percent: {closeout}")
+        lines.append("Use Tools -> Position Analysis for the detailed table.")
+        return "\n".join(lines)
+
+    # Backward-compatible alias
+    def market_chat_oanda_position_summary(self, open_window=True):
+        return self.market_chat_position_summary(open_window=open_window)
+
+    async def market_chat_quant_pm_summary(self, open_window=True):
+        terminal = getattr(self, "terminal", None)
+        if terminal is None or not hasattr(terminal, "_quant_pm_payload"):
+            return None
+
+        if open_window and hasattr(terminal, "_open_quant_pm_window"):
+            try:
+                terminal._open_quant_pm_window()
+            except Exception:
+                pass
+
+        try:
+            payload = await terminal._quant_pm_payload()
+        except Exception:
+            payload = {}
+
+        if not payload.get("available"):
+            broker_label = str(
+                payload.get("exchange")
+                or getattr(getattr(self, "broker", None), "exchange_name", "")
+                or "-"
+            ).upper()
+            return (
+                "Quant PM is not available yet because the trading system is not fully active. "
+                f"Current broker context: {broker_label}."
+            )
+
+        def fmt_money(value):
+            try:
+                numeric = float(value)
+            except Exception:
+                return "-"
+            return f"${numeric:,.2f}"
+
+        def fmt_pct(value):
+            try:
+                numeric = float(value)
+            except Exception:
+                return "-"
+            return f"{numeric:.2%}"
+
+        strategy_rows = list(payload.get("strategy_rows") or [])
+        position_rows = list(payload.get("position_rows") or [])
+        allocation = dict(payload.get("allocation_snapshot") or {})
+        risk = dict(payload.get("risk_snapshot") or {})
+        institutional = dict(payload.get("institutional_status") or {})
+        behavior = dict(payload.get("behavior_status") or {})
+        health_attention = [self._plain_text(str(item)) for item in (payload.get("health_attention") or []) if str(item).strip()]
+        top_strategy = strategy_rows[0] if strategy_rows else {}
+        top_position = position_rows[0] if position_rows else {}
+        correlation_rows = list(payload.get("correlation_rows") or [])
+        account = self._plain_text(str(payload.get("account") or "Profile unavailable"))
+        equity_label = fmt_money(payload.get("equity"))
+
+        lines = [
+            "Quant PM window opened.",
+            (
+                f"Broker: {str(payload.get('exchange') or '-').upper()} | "
+                f"Account: {account} | "
+                f"Mode: {payload.get('mode', 'PAPER')} | "
+                f"Equity: {equity_label} | "
+                f"Health: {self._plain_text(str(payload.get('health') or 'Not run'))}"
+            ),
+            (
+                f"Allocator: {self._plain_text(str((payload.get('allocator_status') or {}).get('allocation_model') or '-'))} | "
+                f"Target Weight: {fmt_pct(allocation.get('target_weight'))} | "
+                f"Strategy: {self._plain_text(str(allocation.get('strategy_name') or top_strategy.get('strategy') or '-'))}"
+            ),
+            (
+                f"Institutional Risk: {self._plain_text(str(risk.get('reason') or 'No recent decision'))} | "
+                f"Trade VaR: {fmt_pct(risk.get('trade_var_pct'))} | "
+                f"Gross Exposure: {fmt_pct(risk.get('gross_exposure_pct'))}"
+            ),
+            (
+                f"Behavior Guard: {self._plain_text(str(behavior.get('summary') or behavior.get('state') or '-'))} | "
+                f"Top strategy exposure: {self._plain_text(str(top_strategy.get('strategy') or '-'))} "
+                f"{fmt_money(top_strategy.get('exposure'))}"
+            ),
+        ]
+        if health_attention:
+            lines.append(f"Health attention: {' | '.join(health_attention[:3])}")
+        if top_position:
+            lines.append(
+                "Largest live position: "
+                f"{self._plain_text(str(top_position.get('symbol') or '-'))} "
+                f"{self._plain_text(str(top_position.get('direction') or '-'))} | "
+                f"Exposure {fmt_money(top_position.get('exposure'))}"
+            )
+        if correlation_rows:
+            anchor_row = correlation_rows[0]
+            anchor_symbol = str(anchor_row.get("symbol") or "").upper().strip()
+            peers = []
+            for key, value in anchor_row.items():
+                if key == "symbol":
+                    continue
+                try:
+                    numeric = float(value or 0.0)
+                except Exception:
+                    numeric = 0.0
+                peers.append((str(key), abs(numeric), numeric))
+            peers.sort(key=lambda item: item[1], reverse=True)
+            if peers:
+                peer_symbol, _, corr_value = peers[0]
+                lines.append(f"Highest visible correlation: {anchor_symbol} vs {peer_symbol} at {corr_value:.2f}.")
+        if institutional:
+            lines.append(
+                f"Portfolio limits: VaR {fmt_pct(institutional.get('max_portfolio_risk'))}, "
+                f"symbol cap {fmt_pct(institutional.get('max_symbol_exposure_pct'))}, "
+                f"gross cap {fmt_pct(institutional.get('max_gross_exposure_pct'))}."
+            )
+        lines.append("Use Tools -> Quant PM for the full allocator, exposure, and correlation view.")
+        return "\n".join(lines)
+
+    def market_chat_command_guide(self):
+        return (
+            "Sopotek Pilot Commands\n"
+            "\n"
+            "General\n"
+            "- help\n"
+            "- show commands\n"
+            "- show app status\n"
+            "- take a screenshot\n"
+            "\n"
+            "Trading Control\n"
+            "- start ai trading\n"
+            "- stop ai trading\n"
+            "- set ai scope all\n"
+            "- set ai scope selected\n"
+            "- set ai scope watchlist\n"
+            "- activate kill switch\n"
+            "- resume trading\n"
+            "\n"
+            "Windows and Tools\n"
+            "- open settings\n"
+            "- open system health\n"
+            "- open recommendations\n"
+            "- open performance\n"
+            "- open quant pm\n"
+            "- open ml research\n"
+            "- open closed journal\n"
+            "- open journal review\n"
+            "- open logs\n"
+            "- open position analysis\n"
+            "- open oanda positions\n"
+            "- open documentation\n"
+            "- open api docs\n"
+            "- open license\n"
+            "- open about\n"
+            "- open manual trade\n"
+            "\n"
+            "Refresh Actions\n"
+            "- refresh markets\n"
+            "- reload balances\n"
+            "- refresh chart\n"
+            "- refresh orderbook\n"
+            "\n"
+            "Telegram\n"
+            "- show telegram status\n"
+            "- enable telegram\n"
+            "- disable telegram\n"
+            "- restart telegram\n"
+            "- send telegram test message\n"
+            "\n"
+            "Trading Commands\n"
+            "- trade buy EUR/USD amount 1000 confirm\n"
+            "- trade sell GBP/USD amount 2000 type limit price 1.2710 sl 1.2750 tp 1.2620 confirm\n"
+            "- cancel order id 123456 confirm\n"
+            "- cancel orders for EUR/USD confirm\n"
+            "- close position EUR/USD confirm\n"
+            "- close position EUR/USD amount 1000 confirm\n"
+            "\n"
+            "Analysis\n"
+            "- show quant pm summary\n"
+            "- show my broker position analysis with equity, NAV, and P/L\n"
+            "- show trade history analysis\n"
+            "- summarize current recommendations and why\n"
+            "- summarize the latest news affecting my active symbols"
+        )
+
+    async def market_chat_app_status_summary(self, show_panel=True):
+        terminal = getattr(self, "terminal", None)
+        if terminal is not None and show_panel:
+            dock = getattr(terminal, "system_status_dock", None)
+            try:
+                if dock is not None and not dock.isVisible():
+                    terminal._show_system_status_panel()
+                elif dock is not None:
+                    dock.raise_()
+                    dock.activateWindow()
+            except Exception:
+                pass
+
+        status_lines = ["System status opened."]
+        try:
+            status_lines.append(self._plain_text(await self.telegram_status_text()))
+        except Exception:
+            status_lines.append("Runtime status is available in the System Status panel.")
+
+        behavior = self.get_behavior_guard_status() or {}
+        if behavior:
+            status_lines.append(
+                f"Behavior Guard: {self._plain_text(behavior.get('summary') or 'Active')} | "
+                f"Reason: {self._plain_text(behavior.get('reason') or 'No active restriction')}"
+            )
+        status_lines.append(f"Health Check: {self.get_health_check_summary()}")
+        return "\n".join(line for line in status_lines if line)
+
+    def _market_chat_open_orders_snapshot(self):
+        terminal = getattr(self, "terminal", None)
+        if terminal is None:
+            return []
+        snapshot = list(getattr(terminal, "_latest_open_orders_snapshot", []) or [])
+        normalized = []
+        normalizer = getattr(terminal, "_normalize_open_order_entry", None)
+        for item in snapshot:
+            if callable(normalizer):
+                try:
+                    entry = normalizer(item)
+                except Exception:
+                    entry = None
+                if entry is not None:
+                    payload = dict(entry)
+                    payload["_raw"] = item
+                    normalized.append(payload)
+                    continue
+            if isinstance(item, dict):
+                payload = dict(item)
+                payload.setdefault("_raw", item)
+                normalized.append(payload)
+        return normalized
+
+    def _market_chat_positions_snapshot(self):
+        terminal = getattr(self, "terminal", None)
+        if terminal is None:
+            return []
+        snapshot = list(getattr(terminal, "_latest_positions_snapshot", []) or [])
+        normalized = []
+        normalizer = getattr(terminal, "_normalize_position_entry", None)
+        for item in snapshot:
+            if callable(normalizer):
+                try:
+                    entry = normalizer(item)
+                except Exception:
+                    entry = None
+                if entry is not None:
+                    payload = dict(entry)
+                    payload["_raw"] = item
+                    normalized.append(payload)
+                    continue
+            if isinstance(item, dict):
+                payload = dict(item)
+                payload.setdefault("_raw", item)
+                normalized.append(payload)
+        return normalized
+
+    async def cancel_market_chat_order(self, order_id=None, symbol=None, cancel_all_for_symbol=False):
+        broker = getattr(self, "broker", None)
+        if broker is None:
+            raise RuntimeError("Connect a broker before canceling orders from Sopotek Pilot.")
+
+        normalized_symbol = str(symbol or "").strip().upper()
+        normalized_id = str(order_id or "").strip()
+        orders = self._market_chat_open_orders_snapshot()
+        matches = []
+        for order in orders:
+            candidate_id = str(order.get("order_id") or order.get("id") or "").strip()
+            candidate_symbol = str(order.get("symbol") or "").strip().upper()
+            if normalized_id and candidate_id == normalized_id:
+                matches.append(order)
+            elif normalized_symbol and candidate_symbol == normalized_symbol:
+                matches.append(order)
+
+        if normalized_id and not matches:
+            raise RuntimeError(f"No open order with id {normalized_id} was found.")
+        if normalized_symbol and not matches:
+            raise RuntimeError(f"No open orders for {normalized_symbol} were found.")
+        if not normalized_id and not normalized_symbol:
+            raise RuntimeError("Cancel order command needs an order id or symbol.")
+        if normalized_symbol and len(matches) > 1 and not cancel_all_for_symbol and not normalized_id:
+            ids = ", ".join(str(item.get("order_id") or item.get("id") or "-") for item in matches[:5])
+            raise RuntimeError(
+                f"Multiple open orders found for {normalized_symbol}. Use 'cancel orders for {normalized_symbol} confirm' or specify an order id. Matches: {ids}"
+            )
+
+        targets = matches if cancel_all_for_symbol or normalized_id else matches[:1]
+        results = []
+        for order in targets:
+            target_id = str(order.get("order_id") or order.get("id") or "").strip()
+            target_symbol = str(order.get("symbol") or normalized_symbol or "").strip().upper() or None
+            if not target_id:
+                continue
+            if hasattr(broker, "cancel_order"):
+                try:
+                    result = await broker.cancel_order(target_id, symbol=target_symbol)
+                except TypeError:
+                    result = await broker.cancel_order(target_id)
+            else:
+                raise RuntimeError("Current broker does not support cancel_order.")
+            results.append(result if result is not None else {"id": target_id, "symbol": target_symbol})
+
+        terminal = getattr(self, "terminal", None)
+        if terminal is not None and hasattr(terminal, "_schedule_open_orders_refresh"):
+            terminal._schedule_open_orders_refresh()
+        return results
+
+    async def close_market_chat_position(self, symbol, amount=None):
+        broker = getattr(self, "broker", None)
+        if broker is None:
+            raise RuntimeError("Connect a broker before closing positions from Sopotek Pilot.")
+
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol:
+            raise RuntimeError("Close position command needs a symbol.")
+
+        positions = self._market_chat_positions_snapshot()
+        target = None
+        for position in positions:
+            if str(position.get("symbol") or "").strip().upper() == normalized_symbol:
+                target = position
+                break
+        if target is None:
+            raise RuntimeError(f"No open position for {normalized_symbol} was found.")
+
+        resolved_amount = None
+        if amount is not None:
+            resolved_amount = abs(float(amount))
+            if resolved_amount <= 0:
+                raise RuntimeError("Close amount must be positive.")
+
+        result = None
+        if hasattr(broker, "close_position"):
+            try:
+                result = await broker.close_position(normalized_symbol, amount=resolved_amount, order_type="market")
+            except TypeError:
+                result = await broker.close_position(normalized_symbol, amount=resolved_amount)
+
+        if result is None:
+            side = str(target.get("side") or "").strip().lower()
+            close_side = "buy" if side in {"short", "sell"} else "sell"
+            fallback_amount = resolved_amount
+            if fallback_amount is None:
+                fallback_amount = abs(float(target.get("amount", target.get("units", 0.0)) or 0.0))
+            if fallback_amount <= 0:
+                raise RuntimeError(f"Unable to determine a valid close amount for {normalized_symbol}.")
+            result = await broker.create_order(
+                symbol=normalized_symbol,
+                side=close_side,
+                amount=fallback_amount,
+                type="market",
+            )
+
+        terminal = getattr(self, "terminal", None)
+        if terminal is not None:
+            if hasattr(terminal, "_schedule_positions_refresh"):
+                terminal._schedule_positions_refresh()
+            if hasattr(terminal, "_schedule_open_orders_refresh"):
+                terminal._schedule_open_orders_refresh()
+        return result
+
+    def market_chat_open_window(self, target):
+        terminal = getattr(self, "terminal", None)
+        if terminal is None:
+            return "Terminal UI is not available."
+
+        target_key = str(target or "").strip().lower()
+        if target_key in {"status", "system status"}:
+            dock = getattr(terminal, "system_status_dock", None)
+            if dock is not None and not dock.isVisible():
+                terminal._show_system_status_panel()
+            elif dock is not None:
+                dock.raise_()
+                dock.activateWindow()
+            return "System Status panel opened."
+
+        mapping = {
+            "settings": ("_open_settings", "Settings window opened."),
+            "system health": ("_open_system_health_window", "System Health window opened."),
+            "recommendations": ("_open_recommendations_window", "Trade Recommendations window opened."),
+            "performance": ("_open_performance", "Performance Analytics window opened."),
+            "quant pm": ("_open_quant_pm_window", "Quant PM window opened."),
+            "quant dashboard": ("_open_quant_pm_window", "Quant PM window opened."),
+            "ml research": ("_open_ml_research_window", "ML Research Lab window opened."),
+            "closed journal": ("_open_closed_journal_window", "Closed Trade Journal window opened."),
+            "journal review": ("_open_trade_journal_review_window", "Journal Review window opened."),
+            "logs": ("_open_logs", "System Logs window opened."),
+            "ml monitor": ("_open_ml_monitor", "ML Signal Monitor window opened."),
+            "position analysis": ("_open_position_analysis_window", "Position Analysis window opened."),
+            "oanda positions": ("_open_position_analysis_window", "Position Analysis window opened."),
+            "documentation": ("_open_docs", "Documentation window opened."),
+            "api docs": ("_open_api_docs", "API Reference window opened."),
+            "license": ("_open_license_manager", "License window opened."),
+            "about": ("_show_about", "About window opened."),
+            "manual trade": ("_open_manual_trade", "Manual Trade window opened."),
+            "market chat": ("_open_market_chat_window", "Sopotek Pilot window opened."),
+        }
+        method_name, success_message = mapping.get(target_key, (None, None))
+        if not method_name or not hasattr(terminal, method_name):
+            return None
+        getattr(terminal, method_name)()
+        return success_message
+
+    def _available_market_chat_symbols(self):
+        ordered = []
+        def add_symbol(symbol):
+            normalized = str(symbol or "").upper().strip()
+            if normalized and normalized not in ordered:
+                ordered.append(normalized)
+
+        for symbol in list(getattr(self, "symbols", []) or []):
+            add_symbol(symbol)
+
+        broker = getattr(self, "broker", None)
+        if broker is not None:
+            for symbol in list(getattr(broker, "symbols", []) or []):
+                add_symbol(symbol)
+            markets = getattr(getattr(broker, "exchange", None), "markets", None)
+            if isinstance(markets, dict):
+                for symbol in markets.keys():
+                    add_symbol(symbol)
+
+        terminal = getattr(self, "terminal", None)
+        current_symbol = None
+        if terminal is not None and hasattr(terminal, "_current_chart_symbol"):
+            try:
+                current_symbol = terminal._current_chart_symbol()
+            except Exception:
+                current_symbol = None
+        if current_symbol:
+            normalized = str(current_symbol).upper().strip()
+            if normalized:
+                if normalized in ordered:
+                    ordered.remove(normalized)
+                ordered.insert(0, normalized)
+        return ordered
+
+    def _extract_market_chat_timeframe(self, question):
+        lowered = str(question or "").strip().lower()
+        match = re.search(r"\b(1m|3m|5m|15m|30m|45m|1h|2h|4h|6h|8h|12h|1d|3d|1w)\b", lowered)
+        if match:
+            return match.group(1)
+        return str(getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+
+    def _resolve_market_chat_symbol(self, question):
+        text = str(question or "").strip().upper()
+        if not text:
+            return ""
+
+        available = self._available_market_chat_symbols()
+        available_set = set(available)
+        available_compact = {
+            re.sub(r"[^A-Z0-9]", "", symbol): symbol
+            for symbol in available
+            if str(symbol or "").strip()
+        }
+
+        for base, quote in re.findall(r"\b([A-Z0-9]{1,20})\s*[/:_-]\s*([A-Z0-9]{1,20})\b", text):
+            candidate = f"{base}/{quote}"
+            if candidate in available_set:
+                return candidate
+            compact_candidate = re.sub(r"[^A-Z0-9]", "", candidate)
+            if compact_candidate in available_compact:
+                return available_compact[compact_candidate]
+            return candidate
+
+        for token in re.findall(r"\b[A-Z0-9][A-Z0-9._/-]{0,23}\b", text):
+            normalized_token = token.strip().upper()
+            if normalized_token in available_set:
+                return normalized_token
+            compact_token = re.sub(r"[^A-Z0-9]", "", normalized_token)
+            if compact_token in available_compact:
+                return available_compact[compact_token]
+
+        collapsed_available = {}
+        for symbol in available:
+            collapsed_available[re.sub(r"[^A-Z0-9]", "", symbol)] = symbol
+        for token in re.findall(r"\b[A-Z0-9]{4,24}\b", text):
+            if token in collapsed_available:
+                return collapsed_available[token]
+
+        base_candidates = []
+        for token in re.findall(r"\b[A-Z0-9]{1,20}\b", text):
+            matches = [symbol for symbol in available if symbol.startswith(f"{token}/")]
+            if matches:
+                ranked = self._prioritize_symbols_for_trading(matches, top_n=len(matches))
+                if ranked:
+                    base_candidates.append(ranked[0])
+        return base_candidates[0] if base_candidates else ""
+
+    def _should_answer_market_snapshot(self, question, symbol):
+        normalized_symbol = str(symbol or "").upper().strip()
+        if not normalized_symbol:
+            return False
+
+        lowered = str(question or "").strip().lower()
+        if not lowered:
+            return False
+
+        blocked_tokens = (
+            "trade ",
+            "cancel order",
+            "cancel orders",
+            "close position",
+            "open settings",
+            "open system health",
+            "open recommendations",
+            "open performance",
+            "open quant pm",
+            "open logs",
+            "open ml monitor",
+            "open position analysis",
+            "take screenshot",
+            "capture screenshot",
+            "telegram",
+        )
+        if any(token in lowered for token in blocked_tokens):
+            return False
+
+        snapshot_tokens = (
+            "price",
+            "quote",
+            "scan",
+            "technical",
+            "analysis",
+            "analyze",
+            "analyse",
+            "trend",
+            "rsi",
+            "ema",
+            "support",
+            "resistance",
+            "snapshot",
+            "market",
+            "what about",
+            "how is",
+            "what do you think",
+        )
+        if any(token in lowered for token in snapshot_tokens):
+            return True
+
+        compact_question = re.sub(r"[^a-z0-9]", "", lowered)
+        compact_symbol = normalized_symbol.lower().replace("/", "")
+        if compact_question in {compact_symbol, normalized_symbol.lower().replace("/", ""), normalized_symbol.lower()}:
+            return True
+
+        explicit_pair = normalized_symbol.lower() in lowered or compact_symbol in compact_question
+        return explicit_pair and len(lowered.split()) <= 4
+
+    @staticmethod
+    def _market_chat_rsi(close_series, period=14):
+        if close_series is None or len(close_series) < 2:
+            return None
+        delta = close_series.diff()
+        gain = delta.clip(lower=0.0)
+        loss = -delta.clip(upper=0.0)
+        avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+        avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+        last_gain = float(avg_gain.iloc[-1]) if len(avg_gain) else 0.0
+        last_loss = float(avg_loss.iloc[-1]) if len(avg_loss) else 0.0
+        if last_loss <= 0:
+            if last_gain <= 0:
+                return 50.0
+            return 100.0
+        rs = last_gain / last_loss
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    async def market_chat_market_snapshot(self, symbol, timeframe=None):
+        normalized_symbol = str(symbol or "").upper().strip()
+        if not normalized_symbol:
+            return None
+
+        resolved_timeframe = str(timeframe or getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+        tick = await self._safe_fetch_ticker(normalized_symbol)
+        candles = await self._safe_fetch_ohlcv(normalized_symbol, timeframe=resolved_timeframe, limit=120)
+
+        if not isinstance(candles, list) or not candles:
+            if isinstance(tick, dict):
+                last_price = float(tick.get("price") or tick.get("last") or tick.get("bid") or tick.get("ask") or 0.0)
+                if last_price > 0:
+                    bid = float(tick.get("bid") or 0.0)
+                    ask = float(tick.get("ask") or 0.0)
+                    spread_pct = ((ask - bid) / last_price * 100.0) if bid > 0 and ask > 0 and last_price > 0 else None
+                    lines = [
+                        f"{normalized_symbol} snapshot ({resolved_timeframe})",
+                        f"Last: {last_price:,.4f}",
+                    ]
+                    if bid > 0 and ask > 0:
+                        spread_line = f"Bid/Ask: {bid:,.4f} / {ask:,.4f}"
+                        if spread_pct is not None:
+                            spread_line += f" | Spread: {spread_pct:.3f}%"
+                        lines.append(spread_line)
+                    lines.append("Technical scan is unavailable because candle history could not be loaded yet.")
+                    return "\n".join(lines)
+            return (
+                f"I couldn't pull a live {normalized_symbol} snapshot right now. "
+                f"Market data status: {self.get_market_stream_status()}."
+            )
+
+        frame = pd.DataFrame(candles)
+        if frame.shape[1] < 6:
+            return f"{normalized_symbol} data loaded, but the candle format is incomplete for analysis."
+        frame = frame.iloc[:, :6].copy()
+        frame.columns = ["timestamp", "open", "high", "low", "close", "volume"]
+        for column in ("open", "high", "low", "close", "volume"):
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame = frame.dropna(subset=["high", "low", "close"])
+        if frame.empty:
+            return f"{normalized_symbol} candle history is currently empty after cleanup."
+
+        closes = frame["close"]
+        highs = frame["high"]
+        lows = frame["low"]
+        latest_close = float(closes.iloc[-1])
+
+        bid = ask = 0.0
+        if isinstance(tick, dict):
+            bid = float(tick.get("bid") or 0.0)
+            ask = float(tick.get("ask") or 0.0)
+            tick_last = float(tick.get("price") or tick.get("last") or 0.0)
+            if tick_last > 0:
+                latest_close = tick_last
+
+        ema_fast = float(closes.ewm(span=min(20, max(len(closes), 2)), adjust=False).mean().iloc[-1])
+        ema_slow_span = 50 if len(closes) >= 50 else max(21, min(len(closes), 50))
+        ema_slow = float(closes.ewm(span=ema_slow_span, adjust=False).mean().iloc[-1])
+        rsi = self._market_chat_rsi(closes, period=14)
+
+        window = min(20, len(frame))
+        support = float(lows.tail(window).min())
+        resistance = float(highs.tail(window).max())
+
+        previous_close = float(closes.iloc[-2]) if len(closes) >= 2 else latest_close
+        change_pct = ((latest_close - previous_close) / previous_close * 100.0) if previous_close else 0.0
+
+        if latest_close >= ema_fast >= ema_slow:
+            trend = "Bullish"
+        elif latest_close <= ema_fast <= ema_slow:
+            trend = "Bearish"
+        else:
+            trend = "Mixed"
+
+        lines = [f"{normalized_symbol} snapshot ({resolved_timeframe})", f"Last: {latest_close:,.4f} | Change: {change_pct:+.2f}%"]
+        if bid > 0 and ask > 0:
+            spread_pct = ((ask - bid) / latest_close * 100.0) if latest_close > 0 else 0.0
+            lines.append(f"Bid/Ask: {bid:,.4f} / {ask:,.4f} | Spread: {spread_pct:.3f}%")
+        lines.append(f"Trend: {trend} | EMA20: {ema_fast:,.4f} | EMA50: {ema_slow:,.4f}")
+        if rsi is not None:
+            lines.append(f"RSI14: {float(rsi):.1f}")
+        lines.append(f"Support/Resistance ({window} candles): {support:,.4f} / {resistance:,.4f}")
+        return "\n".join(lines)
+
+    async def handle_market_chat_action(self, question):
+        lowered = str(question or "").strip().lower()
+        if not lowered:
+            return None
+
+        if lowered in {"help", "commands", "show commands", "list commands"} or any(
+            token in lowered
+            for token in (
+                "what can you do",
+                "what can sopotek pilot do",
+                "how do i control",
+                "manage the app",
+                "control the app",
+                "list of command",
+                "list of commands",
+                "command list",
+            )
+        ):
+            return self.market_chat_command_guide()
+
+        if "telegram" not in lowered and any(
+            token in lowered for token in ("show app status", "show status", "app status", "system status", "status summary")
+        ):
+            return await self.market_chat_app_status_summary(show_panel=True)
+
+        window_targets = [
+            ("open settings", "settings"),
+            ("open preferences", "settings"),
+            ("show settings", "settings"),
+            ("open system health", "system health"),
+            ("show system health", "system health"),
+            ("open recommendations", "recommendations"),
+            ("show recommendations", "recommendations"),
+            ("open performance", "performance"),
+            ("show performance", "performance"),
+            ("open quant pm", "quant pm"),
+            ("show quant pm", "quant pm"),
+            ("open quant dashboard", "quant dashboard"),
+            ("show quant dashboard", "quant dashboard"),
+            ("open ml research", "ml research"),
+            ("show ml research", "ml research"),
+            ("open closed journal", "closed journal"),
+            ("show closed journal", "closed journal"),
+            ("open journal review", "journal review"),
+            ("show journal review", "journal review"),
+            ("open logs", "logs"),
+            ("show logs", "logs"),
+            ("open ml monitor", "ml monitor"),
+            ("show ml monitor", "ml monitor"),
+            ("open position analysis", "position analysis"),
+            ("show position analysis", "position analysis"),
+            ("open oanda positions", "oanda positions"),
+            ("show oanda positions", "oanda positions"),
+            ("open documentation", "documentation"),
+            ("show documentation", "documentation"),
+            ("open api docs", "api docs"),
+            ("show api docs", "api docs"),
+            ("open license", "license"),
+            ("show license", "license"),
+            ("open about", "about"),
+            ("show about", "about"),
+            ("open manual trade", "manual trade"),
+            ("show manual trade", "manual trade"),
+        ]
+        for token, target in window_targets:
+            if token in lowered:
+                message = self.market_chat_open_window(target)
+                if message:
+                    return message
+
+        terminal = getattr(self, "terminal", None)
+        if terminal is not None:
+            scope_match = re.search(
+                r"(?:set|change|switch)\s+(?:ai\s+)?scope\s+(all|selected|selected symbol|watchlist)",
+                lowered,
+            )
+            if scope_match:
+                scope = scope_match.group(1).replace("selected symbol", "selected")
+                if hasattr(terminal, "_apply_autotrade_scope"):
+                    terminal._apply_autotrade_scope(scope)
+                    return f"AI scope set to {getattr(terminal, '_autotrade_scope_label', lambda: scope.title())()}."
+
+            if any(token in lowered for token in ("start ai trading", "enable ai trading", "turn on ai trading", "start auto trading", "enable auto trading")):
+                if hasattr(terminal, "_set_autotrading_enabled"):
+                    terminal._set_autotrading_enabled(True)
+                    return f"AI trading requested ON. Scope: {getattr(terminal, '_autotrade_scope_label', lambda: 'All Symbols')()}."
+
+            if any(token in lowered for token in ("stop ai trading", "disable ai trading", "turn off ai trading", "stop auto trading", "disable auto trading")):
+                if hasattr(terminal, "_set_autotrading_enabled"):
+                    terminal._set_autotrading_enabled(False)
+                    return "AI trading turned OFF."
+
+            if any(token in lowered for token in ("activate kill switch", "engage kill switch", "emergency stop", "trigger kill switch")):
+                if hasattr(terminal, "_activate_emergency_stop_async"):
+                    await terminal._activate_emergency_stop_async()
+                    return "Emergency kill switch engaged. Auto trading is OFF, open orders are being canceled, and tracked positions are being closed."
+
+            if any(token in lowered for token in ("resume trading", "clear kill switch", "disable kill switch", "resume after kill switch")):
+                if bool(getattr(self, "is_emergency_stop_active", lambda: False)()):
+                    self.clear_emergency_stop()
+                    if hasattr(terminal, "_update_kill_switch_button"):
+                        terminal._update_kill_switch_button()
+                    if hasattr(terminal, "_refresh_terminal"):
+                        terminal._refresh_terminal()
+                    return "Emergency lock cleared. Auto trading remains OFF until you enable it again."
+                return "Emergency lock is not active."
+
+            if any(token in lowered for token in ("refresh markets", "reload markets", "update markets")):
+                if hasattr(terminal, "_refresh_markets"):
+                    terminal._refresh_markets()
+                    return "Market Watch refresh requested."
+
+            if any(token in lowered for token in ("reload balances", "refresh balances", "reload balance", "refresh balance")):
+                if hasattr(terminal, "_reload_balance"):
+                    terminal._reload_balance()
+                    return "Balance reload requested."
+
+            if any(token in lowered for token in ("refresh chart", "reload chart")):
+                if hasattr(terminal, "_refresh_active_chart_data"):
+                    terminal._refresh_active_chart_data()
+                    return "Active chart refresh requested."
+
+            if any(token in lowered for token in ("refresh orderbook", "reload orderbook")):
+                if hasattr(terminal, "_refresh_active_orderbook"):
+                    terminal._refresh_active_orderbook()
+                    return "Orderbook refresh requested."
+
+        cancel_symbol_match = re.search(
+            r"(?:cancel)\s+orders?\s+(?:for|on)\s+([A-Za-z0-9_:/.-]+)",
+            lowered,
+        )
+        cancel_id_match = re.search(
+            r"(?:cancel)\s+orders?\s+(?:id\s+)?([A-Za-z0-9_-]{3,})",
+            lowered,
+        )
+        if cancel_symbol_match or ("cancel order" in lowered or "cancel orders" in lowered):
+            symbol = cancel_symbol_match.group(1).upper() if cancel_symbol_match else None
+            order_id = None
+            if not symbol and cancel_id_match:
+                token = cancel_id_match.group(1)
+                if token.upper() not in {"FOR", "ON", "ALL"}:
+                    order_id = token
+            if "confirm" not in lowered:
+                target_text = f"symbol={symbol}" if symbol else f"order_id={order_id or '?'}"
+                return (
+                    "Cancel-order command detected but not executed.\n"
+                    "Add the word CONFIRM to execute it.\n"
+                    f"Parsed target: {target_text}"
+                )
+            try:
+                results = await self.cancel_market_chat_order(
+                    order_id=order_id,
+                    symbol=symbol,
+                    cancel_all_for_symbol=bool(symbol),
+                )
+            except Exception as exc:
+                return f"Cancel-order command failed: {exc}"
+            count = len(results or [])
+            if symbol:
+                return f"Canceled {count} open order(s) for {symbol}."
+            return f"Canceled order {order_id}." if count else f"No cancellation was performed for order {order_id}."
+
+        close_match = re.search(
+            r"(?:close)\s+position\s+([A-Za-z0-9_:/.-]+)(?:\s+(?:amount|size|units)\s+([-+]?\d*\.?\d+))?",
+            lowered,
+        )
+        if close_match:
+            symbol, amount_text = close_match.groups()
+            if "confirm" not in lowered:
+                return (
+                    "Close-position command detected but not executed.\n"
+                    "Add the word CONFIRM to execute it.\n"
+                    f"Parsed target: symbol={symbol.upper()} amount={amount_text or 'full position'}"
+                )
+            amount = float(amount_text) if amount_text else None
+            try:
+                result = await self.close_market_chat_position(symbol.upper(), amount=amount)
+            except Exception as exc:
+                return f"Close-position command failed: {exc}"
+            status = str(result.get("status") or "submitted").replace("_", " ").upper() if isinstance(result, dict) else "SUBMITTED"
+            order_id = str(result.get("order_id") or result.get("id") or "-") if isinstance(result, dict) else "-"
+            return (
+                f"Close-position command executed.\n"
+                f"Symbol: {symbol.upper()}\n"
+                f"Amount: {amount if amount is not None else 'FULL POSITION'}\n"
+                f"Status: {status}\n"
+                f"Order ID: {order_id}"
+            )
+
+        if (
+            any(token in lowered for token in ("position analysis", "broker positions", "my positions", "account positions"))
+            and any(token in lowered for token in ("position", "positions", "nav", "equity", "margin", "p/l", "pl"))
+        ) or (
+            "oanda" in lowered and any(token in lowered for token in ("position", "positions", "nav", "margin", "p/l", "pl"))
+        ):
+            summary = self.market_chat_position_summary(open_window=True)
+            if summary:
+                return summary
+
+        if any(
+            token in lowered
+            for token in (
+                "quant pm",
+                "quant dashboard",
+                "portfolio allocator",
+                "capital at risk",
+                "portfolio risk dashboard",
+            )
+        ) and any(token in lowered for token in ("show", "open", "summary", "analysis", "analyze", "analyse")):
+            summary = await self.market_chat_quant_pm_summary(open_window=True)
+            if summary:
+                return summary
+
+        if any(
+            token in lowered
+            for token in (
+                "trade history analysis",
+                "analyze trade history",
+                "analyse trade history",
+                "trade journal analysis",
+                "review my trades",
+                "analyze my trades",
+                "analyse my trades",
+            )
+        ):
+            return await self.market_chat_trade_history_summary(limit=400, open_window=True)
+
+        if any(token in lowered for token in ("take screenshot", "take picture", "capture screenshot", "capture screen", "take a picture")):
+            path = await self.capture_app_screenshot(prefix="market_chat")
+            if path:
+                return f"Screenshot captured successfully.\nPath: {path}"
+            return "Unable to capture a screenshot right now."
+
+        trade_match = re.search(
+            r"(?:^|\b)trade\s+(buy|sell)\s+([A-Za-z0-9_:/.-]+)(?:\s+(?:amount|size|units)\s+([-+]?\d*\.?\d+))?(?:\s+(?:type)\s+(market|limit))?(?:\s+(?:price|at)\s+([-+]?\d*\.?\d+))?(?:\s+(?:sl|stop|stop_loss)\s+([-+]?\d*\.?\d+))?(?:\s+(?:tp|take_profit|takeprofit)\s+([-+]?\d*\.?\d+))?",
+            lowered,
+        )
+        if trade_match:
+            side, symbol, amount_text, order_type, price_text, sl_text, tp_text = trade_match.groups()
+            if "confirm" not in lowered:
+                return (
+                    "Trade command detected but not executed.\n"
+                    "Add the word CONFIRM to place it.\n"
+                    f"Parsed command: side={side.upper()} symbol={symbol.upper()} amount={amount_text or '?'} "
+                    f"type={(order_type or 'market').upper()} price={price_text or '-'} sl={sl_text or '-'} tp={tp_text or '-'}"
+                )
+
+            if not amount_text:
+                return "Trade command needs an amount. Example: trade buy EUR/USD amount 1000 confirm"
+
+            amount = float(amount_text)
+            if amount <= 0:
+                return "Trade amount must be positive."
+
+            resolved_type = (order_type or "market").lower()
+            price = float(price_text) if price_text else None
+            stop_loss = float(sl_text) if sl_text else None
+            take_profit = float(tp_text) if tp_text else None
+            if resolved_type == "limit" and (price is None or price <= 0):
+                return "Limit trade commands need a positive price."
+
+            try:
+                order = await self.submit_market_chat_trade(
+                    symbol=symbol.upper(),
+                    side=side,
+                    amount=amount,
+                    order_type=resolved_type,
+                    price=price,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                )
+            except Exception as exc:
+                return f"Trade command failed: {exc}"
+
+            status = str(order.get("status") or "submitted").replace("_", " ").upper()
+            order_id = str(order.get("order_id") or order.get("id") or "-")
+            return (
+                f"Trade command executed.\n"
+                f"Status: {status}\n"
+                f"Symbol: {symbol.upper()}\n"
+                f"Side: {side.upper()}\n"
+                f"Amount: {amount}\n"
+                f"Type: {resolved_type.upper()}\n"
+                f"Order ID: {order_id}"
+            )
+
+        market_symbol = self._resolve_market_chat_symbol(question)
+        if self._should_answer_market_snapshot(question, market_symbol):
+            timeframe = self._extract_market_chat_timeframe(question)
+            snapshot = await self.market_chat_market_snapshot(market_symbol, timeframe=timeframe)
+            if snapshot:
+                return snapshot
+
+        if "telegram" not in lowered:
+            return None
+
+        if any(token in lowered for token in ("telegram status", "status telegram", "telegram info", "telegram summary", "manage telegram")):
+            return self.telegram_management_text()
+
+        if any(token in lowered for token in ("disable telegram", "turn off telegram", "stop telegram")):
+            await self._set_telegram_enabled_state(False)
+            return self.telegram_management_text() + "\n\nTelegram has been disabled."
+
+        if any(token in lowered for token in ("enable telegram", "turn on telegram", "start telegram")):
+            if not str(getattr(self, "telegram_bot_token", "") or "").strip():
+                return "Telegram cannot be enabled because the bot token is not configured in Settings -> Integrations."
+            if not str(getattr(self, "telegram_chat_id", "") or "").strip():
+                return "Telegram cannot be enabled because the chat ID is not configured in Settings -> Integrations."
+            await self._set_telegram_enabled_state(True)
+            return self.telegram_management_text() + "\n\nTelegram has been enabled."
+
+        if any(token in lowered for token in ("restart telegram", "reconnect telegram", "refresh telegram")):
+            if not str(getattr(self, "telegram_bot_token", "") or "").strip():
+                return "Telegram cannot be restarted because the bot token is not configured."
+            await self._restart_telegram_service()
+            return self.telegram_management_text() + "\n\nTelegram restart requested."
+
+        if any(token in lowered for token in ("test telegram", "send telegram test", "telegram test message")):
+            if not str(getattr(self, "telegram_bot_token", "") or "").strip():
+                return "Telegram test failed because the bot token is not configured."
+            if not str(getattr(self, "telegram_chat_id", "") or "").strip():
+                return "Telegram test failed because the chat ID is not configured."
+            if not getattr(self, "telegram_enabled", False):
+                await self._set_telegram_enabled_state(True)
+            sent = await self.send_test_telegram_message()
+            if sent:
+                return self.telegram_management_text() + "\n\nTest message sent to Telegram."
+            return self.telegram_management_text() + "\n\nTelegram test message could not be sent."
+
+        return None
 
     def set_autotrade_scope(self, scope):
         normalized = str(scope or "all").strip().lower()
@@ -698,8 +2334,8 @@ class AppController(QMainWindow):
     def _build_ws_client(self, exchange):
         symbols = self.symbols[:50]
 
-        if exchange.startswith("binanceus"):
-            return BinanceUsWebSocket(symbols=symbols, event_bus=self.ws_bus)
+        if exchange.startswith("binance"):
+            return BinanceUsWebSocket(symbols=symbols, event_bus=self.ws_bus, exchange_name=exchange)
 
         if exchange == "coinbase":
             products = [s.replace("/", "-") for s in symbols]
@@ -812,6 +2448,109 @@ class AppController(QMainWindow):
 
         return None
 
+    def _normalize_public_trade_rows(self, symbol, rows, limit=40):
+        normalized = []
+        for raw in rows or []:
+            if not isinstance(raw, dict):
+                continue
+
+            price = self._normalize_history_float(
+                raw.get("price") or raw.get("rate") or raw.get("last")
+            )
+            amount = self._normalize_history_float(
+                raw.get("amount")
+                or raw.get("size")
+                or raw.get("qty")
+                or raw.get("quantity")
+                or raw.get("volume")
+            )
+            cost = self._normalize_history_float(
+                raw.get("cost") or raw.get("notional") or raw.get("quoteVolume")
+            )
+
+            if cost is None and price is not None and amount is not None:
+                cost = price * amount
+
+            if price is None and cost is None:
+                continue
+
+            side = str(raw.get("side") or raw.get("taker_side") or raw.get("direction") or "").strip().lower()
+            timestamp = (
+                raw.get("datetime")
+                or raw.get("timestamp")
+                or raw.get("time")
+                or raw.get("created_at")
+            )
+
+            normalized.append(
+                {
+                    "symbol": str(raw.get("symbol") or symbol or "").strip() or symbol,
+                    "side": side if side in {"buy", "sell"} else "unknown",
+                    "price": price,
+                    "amount": amount,
+                    "notional": cost,
+                    "timestamp": timestamp,
+                    "time": self._history_timestamp_text(timestamp) or str(timestamp or "-"),
+                }
+            )
+
+        return normalized[: max(1, int(limit or 40))]
+
+    async def _safe_fetch_recent_trades(self, symbol, limit=40):
+        if not symbol:
+            return []
+
+        broker = getattr(self, "broker", None)
+        if broker is not None and hasattr(broker, "fetch_trades"):
+            try:
+                rows = await broker.fetch_trades(symbol, limit=limit)
+                normalized = self._normalize_public_trade_rows(symbol, rows, limit=limit)
+                if normalized:
+                    return normalized
+            except TypeError:
+                try:
+                    rows = await broker.fetch_trades(symbol)
+                    normalized = self._normalize_public_trade_rows(symbol, rows, limit=limit)
+                    if normalized:
+                        return normalized
+                except Exception as exc:
+                    self.logger.debug("Recent trade fetch failed for %s: %s", symbol, exc)
+            except Exception as exc:
+                self.logger.debug("Recent trade fetch failed for %s: %s", symbol, exc)
+
+        tick = await self._safe_fetch_ticker(symbol)
+        if not isinstance(tick, dict):
+            return []
+
+        price = self._normalize_history_float(tick.get("price") or tick.get("last") or tick.get("bid"))
+        if price is None or price <= 0:
+            return []
+
+        bid = self._normalize_history_float(tick.get("bid")) or price * 0.9997
+        ask = self._normalize_history_float(tick.get("ask")) or price * 1.0003
+        now = datetime.now(timezone.utc)
+        synthetic = [
+            {
+                "symbol": symbol,
+                "side": "sell",
+                "price": bid,
+                "amount": 0.35,
+                "notional": bid * 0.35,
+                "timestamp": now.isoformat(),
+                "time": self._history_timestamp_text(now),
+            },
+            {
+                "symbol": symbol,
+                "side": "buy",
+                "price": ask,
+                "amount": 0.42,
+                "notional": ask * 0.42,
+                "timestamp": now.isoformat(),
+                "time": self._history_timestamp_text(now),
+            },
+        ]
+        return synthetic[: max(1, min(int(limit or 2), len(synthetic)))]
+
     def _active_exchange_code(self):
         broker = getattr(self, "broker", None)
         if broker is not None:
@@ -879,6 +2618,7 @@ class AppController(QMainWindow):
                 {
                     "symbol": getattr(trade, "symbol", ""),
                     "side": getattr(trade, "side", ""),
+                    "source": getattr(trade, "source", ""),
                     "price": getattr(trade, "price", ""),
                     "size": getattr(trade, "quantity", ""),
                     "order_type": getattr(trade, "order_type", ""),
@@ -886,6 +2626,13 @@ class AppController(QMainWindow):
                     "order_id": getattr(trade, "order_id", ""),
                     "timestamp": getattr(trade, "timestamp", ""),
                     "pnl": getattr(trade, "pnl", ""),
+                    "strategy_name": getattr(trade, "strategy_name", ""),
+                    "reason": getattr(trade, "reason", ""),
+                    "confidence": getattr(trade, "confidence", ""),
+                    "expected_price": getattr(trade, "expected_price", ""),
+                    "spread_bps": getattr(trade, "spread_bps", ""),
+                    "slippage_bps": getattr(trade, "slippage_bps", ""),
+                    "fee": getattr(trade, "fee", ""),
                 }
             )
 
@@ -920,9 +2667,762 @@ class AppController(QMainWindow):
             self.performance_engine.record_trade(trade)
 
         self.trade_signal.emit(trade)
+        if trade.get("blocked_by_guard") and self.terminal is not None:
+            system_console = getattr(self.terminal, "system_console", None)
+            if system_console is not None:
+                source = str(trade.get("source") or "bot").strip().lower() or "bot"
+                reason = str(trade.get("reason") or "Behavior guard blocked the trade.").strip()
+                system_console.log(f"{source.title()} trade blocked: {reason}", "WARN")
         telegram_service = getattr(self, "telegram_service", None)
         if telegram_service is not None:
             self._create_task(telegram_service.notify_trade(trade), "telegram_trade_notify")
+
+    def _extract_balance_equity_value(self, balances):
+        if not isinstance(balances, dict):
+            return None
+
+        direct_equity = balances.get("equity")
+        if direct_equity is not None:
+            try:
+                return float(direct_equity)
+            except Exception:
+                return None
+
+        total = balances.get("total")
+        if isinstance(total, dict):
+            for currency in ("USDT", "USD", "USDC", "BUSD"):
+                value = total.get(currency)
+                if value is None:
+                    continue
+                try:
+                    return float(value)
+                except Exception:
+                    continue
+            if len(total) == 1:
+                try:
+                    return float(next(iter(total.values())))
+                except Exception:
+                    return None
+        return None
+
+    def _update_behavior_guard_equity(self, balances=None):
+        guard = getattr(self, "behavior_guard", None)
+        if guard is None:
+            return
+        equity = self._extract_balance_equity_value(balances if balances is not None else getattr(self, "balances", {}))
+        if equity is None:
+            return
+        try:
+            guard.record_equity(equity)
+        except Exception:
+            self.logger.debug("Behavior guard equity update failed", exc_info=True)
+
+    def current_trading_mode(self):
+        broker_config = getattr(getattr(self, "config", None), "broker", None)
+        value = getattr(broker_config, "mode", None) or getattr(getattr(self, "broker", None), "mode", None) or "paper"
+        return str(value or "paper").strip().lower()
+
+    def is_live_mode(self):
+        mode = self.current_trading_mode()
+        broker_config = getattr(getattr(self, "config", None), "broker", None)
+        exchange = str(getattr(broker_config, "exchange", "") or "").strip().lower()
+        return mode == "live" and exchange != "paper"
+
+    def current_account_label(self):
+        broker = getattr(self, "broker", None)
+        broker_config = getattr(getattr(self, "config", None), "broker", None)
+        account_id = getattr(broker, "account_id", None) or getattr(broker_config, "account_id", None) or ""
+        text = str(account_id or "").strip()
+        if not text:
+            return "Not set"
+        if len(text) <= 8:
+            return text
+        return f"{text[:4]}...{text[-4:]}"
+
+    def _resolve_broker_capability(self, method_name):
+        broker = getattr(self, "broker", None)
+        if broker is None:
+            return False
+        exchange_has = getattr(broker, "_exchange_has", None)
+        if callable(exchange_has):
+            try:
+                return bool(exchange_has(method_name))
+            except Exception:
+                pass
+        return callable(getattr(broker, method_name, None))
+
+    def get_broker_capabilities(self):
+        broker = getattr(self, "broker", None)
+        if broker is None:
+            return {}
+
+        markets = getattr(getattr(broker, "exchange", None), "markets", None)
+        supported_venues = self.supported_market_venues()
+        option_market_available = "option" in supported_venues
+        derivative_market_available = "derivative" in supported_venues
+        otc_market_available = "otc" in supported_venues
+        if isinstance(markets, dict) and markets:
+            option_market_available = option_market_available or any(
+                bool((market or {}).get("option")) for market in markets.values()
+            )
+
+        return {
+            "connectivity": self._resolve_broker_capability("fetch_status"),
+            "trading": self._resolve_broker_capability("create_order"),
+            "cancel_orders": self._resolve_broker_capability("cancel_all_orders") or self._resolve_broker_capability("cancel_order"),
+            "positions": self._resolve_broker_capability("fetch_positions"),
+            "open_orders": self._resolve_broker_capability("fetch_open_orders"),
+            "closed_orders": self._resolve_broker_capability("fetch_closed_orders"),
+            "order_tracking": self._resolve_broker_capability("fetch_order"),
+            "orderbook": self._resolve_broker_capability("fetch_orderbook") or self._resolve_broker_capability("fetch_order_book"),
+            "candles": self._resolve_broker_capability("fetch_ohlcv"),
+            "ticker": self._resolve_broker_capability("fetch_ticker"),
+            "derivatives_market": derivative_market_available,
+            "options_market": option_market_available,
+            "otc_market": otc_market_available,
+            "supported_market_venues": supported_venues,
+        }
+
+    def activate_emergency_stop(self, reason="Emergency kill switch active"):
+        guard = getattr(self, "behavior_guard", None)
+        if guard is None and getattr(getattr(self, "trading_system", None), "behavior_guard", None) is not None:
+            guard = self.trading_system.behavior_guard
+            self.behavior_guard = guard
+        if guard is not None:
+            guard.activate_manual_lock(reason)
+
+    def clear_emergency_stop(self):
+        guard = getattr(self, "behavior_guard", None)
+        if guard is not None:
+            guard.clear_manual_lock()
+
+    def is_emergency_stop_active(self):
+        guard = getattr(self, "behavior_guard", None)
+        if guard is None:
+            return False
+        return bool(getattr(guard, "is_locked", lambda: False)())
+
+    def get_behavior_guard_status(self):
+        guard = getattr(self, "behavior_guard", None)
+        if guard is None:
+            return {}
+        try:
+            return dict(guard.status_snapshot() or {})
+        except Exception:
+            self.logger.debug("Behavior guard status lookup failed", exc_info=True)
+            return {}
+
+    async def run_startup_health_check(self):
+        broker = getattr(self, "broker", None)
+        if broker is None:
+            self.health_check_report = []
+            self.health_check_summary = "No broker connected"
+            return []
+
+        symbol = next(iter(getattr(self, "symbols", []) or []), None)
+        capabilities = self.get_broker_capabilities()
+        results = []
+
+        async def _run_check(name, coro_factory, optional=False):
+            try:
+                detail = await coro_factory()
+                results.append({"name": name, "status": "pass", "detail": detail or "OK"})
+            except NotImplementedError:
+                results.append({"name": name, "status": "skip" if optional else "warn", "detail": "Not supported by broker"})
+            except Exception as exc:
+                results.append({"name": name, "status": "warn" if optional else "fail", "detail": str(exc)})
+
+        if capabilities.get("connectivity"):
+            async def _fetch_connectivity():
+                status = await broker.fetch_status()
+                if isinstance(status, dict):
+                    broker_label = str(status.get("broker") or getattr(broker, "exchange_name", "") or "").upper()
+                    status_text = str(status.get("status") or "ok").upper()
+                    return f"{broker_label + ' ' if broker_label else ''}{status_text}".strip()
+                return status
+
+            await _run_check("Connectivity", _fetch_connectivity)
+        else:
+            results.append(
+                {
+                    "name": "Connectivity",
+                    "status": "pass" if self._broker_is_connected(broker) else "warn",
+                    "detail": "Connected" if self._broker_is_connected(broker) else "Connection state unavailable",
+                }
+            )
+
+        await _run_check("Balance", lambda: self._fetch_balances(broker))
+        if symbol and capabilities.get("ticker"):
+            await _run_check("Ticker", lambda: self._safe_fetch_ticker(symbol))
+        elif symbol:
+            results.append({"name": "Ticker", "status": "skip", "detail": "Ticker endpoint not available"})
+
+        if symbol and capabilities.get("candles"):
+            await _run_check(
+                "Candles",
+                lambda: broker.fetch_ohlcv(symbol, timeframe=getattr(self, "time_frame", "1h"), limit=50),
+            )
+        elif symbol:
+            results.append({"name": "Candles", "status": "skip", "detail": "Candle endpoint not available"})
+
+        if symbol and capabilities.get("orderbook"):
+            await _run_check("Orderbook", lambda: broker.fetch_orderbook(symbol, limit=10), optional=True)
+        else:
+            results.append({"name": "Orderbook", "status": "skip", "detail": "Orderbook not supported"})
+
+        if capabilities.get("open_orders"):
+            async def _fetch_open_orders():
+                snapshot = getattr(broker, "fetch_open_orders_snapshot", None)
+                if callable(snapshot):
+                    return await snapshot(symbols=getattr(self, "symbols", []), limit=10)
+                if symbol:
+                    return await broker.fetch_open_orders(symbol=symbol, limit=10)
+                return await broker.fetch_open_orders(limit=10)
+
+            await _run_check("Open Orders", _fetch_open_orders, optional=True)
+        else:
+            results.append({"name": "Open Orders", "status": "skip", "detail": "Open-order endpoint not supported"})
+
+        if capabilities.get("positions"):
+            await _run_check("Positions", lambda: broker.fetch_positions(), optional=True)
+        else:
+            results.append({"name": "Positions", "status": "skip", "detail": "Position endpoint not supported"})
+
+        results.append(
+            {
+                "name": "Order Submit Route",
+                "status": "pass" if capabilities.get("trading") else "warn",
+                "detail": "Execution route available" if capabilities.get("trading") else "Order creation not available",
+            }
+        )
+        results.append(
+            {
+                "name": "Order Tracking",
+                "status": "pass" if capabilities.get("order_tracking") else "warn",
+                "detail": "Live order status lookup available" if capabilities.get("order_tracking") else "No live fetch_order support",
+            }
+        )
+
+        passed = sum(1 for item in results if item["status"] == "pass")
+        failed = sum(1 for item in results if item["status"] == "fail")
+        warned = sum(1 for item in results if item["status"] == "warn")
+        self.health_check_report = results
+        if failed:
+            self.health_check_summary = f"{passed} pass / {warned} warn / {failed} fail"
+        else:
+            self.health_check_summary = f"{passed} pass / {warned} warn"
+        return results
+
+    def get_health_check_report(self):
+        return list(self.health_check_report or [])
+
+    def get_health_check_summary(self):
+        return str(self.health_check_summary or "Not run")
+
+    def get_pipeline_status_snapshot(self):
+        trading_system = getattr(self, "trading_system", None)
+        resolver = getattr(trading_system, "pipeline_status_snapshot", None)
+        if callable(resolver):
+            try:
+                return dict(resolver() or {})
+            except Exception:
+                self.logger.debug("Pipeline status lookup failed", exc_info=True)
+        return {}
+
+    def get_pipeline_status_summary(self):
+        snapshot = self.get_pipeline_status_snapshot()
+        if not snapshot:
+            return "Idle"
+
+        counts = {"filled": 0, "submitted": 0, "signal": 0, "approved": 0, "hold": 0, "rejected": 0, "blocked": 0, "skipped": 0}
+        for payload in snapshot.values():
+            status = str((payload or {}).get("status") or "unknown").strip().lower()
+            counts[status] = counts.get(status, 0) + 1
+
+        active = counts.get("filled", 0) + counts.get("submitted", 0) + counts.get("signal", 0) + counts.get("approved", 0)
+        guarded = counts.get("rejected", 0) + counts.get("blocked", 0)
+        holding = counts.get("hold", 0) + counts.get("skipped", 0)
+        return f"{active} active / {guarded} guarded / {holding} idle"
+
+    async def fetch_closed_trade_journal(self, limit=150):
+        rows = []
+        seen = set()
+        repository = getattr(self, "trade_repository", None)
+        repo_rows = []
+        if repository is not None:
+            try:
+                repo_rows = await asyncio.to_thread(repository.get_trades, max(int(limit) * 2, 100))
+            except Exception as exc:
+                self.logger.debug("Trade DB journal load failed: %s", exc)
+
+        source_map = {}
+        for trade in repo_rows or []:
+            order_id = str(getattr(trade, "order_id", "") or "").strip()
+            if order_id and order_id not in source_map:
+                source_map[order_id] = {
+                    "trade_db_id": getattr(trade, "id", None),
+                    "source": getattr(trade, "source", "") or "",
+                    "status": getattr(trade, "status", "") or "",
+                    "timestamp": getattr(trade, "timestamp", "") or "",
+                    "price": getattr(trade, "price", "") or "",
+                    "size": getattr(trade, "quantity", "") or "",
+                    "pnl": getattr(trade, "pnl", "") or "",
+                    "strategy_name": getattr(trade, "strategy_name", "") or "",
+                    "reason": getattr(trade, "reason", "") or "",
+                    "confidence": getattr(trade, "confidence", "") or "",
+                    "expected_price": getattr(trade, "expected_price", "") or "",
+                    "spread_bps": getattr(trade, "spread_bps", "") or "",
+                    "slippage_bps": getattr(trade, "slippage_bps", "") or "",
+                    "fee": getattr(trade, "fee", "") or "",
+                    "stop_loss": getattr(trade, "stop_loss", "") or "",
+                    "take_profit": getattr(trade, "take_profit", "") or "",
+                    "setup": getattr(trade, "setup", "") or "",
+                    "outcome": getattr(trade, "outcome", "") or "",
+                    "lessons": getattr(trade, "lessons", "") or "",
+                }
+
+        broker = getattr(self, "broker", None)
+        if broker is not None and self._resolve_broker_capability("fetch_closed_orders"):
+            try:
+                broker_rows = await broker.fetch_closed_orders(limit=limit)
+            except Exception as exc:
+                self.logger.debug("Closed-order journal fetch failed: %s", exc)
+                broker_rows = []
+            for row in broker_rows or []:
+                if not isinstance(row, dict):
+                    continue
+                order_id = str(row.get("id") or row.get("order_id") or "").strip()
+                seen.add(order_id)
+                repo_meta = source_map.get(order_id, {})
+                rows.append(
+                    {
+                        "trade_db_id": repo_meta.get("trade_db_id"),
+                        "timestamp": row.get("timestamp") or repo_meta.get("timestamp") or "",
+                        "symbol": row.get("symbol") or "",
+                        "source": row.get("source") or repo_meta.get("source") or "broker",
+                        "side": row.get("side") or "",
+                        "price": row.get("average") or row.get("price") or repo_meta.get("price") or "",
+                        "size": row.get("filled") or row.get("amount") or repo_meta.get("size") or "",
+                        "order_type": row.get("type") or "",
+                        "status": row.get("status") or repo_meta.get("status") or "",
+                        "order_id": order_id,
+                        "pnl": row.get("pnl") or repo_meta.get("pnl") or "",
+                        "strategy_name": repo_meta.get("strategy_name") or "",
+                        "reason": repo_meta.get("reason") or "",
+                        "confidence": repo_meta.get("confidence") or "",
+                        "expected_price": repo_meta.get("expected_price") or "",
+                        "spread_bps": repo_meta.get("spread_bps") or "",
+                        "slippage_bps": repo_meta.get("slippage_bps") or "",
+                        "fee": repo_meta.get("fee") or "",
+                        "stop_loss": repo_meta.get("stop_loss") or "",
+                        "take_profit": repo_meta.get("take_profit") or "",
+                        "setup": repo_meta.get("setup") or "",
+                        "outcome": repo_meta.get("outcome") or "",
+                        "lessons": repo_meta.get("lessons") or "",
+                    }
+                )
+
+        for trade in repo_rows or []:
+            order_id = str(getattr(trade, "order_id", "") or "").strip()
+            if order_id and order_id in seen:
+                continue
+            status = str(getattr(trade, "status", "") or "").strip().lower()
+            if status not in {"filled", "closed", "canceled", "cancelled", "rejected", "expired", "failed"}:
+                continue
+            rows.append(
+                {
+                    "trade_db_id": getattr(trade, "id", None),
+                    "timestamp": getattr(trade, "timestamp", "") or "",
+                    "symbol": getattr(trade, "symbol", "") or "",
+                    "source": getattr(trade, "source", "") or "",
+                    "side": getattr(trade, "side", "") or "",
+                    "price": getattr(trade, "price", "") or "",
+                    "size": getattr(trade, "quantity", "") or "",
+                    "order_type": getattr(trade, "order_type", "") or "",
+                    "status": getattr(trade, "status", "") or "",
+                    "order_id": order_id,
+                    "pnl": getattr(trade, "pnl", "") or "",
+                    "strategy_name": getattr(trade, "strategy_name", "") or "",
+                    "reason": getattr(trade, "reason", "") or "",
+                    "confidence": getattr(trade, "confidence", "") or "",
+                    "expected_price": getattr(trade, "expected_price", "") or "",
+                    "spread_bps": getattr(trade, "spread_bps", "") or "",
+                    "slippage_bps": getattr(trade, "slippage_bps", "") or "",
+                    "fee": getattr(trade, "fee", "") or "",
+                    "stop_loss": getattr(trade, "stop_loss", "") or "",
+                    "take_profit": getattr(trade, "take_profit", "") or "",
+                    "setup": getattr(trade, "setup", "") or "",
+                    "outcome": getattr(trade, "outcome", "") or "",
+                    "lessons": getattr(trade, "lessons", "") or "",
+                }
+            )
+
+        rows.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+        return rows[:limit]
+
+    def _normalize_history_float(self, value):
+        if value in (None, "", "-"):
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _history_timestamp_text(self, value):
+        if value in (None, ""):
+            return ""
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc).isoformat()
+            return value.astimezone(timezone.utc).isoformat()
+        return str(value)
+
+    def _normalize_broker_trade_history_row(self, row, repo_meta=None):
+        if not isinstance(row, dict):
+            return None
+        repo_meta = dict(repo_meta or {})
+
+        order_id = str(
+            row.get("order_id")
+            or row.get("orderID")
+            or row.get("id")
+            or row.get("tradeID")
+            or row.get("clientOrderId")
+            or ""
+        ).strip()
+        symbol = str(row.get("symbol") or row.get("instrument") or "").strip()
+
+        side = row.get("side")
+        if not side:
+            units = self._normalize_history_float(
+                row.get("currentUnits") or row.get("units") or row.get("amount") or row.get("filled")
+            )
+            if units is not None:
+                side = "buy" if units >= 0 else "sell"
+        size = self._normalize_history_float(
+            row.get("amount")
+            or row.get("filled")
+            or row.get("units")
+            or row.get("currentUnits")
+            or row.get("initialUnits")
+            or repo_meta.get("size")
+        )
+        if size is not None:
+            size = abs(size)
+
+        timestamp = (
+            row.get("timestamp")
+            or row.get("datetime")
+            or row.get("time")
+            or row.get("closeTime")
+            or row.get("openTime")
+            or repo_meta.get("timestamp")
+            or ""
+        )
+        status = str(
+            row.get("status")
+            or row.get("state")
+            or row.get("orderState")
+            or repo_meta.get("status")
+            or "filled"
+        ).strip().lower()
+
+        normalized = {
+            "trade_db_id": repo_meta.get("trade_db_id"),
+            "timestamp": self._history_timestamp_text(timestamp),
+            "symbol": symbol,
+            "source": repo_meta.get("source") or "broker_trade_history",
+            "side": str(side or "").strip().lower(),
+            "price": row.get("price") or row.get("average") or row.get("averagePrice") or repo_meta.get("price") or "",
+            "size": size if size is not None else "",
+            "order_type": row.get("type") or repo_meta.get("order_type") or "",
+            "status": status,
+            "order_id": order_id,
+            "pnl": row.get("pnl") or row.get("realizedPL") or row.get("pl") or repo_meta.get("pnl") or "",
+            "strategy_name": repo_meta.get("strategy_name") or "",
+            "reason": repo_meta.get("reason") or "",
+            "confidence": repo_meta.get("confidence") or "",
+            "expected_price": repo_meta.get("expected_price") or "",
+            "spread_bps": repo_meta.get("spread_bps") or "",
+            "slippage_bps": repo_meta.get("slippage_bps") or "",
+            "fee": row.get("fee") or row.get("commission") or row.get("cost") or repo_meta.get("fee") or "",
+            "stop_loss": repo_meta.get("stop_loss") or "",
+            "take_profit": repo_meta.get("take_profit") or "",
+            "setup": repo_meta.get("setup") or "",
+            "outcome": repo_meta.get("outcome") or "",
+            "lessons": repo_meta.get("lessons") or "",
+            "history_kind": "broker_trade",
+        }
+        if not normalized["symbol"] and not normalized["order_id"]:
+            return None
+        return normalized
+
+    def _trade_history_dedupe_key(self, row):
+        if not isinstance(row, dict):
+            return ""
+        order_id = str(row.get("order_id") or "").strip()
+        if order_id:
+            return f"order:{order_id}"
+        timestamp = self._history_timestamp_text(row.get("timestamp"))
+        symbol = str(row.get("symbol") or "").strip().upper()
+        side = str(row.get("side") or "").strip().lower()
+        price = self._normalize_history_float(row.get("price"))
+        size = self._normalize_history_float(row.get("size"))
+        return f"row:{timestamp}|{symbol}|{side}|{price}|{size}"
+
+    async def fetch_trade_history(self, limit=300):
+        limit = max(50, int(limit or 300))
+        rows = list(await self.fetch_closed_trade_journal(limit=limit) or [])
+        seen = {self._trade_history_dedupe_key(row) for row in rows if self._trade_history_dedupe_key(row)}
+
+        source_map = {}
+        for row in rows:
+            order_id = str(row.get("order_id") or "").strip()
+            if order_id and order_id not in source_map:
+                source_map[order_id] = dict(row)
+
+        broker = getattr(self, "broker", None)
+        broker_rows = []
+        if broker is not None:
+            try:
+                if self._resolve_broker_capability("fetch_my_trades"):
+                    broker_rows = await broker.fetch_my_trades(limit=limit)
+                elif self._resolve_broker_capability("fetch_trades"):
+                    broker_rows = await broker.fetch_trades(None, limit=limit)
+            except TypeError:
+                try:
+                    broker_rows = await broker.fetch_trades(limit=limit)
+                except Exception as exc:
+                    self.logger.debug("Trade-history fetch failed: %s", exc)
+                    broker_rows = []
+            except Exception as exc:
+                self.logger.debug("Trade-history fetch failed: %s", exc)
+                broker_rows = []
+
+        for raw_row in broker_rows or []:
+            order_id = str(
+                (raw_row or {}).get("order_id")
+                or (raw_row or {}).get("orderID")
+                or (raw_row or {}).get("id")
+                or ""
+            ).strip()
+            normalized = self._normalize_broker_trade_history_row(raw_row, repo_meta=source_map.get(order_id))
+            if normalized is None:
+                continue
+            key = self._trade_history_dedupe_key(normalized)
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            rows.append(normalized)
+
+        rows.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+        return rows[:limit]
+
+    def _trade_history_stats(self, rows):
+        stats = {
+            "trade_count": 0,
+            "pnl_count": 0,
+            "wins": 0,
+            "losses": 0,
+            "flat": 0,
+            "net_pnl": 0.0,
+            "avg_pnl": None,
+            "gross_profit": 0.0,
+            "gross_loss": 0.0,
+            "profit_factor": None,
+            "fees": 0.0,
+            "avg_fee": None,
+            "avg_slippage": None,
+            "journal_coverage": None,
+            "best_symbol": None,
+            "worst_symbol": None,
+            "strategy_rows": [],
+            "symbol_rows": [],
+            "recent_trades": [],
+            "source_breakdown": {},
+        }
+        if not rows:
+            return stats
+
+        strategy_map = {}
+        symbol_map = {}
+        slippage_values = []
+        fee_values = []
+        journal_complete = 0
+
+        for row in rows:
+            stats["trade_count"] += 1
+            source = str(row.get("source") or "unknown").strip().lower() or "unknown"
+            stats["source_breakdown"][source] = stats["source_breakdown"].get(source, 0) + 1
+
+            symbol = str(row.get("symbol") or "-").strip().upper() or "-"
+            strategy = str(row.get("strategy_name") or "Unspecified").strip() or "Unspecified"
+            pnl = self._normalize_history_float(row.get("pnl"))
+            fee = self._normalize_history_float(row.get("fee"))
+            slippage = self._normalize_history_float(row.get("slippage_bps"))
+
+            stats["recent_trades"].append(
+                {
+                    "timestamp": self._history_timestamp_text(row.get("timestamp")),
+                    "symbol": symbol,
+                    "side": str(row.get("side") or "").upper(),
+                    "status": str(row.get("status") or "").upper(),
+                    "pnl": pnl,
+                    "source": source,
+                }
+            )
+
+            if fee is not None:
+                stats["fees"] += fee
+                fee_values.append(fee)
+            if slippage is not None:
+                slippage_values.append(slippage)
+
+            if str(row.get("reason") or "").strip() and str(row.get("lessons") or "").strip():
+                journal_complete += 1
+
+            if strategy not in strategy_map:
+                strategy_map[strategy] = {"strategy": strategy, "trades": 0, "wins": 0, "net_pnl": 0.0}
+            if symbol not in symbol_map:
+                symbol_map[symbol] = {"symbol": symbol, "trades": 0, "wins": 0, "net_pnl": 0.0}
+            strategy_map[strategy]["trades"] += 1
+            symbol_map[symbol]["trades"] += 1
+
+            if pnl is None:
+                continue
+            stats["pnl_count"] += 1
+            stats["net_pnl"] += pnl
+            strategy_map[strategy]["net_pnl"] += pnl
+            symbol_map[symbol]["net_pnl"] += pnl
+            if pnl > 0:
+                stats["wins"] += 1
+                stats["gross_profit"] += pnl
+                strategy_map[strategy]["wins"] += 1
+                symbol_map[symbol]["wins"] += 1
+            elif pnl < 0:
+                stats["losses"] += 1
+                stats["gross_loss"] += abs(pnl)
+            else:
+                stats["flat"] += 1
+
+        if stats["pnl_count"] > 0:
+            stats["avg_pnl"] = stats["net_pnl"] / float(stats["pnl_count"])
+            total_decisions = stats["wins"] + stats["losses"] + stats["flat"]
+            if total_decisions > 0:
+                stats["win_rate"] = stats["wins"] / float(total_decisions)
+            if stats["gross_loss"] > 0:
+                stats["profit_factor"] = stats["gross_profit"] / stats["gross_loss"]
+            elif stats["gross_profit"] > 0:
+                stats["profit_factor"] = float("inf")
+        else:
+            stats["win_rate"] = None
+        stats["journal_coverage"] = journal_complete / float(stats["trade_count"]) if stats["trade_count"] else None
+        stats["avg_fee"] = (sum(fee_values) / len(fee_values)) if fee_values else None
+        stats["avg_slippage"] = (sum(slippage_values) / len(slippage_values)) if slippage_values else None
+
+        strategy_rows = []
+        for item in strategy_map.values():
+            trades = int(item["trades"] or 0)
+            strategy_rows.append(
+                {
+                    "strategy": item["strategy"],
+                    "trades": trades,
+                    "win_rate": (item["wins"] / float(trades)) if trades else None,
+                    "net_pnl": item["net_pnl"],
+                }
+            )
+        strategy_rows.sort(key=lambda item: (item.get("net_pnl") or 0.0, item.get("trades") or 0), reverse=True)
+        stats["strategy_rows"] = strategy_rows[:5]
+
+        symbol_rows = []
+        for item in symbol_map.values():
+            trades = int(item["trades"] or 0)
+            symbol_rows.append(
+                {
+                    "symbol": item["symbol"],
+                    "trades": trades,
+                    "win_rate": (item["wins"] / float(trades)) if trades else None,
+                    "net_pnl": item["net_pnl"],
+                }
+            )
+        symbol_rows.sort(key=lambda item: (item.get("net_pnl") or 0.0, item.get("trades") or 0), reverse=True)
+        stats["symbol_rows"] = symbol_rows[:5]
+        if symbol_rows:
+            stats["best_symbol"] = max(symbol_rows, key=lambda item: item.get("net_pnl") or 0.0)
+            stats["worst_symbol"] = min(symbol_rows, key=lambda item: item.get("net_pnl") or 0.0)
+
+        stats["recent_trades"] = stats["recent_trades"][:8]
+        return stats
+
+    async def get_trade_history_analysis(self, limit=300):
+        rows = await self.fetch_trade_history(limit=limit)
+        return {
+            "rows": rows,
+            "stats": self._trade_history_stats(rows),
+        }
+
+    async def market_chat_trade_history_summary(self, limit=300, open_window=True):
+        analysis = await self.get_trade_history_analysis(limit=limit)
+        rows = list(analysis.get("rows") or [])
+        stats = dict(analysis.get("stats") or {})
+
+        terminal = getattr(self, "terminal", None)
+        if open_window and terminal is not None:
+            try:
+                terminal._open_closed_journal_window()
+                terminal._open_trade_journal_review_window()
+            except Exception:
+                pass
+
+        if not rows:
+            return "Trade history analysis is not available yet because no closed broker or stored trades were found."
+
+        source_parts = [
+            f"{name}: {count}"
+            for name, count in sorted((stats.get("source_breakdown") or {}).items(), key=lambda item: item[1], reverse=True)
+        ]
+        lines = [
+            "Trade history analysis loaded.",
+            (
+                f"Trades: {stats.get('trade_count', 0)}"
+                f" | With PnL: {stats.get('pnl_count', 0)}"
+                f" | Net PnL: {float(stats.get('net_pnl', 0.0) or 0.0):.2f}"
+                f" | Win rate: {('-' if stats.get('win_rate') is None else f'{float(stats.get('win_rate')) * 100.0:.1f}%')}"
+            ),
+        ]
+        if stats.get("avg_pnl") is not None or stats.get("profit_factor") is not None:
+            profit_factor = stats.get("profit_factor")
+            pf_text = "-" if profit_factor is None else ("infinite" if profit_factor == float("inf") else f"{float(profit_factor):.2f}")
+            lines.append(
+                f"Avg trade: {float(stats.get('avg_pnl') or 0.0):.2f} | Profit factor: {pf_text} | "
+                f"Fees: {float(stats.get('fees', 0.0) or 0.0):.2f} | Avg slippage: "
+                f"{('-' if stats.get('avg_slippage') is None else f'{float(stats.get('avg_slippage')):.2f} bps')}"
+            )
+        if source_parts:
+            lines.append("Sources: " + " | ".join(source_parts[:4]))
+        best_symbol = stats.get("best_symbol")
+        worst_symbol = stats.get("worst_symbol")
+        if best_symbol is not None:
+            lines.append(f"Best symbol: {best_symbol.get('symbol')} ({float(best_symbol.get('net_pnl') or 0.0):.2f})")
+        if worst_symbol is not None:
+            lines.append(f"Worst symbol: {worst_symbol.get('symbol')} ({float(worst_symbol.get('net_pnl') or 0.0):.2f})")
+        top_strategy = next(iter(stats.get("strategy_rows") or []), None)
+        if top_strategy is not None:
+            lines.append(
+                f"Top strategy: {top_strategy.get('strategy')} | Trades: {top_strategy.get('trades')} | "
+                f"Net PnL: {float(top_strategy.get('net_pnl') or 0.0):.2f}"
+            )
+        recent = list(stats.get("recent_trades") or [])[:3]
+        if recent:
+            recent_bits = []
+            for item in recent:
+                pnl = item.get("pnl")
+                pnl_text = "-" if pnl is None else f"{float(pnl):.2f}"
+                recent_bits.append(f"{item.get('symbol')} {item.get('side')} {item.get('status')} pnl {pnl_text}")
+            lines.append("Recent trades: " + " ; ".join(recent_bits))
+        lines.append("Use Tools -> Closed Journal and Journal Review for the detailed history and review.")
+        return "\n".join(lines)
 
     async def telegram_status_text(self):
         scope = str(getattr(self, "autotrade_scope", "all") or "all").title()
@@ -992,14 +3492,135 @@ class AppController(QMainWindow):
             )
         return "\n".join(lines)
 
-    async def capture_telegram_screenshot(self):
+    async def telegram_recommendations_text(self):
+        terminal = getattr(self, "terminal", None)
+        if terminal is None or not hasattr(terminal, "_recommendation_rows"):
+            return "<b>Recommendations</b>\nRecommendations are not available right now."
+        try:
+            rows = list(terminal._recommendation_rows() or [])
+        except Exception:
+            rows = []
+        if not rows:
+            return "<b>Recommendations</b>\nNo active recommendations yet."
+
+        lines = ["<b>Recommendations</b>"]
+        for row in rows[:8]:
+            lines.append(
+                f"<code>{row.get('symbol', '-')}</code> | {row.get('action', '-')} | "
+                f"conf {row.get('confidence', '-')} | {row.get('why', row.get('reason', '-'))}"
+            )
+        return "\n".join(lines)
+
+    async def telegram_performance_text(self):
+        terminal = getattr(self, "terminal", None)
+        if terminal is None or not hasattr(terminal, "_build_performance_snapshot"):
+            return "<b>Performance</b>\nPerformance analytics are not available right now."
+
+        try:
+            snapshot = terminal._build_performance_snapshot() or {}
+        except Exception:
+            snapshot = {}
+        if not snapshot:
+            return "<b>Performance</b>\nNo performance snapshot is available yet."
+
+        return (
+            "<b>Performance</b>\n"
+            f"Equity: <code>{snapshot.get('equity', '-')}</code>\n"
+            f"Net PnL: <code>{snapshot.get('net_pnl', '-')}</code>\n"
+            f"Win Rate: <code>{snapshot.get('win_rate_label', '-')}</code>\n"
+            f"Max Drawdown: <code>{snapshot.get('max_drawdown_label', '-')}</code>\n"
+            f"Profit Factor: <code>{snapshot.get('profit_factor_label', '-')}</code>\n"
+            f"Fees: <code>{snapshot.get('fees_label', '-')}</code>\n"
+            f"Avg Slippage: <code>{snapshot.get('avg_slippage_label', '-')}</code>"
+        )
+
+    async def telegram_position_analysis_text(self, open_window=True):
+        summary = self.market_chat_position_summary(open_window=open_window)
+        if not summary:
+            return "<b>Position Analysis</b>\nPosition analysis is not available right now."
+        return f"<b>Position Analysis</b>\n<pre>{self._plain_text(summary)}</pre>"
+
+    async def telegram_open_chart(self, symbol, timeframe=None):
+        terminal = getattr(self, "terminal", None)
+        if terminal is None:
+            return {"ok": False, "message": "Terminal is not available."}
+
+        requested_symbol = str(symbol or "").upper().strip()
+        requested_timeframe = str(timeframe or getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+        if not requested_symbol:
+            return {"ok": False, "message": "A symbol is required."}
+
+        try:
+            terminal._open_symbol_chart(requested_symbol, requested_timeframe)
+            chart = terminal._chart_for_symbol(requested_symbol) if hasattr(terminal, "_chart_for_symbol") else None
+            if chart is not None and hasattr(terminal, "_schedule_chart_data_refresh"):
+                terminal._schedule_chart_data_refresh(chart)
+            QApplication.processEvents()
+            await asyncio.sleep(0.25)
+            QApplication.processEvents()
+        except Exception as exc:
+            return {"ok": False, "message": f"Unable to open chart {requested_symbol}: {exc}"}
+
+        chart = terminal._chart_for_symbol(requested_symbol) if hasattr(terminal, "_chart_for_symbol") else None
+        if chart is None:
+            return {"ok": False, "message": f"Chart {requested_symbol} could not be opened."}
+        return {
+            "ok": True,
+            "message": f"Chart opened for {requested_symbol} ({requested_timeframe}).",
+            "symbol": requested_symbol,
+            "timeframe": requested_timeframe,
+        }
+
+    async def capture_chart_screenshot(self, symbol=None, timeframe=None, prefix="chart"):
         terminal = getattr(self, "terminal", None)
         if terminal is None:
             return None
 
-        output_dir = Path("output") / "telegram"
+        requested_symbol = str(symbol or "").upper().strip()
+        requested_timeframe = str(timeframe or getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+        if requested_symbol:
+            open_result = await self.telegram_open_chart(requested_symbol, requested_timeframe)
+            if not open_result.get("ok"):
+                return None
+
+        chart = None
+        if requested_symbol and hasattr(terminal, "_chart_for_symbol"):
+            chart = terminal._chart_for_symbol(requested_symbol)
+        if chart is None and hasattr(terminal, "_current_chart_widget"):
+            chart = terminal._current_chart_widget()
+        if chart is None:
+            return None
+
+        safe_symbol = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(getattr(chart, "symbol", requested_symbol or "chart")))
+        safe_prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(prefix or "chart")).strip("_") or "chart"
+        output_dir = Path("output") / "screenshots"
         output_dir.mkdir(parents=True, exist_ok=True)
-        path = output_dir / f"terminal_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        path = output_dir / f"{safe_prefix}_{safe_symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        try:
+            QApplication.processEvents()
+            await asyncio.sleep(0.15)
+            QApplication.processEvents()
+            pixmap = chart.grab()
+            if pixmap is None or pixmap.isNull():
+                return None
+            pixmap.save(str(path), "PNG")
+            return str(path)
+        except Exception as exc:
+            self.logger.debug("Chart screenshot capture failed: %s", exc)
+            return None
+
+    async def capture_telegram_screenshot(self):
+        return await self.capture_app_screenshot(prefix="telegram")
+
+    async def capture_app_screenshot(self, prefix="market_chat"):
+        terminal = getattr(self, "terminal", None)
+        if terminal is None:
+            return None
+
+        safe_prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(prefix or "capture")).strip("_") or "capture"
+        output_dir = Path("output") / "screenshots"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / f"{safe_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         try:
             pixmap = terminal.grab()
             if pixmap is None or pixmap.isNull():
@@ -1007,22 +3628,323 @@ class AppController(QMainWindow):
             pixmap.save(str(path), "PNG")
             return str(path)
         except Exception as exc:
-            self.logger.debug("Telegram screenshot capture failed: %s", exc)
+            self.logger.debug("App screenshot capture failed: %s", exc)
             return None
 
-    async def ask_openai_about_app(self, question):
+    def _plain_text(self, value):
+        text = str(value or "")
+        if not text:
+            return ""
+        text = re.sub(r"<[^>]+>", "", text)
+        text = (
+            text.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+            .replace("&nbsp;", " ")
+        )
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _openai_news_focus_symbols(self):
+        symbols = []
+        terminal = getattr(self, "terminal", None)
+        active_chart = None
+        if terminal is not None and hasattr(terminal, "_current_chart_widget"):
+            try:
+                active_chart = terminal._current_chart_widget()
+            except Exception:
+                active_chart = None
+
+        for value in [
+            getattr(active_chart, "symbol", None),
+            getattr(terminal, "symbol", None) if terminal is not None else None,
+        ]:
+            symbol = str(value or "").upper().strip()
+            if symbol and symbol not in symbols:
+                symbols.append(symbol)
+
+        if terminal is not None and hasattr(terminal, "_recommendation_rows"):
+            try:
+                for item in list(terminal._recommendation_rows() or [])[:3]:
+                    symbol = str(item.get("symbol") or "").upper().strip()
+                    if symbol and symbol not in symbols:
+                        symbols.append(symbol)
+            except Exception:
+                pass
+
+        for symbol in list(getattr(self, "symbols", []) or [])[:3]:
+            normalized = str(symbol or "").upper().strip()
+            if normalized and normalized not in symbols:
+                symbols.append(normalized)
+
+        return symbols[:3]
+
+    async def _openai_news_context(self, question=""):
+        if not getattr(self, "news_enabled", False):
+            return []
+
+        lowered = str(question or "").lower()
+        wants_news = any(
+            token in lowered
+            for token in ("news", "headline", "headlines", "event", "events", "rss", "sentiment", "impact")
+        )
+        symbols = self._openai_news_focus_symbols()
+        if not symbols:
+            return []
+
+        lines = []
+        for symbol in symbols:
+            try:
+                cached = self._news_cache.get(symbol, {})
+                events = list(cached.get("events", []) or [])
+                if wants_news or not events:
+                    events = await self.request_news(symbol, force=wants_news, max_age_seconds=300)
+                if not events:
+                    continue
+                bias = self.news_service.summarize_news_bias(events)
+                direction = self._plain_text(bias.get("direction") or "neutral")
+                reason = self._plain_text(bias.get("reason") or "")
+                headline = self._plain_text(bias.get("headline") or "")
+                score = bias.get("score")
+                try:
+                    score_text = f"{float(score):.2f}"
+                except Exception:
+                    score_text = "0.00"
+                recent = []
+                for event in list(events[:3]):
+                    title = self._plain_text(event.get("title") or "")
+                    source = self._plain_text(event.get("source") or "News")
+                    impact = event.get("impact")
+                    try:
+                        impact_text = f"{float(impact):.2f}"
+                    except Exception:
+                        impact_text = "-"
+                    if title:
+                        recent.append(f"{source}: {title} (impact {impact_text})")
+                line = f"News for {symbol}: bias {direction} score {score_text}"
+                if reason:
+                    line += f" | reason: {reason}"
+                if headline:
+                    line += f" | headline summary: {headline}"
+                if recent:
+                    line += " | recent: " + " ; ".join(recent)
+                lines.append(line)
+            except Exception as exc:
+                self.logger.debug("OpenAI news context failed for %s: %s", symbol, exc)
+        return lines
+
+    async def _build_openai_runtime_context(self, question=""):
+        terminal = getattr(self, "terminal", None)
+        broker = getattr(self, "broker", None)
+        context_parts = [
+            "Sopotek runtime context:",
+            f"Connected: {self.connected}",
+            f"Mode: {self.current_trading_mode()}",
+            f"Exchange: {getattr(broker, 'exchange_name', '-') or '-'}",
+            f"Account: {self.current_account_label()}",
+            f"Market Data: {self.get_market_stream_status()}",
+            f"Telegram: {self.telegram_management_text().replace(chr(10), ' | ')}",
+            f"AI Scope: {getattr(self, 'autotrade_scope', 'all')}",
+            f"Symbols Loaded: {len(getattr(self, 'symbols', []) or [])}",
+            f"Default Timeframe: {getattr(self, 'time_frame', '1h')}",
+            f"Health Check: {self.get_health_check_summary()}",
+        ]
+
+        if terminal is not None:
+            active_chart = None
+            if hasattr(terminal, "_current_chart_widget"):
+                try:
+                    active_chart = terminal._current_chart_widget()
+                except Exception:
+                    active_chart = None
+            if active_chart is not None:
+                context_parts.append(
+                    f"Active Chart: {getattr(active_chart, 'symbol', '-') or '-'} {getattr(active_chart, 'timeframe', '-') or '-'}"
+                )
+            context_parts.append(
+                f"AI Trading Enabled: {bool(getattr(terminal, 'autotrading_enabled', False))}"
+            )
+
+        balances_text = self._plain_text(await self.telegram_balances_text(compact=False))
+        positions_text = self._plain_text(await self.telegram_positions_text())
+        orders_text = self._plain_text(await self.telegram_open_orders_text())
+        if balances_text:
+            context_parts.append(f"Balances: {balances_text}")
+        if positions_text:
+            context_parts.append(f"Positions: {positions_text}")
+        if orders_text:
+            context_parts.append(f"Open Orders: {orders_text}")
+        position_summary = self.market_chat_position_summary(open_window=False)
+        if position_summary:
+            context_parts.append("Position Analysis: " + self._plain_text(position_summary))
+
+        behavior = self.get_behavior_guard_status() or {}
+        if behavior:
+            summary = self._plain_text(behavior.get("summary") or "Active")
+            reason = self._plain_text(behavior.get("reason") or "")
+            cooldown = self._plain_text(behavior.get("cooldown_until") or "")
+            behavior_line = f"Behavior Guard: {summary}"
+            if reason:
+                behavior_line += f" | Reason: {reason}"
+            if cooldown:
+                behavior_line += f" | Cooldown: {cooldown}"
+            context_parts.append(behavior_line)
+
+        if terminal is not None and hasattr(terminal, "_performance_snapshot"):
+            try:
+                snapshot = terminal._performance_snapshot() or {}
+            except Exception:
+                snapshot = {}
+            if snapshot:
+                context_parts.append(
+                    f"Performance Headline: {self._plain_text(snapshot.get('headline') or 'Unavailable')}"
+                )
+                metrics = snapshot.get("metrics", {}) or {}
+                selected_metrics = []
+                for key in (
+                    "Equity",
+                    "Net PnL",
+                    "Return",
+                    "Win Rate",
+                    "Profit Factor",
+                    "Max Drawdown",
+                    "Fees",
+                    "Avg Slippage",
+                    "Execution Drag",
+                ):
+                    text = self._plain_text((metrics.get(key) or {}).get("text"))
+                    if text and text != "-":
+                        selected_metrics.append(f"{key}: {text}")
+                if selected_metrics:
+                    context_parts.append("Performance Metrics: " + " | ".join(selected_metrics))
+
+        if terminal is not None and hasattr(terminal, "_recommendation_rows"):
+            try:
+                recommendations = list(terminal._recommendation_rows() or [])[:5]
+            except Exception:
+                recommendations = []
+            if recommendations:
+                lines = []
+                for item in recommendations:
+                    symbol = self._plain_text(item.get("symbol") or "-")
+                    action = self._plain_text(item.get("action") or item.get("side") or "-")
+                    confidence = item.get("confidence")
+                    why = self._plain_text(item.get("why") or item.get("reason") or "")
+                    confidence_text = ""
+                    try:
+                        confidence_text = f"{float(confidence):.2f}"
+                    except Exception:
+                        confidence_text = self._plain_text(confidence)
+                    fragment = f"{symbol} {action}"
+                    if confidence_text:
+                        fragment += f" conf {confidence_text}"
+                    if why:
+                        fragment += f" because {why}"
+                    lines.append(fragment.strip())
+                if lines:
+                    context_parts.append("Top Recommendations: " + " ; ".join(lines))
+
+        try:
+            trade_history_analysis = await self.get_trade_history_analysis(limit=250)
+        except Exception:
+            trade_history_analysis = {"rows": [], "stats": {}}
+        trade_stats = dict(trade_history_analysis.get("stats") or {})
+        if trade_stats.get("trade_count"):
+            trade_bits = [
+                f"trades {int(trade_stats.get('trade_count') or 0)}",
+                f"net pnl {float(trade_stats.get('net_pnl') or 0.0):.2f}",
+            ]
+            if trade_stats.get("win_rate") is not None:
+                trade_bits.append(f"win rate {float(trade_stats.get('win_rate')) * 100.0:.1f}%")
+            if trade_stats.get("profit_factor") is not None:
+                profit_factor = trade_stats.get("profit_factor")
+                trade_bits.append(
+                    "profit factor "
+                    + ("infinite" if profit_factor == float("inf") else f"{float(profit_factor):.2f}")
+                )
+            if trade_stats.get("journal_coverage") is not None:
+                trade_bits.append(f"journal coverage {float(trade_stats.get('journal_coverage')) * 100.0:.1f}%")
+            context_parts.append("Trade History Analysis: " + " | ".join(trade_bits))
+
+            best_symbol = trade_stats.get("best_symbol")
+            worst_symbol = trade_stats.get("worst_symbol")
+            if best_symbol is not None or worst_symbol is not None:
+                best_text = (
+                    f"best {self._plain_text(best_symbol.get('symbol'))} {float(best_symbol.get('net_pnl') or 0.0):.2f}"
+                    if best_symbol is not None else ""
+                )
+                worst_text = (
+                    f"worst {self._plain_text(worst_symbol.get('symbol'))} {float(worst_symbol.get('net_pnl') or 0.0):.2f}"
+                    if worst_symbol is not None else ""
+                )
+                context_parts.append("Trade History Symbols: " + " | ".join(part for part in (best_text, worst_text) if part))
+
+            strategy_rows = list(trade_stats.get("strategy_rows") or [])[:3]
+            if strategy_rows:
+                strategy_bits = []
+                for item in strategy_rows:
+                    fragment = (
+                        f"{self._plain_text(item.get('strategy'))}: trades {int(item.get('trades') or 0)}, "
+                        f"net pnl {float(item.get('net_pnl') or 0.0):.2f}"
+                    )
+                    if item.get("win_rate") is not None:
+                        fragment += f", win rate {float(item.get('win_rate')) * 100.0:.1f}%"
+                    strategy_bits.append(fragment)
+                context_parts.append("Trade History Strategies: " + " ; ".join(strategy_bits))
+
+            recent_rows = list(trade_stats.get("recent_trades") or [])[:5]
+            if recent_rows:
+                recent_bits = []
+                for item in recent_rows:
+                    pnl = item.get("pnl")
+                    pnl_text = "-" if pnl is None else f"{float(pnl):.2f}"
+                    recent_bits.append(
+                        f"{self._plain_text(item.get('symbol'))} {self._plain_text(item.get('side'))} "
+                        f"{self._plain_text(item.get('status'))} pnl {pnl_text}"
+                    )
+                context_parts.append("Recent Trade History: " + " ; ".join(recent_bits))
+
+        if terminal is not None and hasattr(terminal, "symbols_table") and hasattr(terminal, "_market_watch_row_snapshot"):
+            market_rows = []
+            try:
+                for row in range(min(5, terminal.symbols_table.rowCount())):
+                    snapshot = terminal._market_watch_row_snapshot(row)
+                    symbol = self._plain_text(snapshot.get("symbol"))
+                    if not symbol:
+                        continue
+                    bid = self._plain_text(snapshot.get("bid"))
+                    ask = self._plain_text(snapshot.get("ask"))
+                    status = self._plain_text(snapshot.get("status"))
+                    market_rows.append(f"{symbol} bid {bid} ask {ask} status {status}")
+            except Exception:
+                market_rows = []
+            if market_rows:
+                context_parts.append("Market Watch: " + " ; ".join(market_rows))
+
+        news_lines = await self._openai_news_context(question=question)
+        if news_lines:
+            context_parts.extend(news_lines)
+
+        return "\n".join(part for part in context_parts if part)
+
+    async def ask_openai_about_app(self, question, conversation=None):
+        action_result = await self.handle_market_chat_action(question)
+        if action_result:
+            return action_result
+
         api_key = str(getattr(self, "openai_api_key", "") or "").strip()
         if not api_key:
             return "OpenAI API key is not configured in Settings -> Integrations."
 
-        context_parts = [
-            f"Connected: {self.connected}",
-            f"Exchange: {getattr(getattr(self, 'broker', None), 'exchange_name', '-') or '-'}",
-            f"AI Scope: {getattr(self, 'autotrade_scope', 'all')}",
-            f"Symbols Loaded: {len(getattr(self, 'symbols', []) or [])}",
-            f"Timeframe: {getattr(self, 'time_frame', '1h')}",
-            f"Balances: {await self.telegram_balances_text(compact=True)}",
-        ]
+        context_text = await self._build_openai_runtime_context(question=question)
+        history_items = []
+        for item in list(conversation or [])[-8:]:
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            history_items.append({"role": role, "content": content})
         payload = {
             "model": self.openai_model or "gpt-5-mini",
             "input": [
@@ -1030,12 +3952,20 @@ class AppController(QMainWindow):
                     "role": "system",
                     "content": (
                         "You are an assistant inside Sopotek Trading AI. "
-                        "Answer briefly and practically using the provided app and market context."
+                        "Answer briefly, practically, and honestly using the provided app and market context. "
+                        "You can discuss the app, market behavior, balances, equity, performance, profitability, "
+                        "recommendations, behavior guard status, and recent news/headline context. "
+                        "If data is missing, say so clearly."
                     ),
                 },
                 {
                     "role": "user",
-                    "content": "\n".join(context_parts) + f"\nQuestion: {question}",
+                    "content": context_text,
+                },
+                *history_items,
+                {
+                    "role": "user",
+                    "content": f"Question: {question}",
                 },
             ],
         }
@@ -1067,6 +3997,248 @@ class AppController(QMainWindow):
         if parts:
             return "\n".join(parts)
         return "OpenAI returned no text."
+
+    def market_chat_voice_available(self):
+        return bool(self.market_chat_voice_input_available() or self.market_chat_voice_output_available())
+
+    def market_chat_voice_input_available(self):
+        service = getattr(self, "voice_service", None)
+        return bool(service is not None and service.available())
+
+    def market_chat_voice_output_available(self):
+        output_provider = str(getattr(self, "voice_output_provider", "windows") or "windows").strip().lower() or "windows"
+        if output_provider == "openai":
+            return bool(getattr(self, "openai_api_key", ""))
+        service = getattr(self, "voice_service", None)
+        return bool(service is not None and service.available())
+
+    def market_chat_voice_provider_choices(self):
+        service = getattr(self, "voice_service", None)
+        if service is None:
+            return [("windows", "Windows"), ("google", "Google")]
+        return list(service.available_recognition_providers())
+
+    def market_chat_voice_output_provider_choices(self):
+        return [("windows", "Windows"), ("openai", "OpenAI")]
+
+    def _current_market_chat_voice_name(self):
+        output_provider = str(getattr(self, "voice_output_provider", "windows") or "windows").strip().lower() or "windows"
+        if output_provider == "openai":
+            voice_name = str(getattr(self, "voice_openai_name", "alloy") or "alloy").strip().lower() or "alloy"
+            return voice_name if voice_name in self.OPENAI_TTS_VOICES else "alloy"
+        return str(getattr(self, "voice_windows_name", "") or "").strip()
+
+    def market_chat_voice_state(self):
+        service = getattr(self, "voice_service", None)
+        provider = str(getattr(self, "voice_provider", "windows") or "windows").strip().lower() or "windows"
+        output_provider = str(getattr(self, "voice_output_provider", "windows") or "windows").strip().lower() or "windows"
+        voice_name = str(self._current_market_chat_voice_name() or "").strip()
+        google_ready = bool(service is not None and service.recognition_provider_available("google"))
+        windows_ready = bool(service is not None and service.recognition_provider_available("windows"))
+        return {
+            "provider": provider,
+            "recognition_provider": provider,
+            "output_provider": output_provider,
+            "voice_name": voice_name,
+            "google_available": google_ready,
+            "windows_available": windows_ready,
+            "listen_available": self.market_chat_voice_input_available(),
+            "speak_available": self.market_chat_voice_output_available(),
+            "voice_available": self.market_chat_voice_available(),
+            "openai_available": bool(getattr(self, "openai_api_key", "")),
+            "openai_model": self.OPENAI_TTS_MODEL,
+        }
+
+    async def market_chat_list_voices(self, output_provider=None):
+        resolved_provider = str(
+            output_provider if output_provider is not None else getattr(self, "voice_output_provider", "windows") or "windows"
+        ).strip().lower() or "windows"
+        if resolved_provider == "openai":
+            return list(self.OPENAI_TTS_VOICES)
+        service = getattr(self, "voice_service", None)
+        if service is None:
+            return []
+        voices = await service.list_voices()
+        return [str(item).strip() for item in voices if str(item).strip()]
+
+    def set_market_chat_voice(self, voice_name, output_provider=None):
+        normalized = str(voice_name or "").strip()
+        resolved_provider = str(
+            output_provider if output_provider is not None else getattr(self, "voice_output_provider", "windows") or "windows"
+        ).strip().lower() or "windows"
+        service = getattr(self, "voice_service", None)
+        if resolved_provider == "openai":
+            normalized = normalized.lower()
+            if normalized and normalized not in self.OPENAI_TTS_VOICES:
+                normalized = "alloy"
+            self.voice_openai_name = normalized or "alloy"
+            self.settings.setValue("integrations/voice_openai_name", self.voice_openai_name)
+        else:
+            self.voice_windows_name = normalized
+            if service is not None:
+                service.set_voice(normalized)
+            self.settings.setValue("integrations/voice_windows_name", self.voice_windows_name)
+        self.voice_name = self._current_market_chat_voice_name()
+        self.settings.setValue("integrations/voice_name", self.voice_name)
+        return self.voice_name
+
+    def set_market_chat_voice_provider(self, provider):
+        normalized = str(provider or "windows").strip().lower() or "windows"
+        if normalized not in {"windows", "google"}:
+            normalized = "windows"
+        self.voice_provider = normalized
+        service = getattr(self, "voice_service", None)
+        if service is not None:
+            service.set_recognition_provider(normalized)
+        self.settings.setValue("integrations/voice_provider", normalized)
+        return normalized
+
+    def set_market_chat_voice_output_provider(self, provider):
+        normalized = str(provider or "windows").strip().lower() or "windows"
+        if normalized not in {"windows", "openai"}:
+            normalized = "windows"
+        self.voice_output_provider = normalized
+        self.voice_name = self._current_market_chat_voice_name()
+        service = getattr(self, "voice_service", None)
+        if service is not None and normalized == "windows":
+            service.set_voice(self.voice_name)
+        self.settings.setValue("integrations/voice_output_provider", normalized)
+        self.settings.setValue("integrations/voice_name", self.voice_name)
+        return normalized
+
+    async def market_chat_listen(self, timeout_seconds=8):
+        service = getattr(self, "voice_service", None)
+        if service is None:
+            return {"ok": False, "message": "Voice service is not initialized.", "text": ""}
+        return await service.listen(timeout_seconds=timeout_seconds, provider=getattr(self, "voice_provider", "windows"))
+
+    async def market_chat_speak(self, text):
+        output_provider = str(getattr(self, "voice_output_provider", "windows") or "windows").strip().lower() or "windows"
+        if output_provider == "openai":
+            return await self._market_chat_speak_openai(text, voice_name=self._current_market_chat_voice_name())
+        service = getattr(self, "voice_service", None)
+        if service is None:
+            return {"ok": False, "message": "Voice service is not initialized."}
+        return await service.speak(text, voice_name=self._current_market_chat_voice_name())
+
+    async def _market_chat_speak_openai(self, text, voice_name="alloy"):
+        message = str(text or "").strip()
+        if not message:
+            return {"ok": False, "message": "No text was provided to speak."}
+
+        api_key = str(getattr(self, "openai_api_key", "") or "").strip()
+        if not api_key:
+            return {"ok": False, "message": "OpenAI API key is not configured in Settings -> Integrations."}
+
+        normalized_voice = str(voice_name or "alloy").strip().lower() or "alloy"
+        if normalized_voice not in self.OPENAI_TTS_VOICES:
+            normalized_voice = "alloy"
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload_candidates = [
+            {
+                "model": self.OPENAI_TTS_MODEL,
+                "voice": normalized_voice,
+                "input": message,
+                "response_format": "wav",
+            },
+            {
+                "model": self.OPENAI_TTS_MODEL,
+                "voice": normalized_voice,
+                "input": message,
+                "format": "wav",
+            },
+        ]
+
+        audio_bytes = b""
+        last_error = ""
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
+                for payload in payload_candidates:
+                    async with session.post("https://api.openai.com/v1/audio/speech", json=payload, headers=headers) as response:
+                        if response.status >= 400:
+                            try:
+                                data = await response.json(content_type=None)
+                                last_error = data.get("error", {}).get("message") or str(data)
+                            except Exception:
+                                last_error = await response.text()
+                            continue
+                        audio_bytes = await response.read()
+                        if audio_bytes:
+                            break
+        except Exception as exc:
+            return {"ok": False, "message": f"OpenAI voice playback failed: {exc}"}
+
+        if not audio_bytes:
+            return {"ok": False, "message": f"OpenAI voice playback failed: {last_error or 'empty audio returned.'}"}
+        if winsound is None:
+            return {"ok": False, "message": "OpenAI voice playback is currently available only on Windows."}
+
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as handle:
+                handle.write(audio_bytes)
+                temp_path = handle.name
+            await asyncio.to_thread(winsound.PlaySound, temp_path, winsound.SND_FILENAME)
+        except Exception as exc:
+            return {"ok": False, "message": f"OpenAI voice playback failed: {exc}"}
+        finally:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+
+        self.voice_openai_name = normalized_voice
+        self.voice_name = normalized_voice
+        self.settings.setValue("integrations/voice_openai_name", normalized_voice)
+        self.settings.setValue("integrations/voice_name", normalized_voice)
+        return {"ok": True, "message": f"Reply spoken with OpenAI voice {normalized_voice}."}
+
+    async def test_openai_connection(self, api_key=None, model=None):
+        resolved_key = str(api_key if api_key is not None else getattr(self, "openai_api_key", "") or "").strip()
+        if not resolved_key:
+            return {"ok": False, "message": "OpenAI API key is not configured."}
+
+        resolved_model = str(model if model is not None else getattr(self, "openai_model", "gpt-5-mini") or "gpt-5-mini").strip() or "gpt-5-mini"
+        payload = {
+            "model": resolved_model,
+            "input": [
+                {"role": "system", "content": "Reply in one short sentence."},
+                {"role": "user", "content": "Say OpenAI connection OK and today's UTC date."},
+            ],
+        }
+        headers = {
+            "Authorization": f"Bearer {resolved_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+                async with session.post("https://api.openai.com/v1/responses", json=payload, headers=headers) as response:
+                    data = await response.json(content_type=None)
+                    if response.status >= 400:
+                        message = data.get("error", {}).get("message") or str(data)
+                        return {"ok": False, "message": f"OpenAI request failed: {message}"}
+        except Exception as exc:
+            return {"ok": False, "message": f"OpenAI request failed: {exc}"}
+
+        text = data.get("output_text")
+        if isinstance(text, str) and text.strip():
+            return {"ok": True, "message": text.strip()}
+
+        parts = []
+        for item in data.get("output", []) or []:
+            for content in item.get("content", []) or []:
+                content_text = content.get("text")
+                if isinstance(content_text, str) and content_text.strip():
+                    parts.append(content_text.strip())
+        if parts:
+            return {"ok": True, "message": "\n".join(parts)}
+        return {"ok": False, "message": "OpenAI returned no text."}
 
     async def _safe_fetch_ohlcv(self, symbol, timeframe="1h", limit=200):
         limit = self._resolve_history_limit(limit)
@@ -1165,8 +4337,46 @@ class AppController(QMainWindow):
             if active_task is current_task:
                 self._orderbook_tasks.pop(symbol, None)
 
+    async def request_recent_trades(self, symbol, limit=40):
+        if not symbol:
+            return
+
+        now = time.monotonic()
+        broker_name = str(getattr(getattr(self, "broker", None), "exchange_name", "") or "").lower()
+        min_interval = 5.0 if broker_name == "stellar" else 1.5
+
+        in_flight = self._recent_trades_tasks.get(symbol)
+        if in_flight and not in_flight.done():
+            return
+
+        cached = list(self._recent_trades_cache.get(symbol) or [])
+        last_requested = self._recent_trades_last_request_at.get(symbol, 0.0)
+        if cached and (now - last_requested) < min_interval:
+            self.recent_trades_signal.emit(symbol, cached[: max(1, int(limit or len(cached)))])
+            return
+
+        self._recent_trades_last_request_at[symbol] = now
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._recent_trades_tasks[symbol] = current_task
+
+        try:
+            trades = await self._safe_fetch_recent_trades(symbol, limit=limit)
+            normalized = self._normalize_public_trade_rows(symbol, trades, limit=limit)
+            self._recent_trades_cache[symbol] = normalized
+            self.recent_trades_signal.emit(symbol, normalized)
+        finally:
+            active_task = self._recent_trades_tasks.get(symbol)
+            if active_task is current_task:
+                self._recent_trades_tasks.pop(symbol, None)
+
     def publish_ai_signal(self, symbol, signal, candles=None):
         if not symbol or not isinstance(signal, dict):
+            return
+        if getattr(self, "_session_closing", False):
+            return
+        terminal = getattr(self, "terminal", None)
+        if terminal is not None and getattr(terminal, "_ui_shutting_down", False):
             return
 
         side = str(signal.get("side", "hold")).upper()
@@ -1205,6 +4415,7 @@ class AppController(QMainWindow):
             "confidence": confidence,
             "regime": regime,
             "volatility": round(float(volatility), 6),
+            "reason": str(signal.get("reason", "") or ""),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -1212,6 +4423,11 @@ class AppController(QMainWindow):
 
     def publish_strategy_debug(self, symbol, signal, candles=None, features=None):
         if not symbol or not isinstance(signal, dict):
+            return
+        if getattr(self, "_session_closing", False):
+            return
+        terminal = getattr(self, "terminal", None)
+        if terminal is not None and getattr(terminal, "_ui_shutting_down", False):
             return
 
         feature_row = None
@@ -1243,6 +4459,7 @@ class AppController(QMainWindow):
             "ema_slow": round(float(feature_row["ema_slow"]), 6) if feature_row is not None and "ema_slow" in feature_row else 0.0,
             "ml_probability": round(float(signal.get("confidence", 0.0) or 0.0), 4),
             "reason": str(signal.get("reason", "")),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         self.strategy_debug_signal.emit(payload)
@@ -1291,8 +4508,12 @@ class AppController(QMainWindow):
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _cleanup_session(self, stop_trading=True, close_broker=False):
+        self._session_closing = True
         try:
             await self._stop_telegram_service()
+            await self.news_service.close()
+            self._news_cache.clear()
+            self._news_inflight.clear()
 
             if self._ticker_task and not self._ticker_task.done():
                 self._ticker_task.cancel()
@@ -1311,8 +4532,18 @@ class AppController(QMainWindow):
             if stop_trading and self.trading_system:
                 await self.trading_system.stop()
                 self.trading_system = None
+                self.behavior_guard = None
 
             if self.terminal:
+                try:
+                    self.terminal._ui_shutting_down = True
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self.terminal, "_disconnect_controller_signals"):
+                        self.terminal._disconnect_controller_signals()
+                except Exception:
+                    pass
                 self.stack.removeWidget(self.terminal)
                 self.terminal.deleteLater()
                 self.terminal = None
@@ -1323,6 +4554,8 @@ class AppController(QMainWindow):
 
         except Exception as e:
             self.logger.error("Cleanup error: %s", e)
+        finally:
+            self._session_closing = False
 
     def get_market_stream_status(self):
         if self._ws_task and not self._ws_task.done():

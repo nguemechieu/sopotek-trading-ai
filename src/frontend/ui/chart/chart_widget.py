@@ -1,7 +1,20 @@
+from datetime import datetime, timezone
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore
-from PySide6.QtWidgets import QFrame, QLabel, QHBoxLayout, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QSplitter,
+    QTabWidget,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
 from pyqtgraph import DateAxisItem, InfiniteLine, PlotWidget, ScatterPlotItem, SignalProxy, TextItem, mkPen
 
 from frontend.ui.chart.chart_items import CandlestickItem
@@ -42,6 +55,9 @@ from frontend.ui.chart.indicator_utils import (
 
 class ChartWidget(QWidget):
     sigMouseMoved = QtCore.Signal(object)
+    sigTradeLevelRequested = QtCore.Signal(dict)
+    sigTradeLevelChanged = QtCore.Signal(dict)
+    sigTradeContextAction = QtCore.Signal(dict)
 
     def __init__(self, symbol: str, timeframe: str, controller, candle_up_color: str = "#26a69a", candle_down_color: str = "#ef5350"):
         super().__init__()
@@ -75,6 +91,12 @@ class ChartWidget(QWidget):
         self.axis_color = "#8fa7c6"
         self.muted_text = "#7f95b5"
         self._last_price_change = None
+        self._news_events = []
+        self._news_items = []
+        self._trade_overlay_updating = False
+        self._trade_overlay_state = {"side": "buy", "entry": None, "stop_loss": None, "take_profit": None}
+        self._last_orderbook_bids = []
+        self._last_orderbook_asks = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -109,6 +131,36 @@ class ChartWidget(QWidget):
 
         layout.addWidget(self.info_bar)
 
+        self.market_tabs = QTabWidget()
+        self.market_tabs.setDocumentMode(True)
+        self.market_tabs.setStyleSheet(
+            """
+            QTabWidget::pane {
+                border: 1px solid #173055;
+                background-color: #09111f;
+                border-radius: 14px;
+            }
+            QTabBar::tab {
+                background-color: #0c1730;
+                color: #9fb6d8;
+                padding: 8px 16px;
+                margin-right: 4px;
+                border-top-left-radius: 10px;
+                border-top-right-radius: 10px;
+            }
+            QTabBar::tab:selected {
+                background-color: #11213e;
+                color: #f4f8ff;
+            }
+            """
+        )
+        layout.addWidget(self.market_tabs, 1)
+
+        self.candlestick_page = QWidget()
+        candlestick_layout = QVBoxLayout(self.candlestick_page)
+        candlestick_layout.setContentsMargins(0, 0, 0, 0)
+        candlestick_layout.setSpacing(0)
+
         self.splitter = QSplitter(QtCore.Qt.Orientation.Vertical)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(10)
@@ -124,7 +176,8 @@ class ChartWidget(QWidget):
             }
             """
         )
-        layout.addWidget(self.splitter)
+        candlestick_layout.addWidget(self.splitter)
+        self.market_tabs.addTab(self.candlestick_page, "Candlestick")
 
         date_axis_top = DateAxisItem(orientation="bottom")
         self.price_plot = PlotWidget(axisItems={"bottom": date_axis_top})
@@ -146,8 +199,10 @@ class ChartWidget(QWidget):
         self.ema_curve.setVisible(False)
 
         self.signal_markers = ScatterPlotItem()
+        self.news_markers = ScatterPlotItem()
         self.trade_scatter = ScatterPlotItem()
         self.price_plot.addItem(self.signal_markers)
+        self.price_plot.addItem(self.news_markers)
         self.price_plot.addItem(self.trade_scatter)
 
         date_axis_mid = DateAxisItem(orientation="bottom")
@@ -174,6 +229,82 @@ class ChartWidget(QWidget):
         colormap = pg.colormap.get("inferno")
         self.heatmap_image.setLookupTable(colormap.getLookupTable())
         self.heatmap_plot.addItem(self.heatmap_image)
+
+        self.depth_page = QWidget()
+        depth_layout = QVBoxLayout(self.depth_page)
+        depth_layout.setContentsMargins(10, 10, 10, 10)
+        depth_layout.setSpacing(8)
+
+        self.depth_summary_label = QLabel("Depth chart will populate when live order book data arrives.")
+        self.depth_summary_label.setStyleSheet("color: #8fa7c6; font-size: 12px;")
+        depth_layout.addWidget(self.depth_summary_label)
+
+        self.depth_plot = PlotWidget()
+        self.depth_plot.setMinimumHeight(360)
+        self._style_plot(self.depth_plot, left_label="Cumulative Size", bottom_label="Price", show_bottom=True)
+        self.depth_bid_curve = self.depth_plot.plot(
+            [],
+            [],
+            pen=mkPen("#26a69a", width=2.2),
+            stepMode="right",
+            fillLevel=0,
+            brush=(38, 166, 154, 70),
+        )
+        self.depth_ask_curve = self.depth_plot.plot(
+            [],
+            [],
+            pen=mkPen("#ef5350", width=2.2),
+            stepMode="right",
+            fillLevel=0,
+            brush=(239, 83, 80, 70),
+        )
+        depth_layout.addWidget(self.depth_plot, 1)
+        self.market_tabs.addTab(self.depth_page, "Depth Chart")
+
+        self.market_info_page = QWidget()
+        info_tab_layout = QVBoxLayout(self.market_info_page)
+        info_tab_layout.setContentsMargins(10, 10, 10, 10)
+        info_tab_layout.setSpacing(10)
+
+        self.market_info_summary = QLabel("Market details will update with ticker, candle, and order book context.")
+        self.market_info_summary.setWordWrap(True)
+        self.market_info_summary.setStyleSheet(
+            "color: #d9e6f7; background-color: #0c1730; border: 1px solid #173055; "
+            "border-radius: 12px; padding: 12px; font-size: 12px; font-weight: 600;"
+        )
+        info_tab_layout.addWidget(self.market_info_summary)
+
+        metrics_widget = QWidget()
+        metrics_layout = QGridLayout(metrics_widget)
+        metrics_layout.setContentsMargins(0, 0, 0, 0)
+        metrics_layout.setHorizontalSpacing(10)
+        metrics_layout.setVerticalSpacing(10)
+        self.market_info_cards = {}
+        for index, key in enumerate(
+            ["Last", "Mid", "Spread", "Best Bid", "Best Ask", "Range", "Visible Vol", "Depth Bias"]
+        ):
+            card = QFrame()
+            card.setStyleSheet(
+                "QFrame { background-color: #101a2d; border: 1px solid #20324d; border-radius: 12px; }"
+            )
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 12, 12, 12)
+            title = QLabel(key)
+            title.setStyleSheet("color: #8ca8cc; font-size: 12px;")
+            value = QLabel("-")
+            value.setStyleSheet("color: #f4f8ff; font-size: 16px; font-weight: 700;")
+            card_layout.addWidget(title)
+            card_layout.addWidget(value)
+            metrics_layout.addWidget(card, index // 4, index % 4)
+            self.market_info_cards[key] = value
+        info_tab_layout.addWidget(metrics_widget)
+
+        self.market_info_details = QTextBrowser()
+        self.market_info_details.setStyleSheet(
+            "QTextBrowser { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; border-radius: 12px; padding: 12px; }"
+        )
+        info_tab_layout.addWidget(self.market_info_details, 1)
+        self.market_tabs.addTab(self.market_info_page, "Market Info")
 
         self._style_plot(self.price_plot, right_label="Price", show_bottom=False)
         self._style_plot(self.volume_plot, left_label="Volume", show_bottom=False)
@@ -211,6 +342,10 @@ class ChartWidget(QWidget):
             line.setVisible(False)
             self.price_plot.addItem(line, ignoreBounds=True)
 
+        self.trade_entry_line = self._create_trade_overlay_line("#2a7fff", "Entry {value:.6f}", "entry")
+        self.trade_stop_line = self._create_trade_overlay_line("#ef5350", "SL {value:.6f}", "stop_loss")
+        self.trade_take_line = self._create_trade_overlay_line("#32d296", "TP {value:.6f}", "take_profit")
+
         self.text_item = TextItem(
             html="",
             anchor=(0.0, 1.0),
@@ -230,6 +365,8 @@ class ChartWidget(QWidget):
         self.price_plot.getPlotItem().vb.sigRangeChanged.connect(self._update_watermark_position)
 
         self.proxy = SignalProxy(self.price_plot.scene().sigMouseMoved, rateLimit=60, slot=self._mouse_moved)
+        self.price_plot.scene().sigMouseClicked.connect(self._mouse_clicked)
+        self.price_plot.scene().sigMouseClicked.connect(self._mouse_clicked)
 
         self.splitter.setStretchFactor(0, 8)
         self.splitter.setStretchFactor(1, 2)
@@ -237,6 +374,7 @@ class ChartWidget(QWidget):
         self.splitter.setSizes([720, 170, 170])
 
         self._update_chart_header()
+        self._refresh_market_panels()
         self._update_watermark_html()
 
     def _style_plot(self, plot, left_label=None, right_label=None, bottom_label=None, show_bottom=False):
@@ -315,6 +453,85 @@ class ChartWidget(QWidget):
         plot.addItem(line, ignoreBounds=True)
         return line
 
+    def _create_trade_overlay_line(self, color: str, label: str, level: str):
+        line = InfiniteLine(
+            angle=0,
+            movable=True,
+            pen=mkPen(color, width=1.35, style=QtCore.Qt.PenStyle.DashLine),
+            label=label,
+            labelOpts={"position": 0.98, "color": color, "fill": (11, 18, 32, 185)},
+        )
+        line.setVisible(False)
+        line._trade_level = level
+        line.sigPositionChangeFinished.connect(lambda item=line: self._handle_trade_line_moved(item))
+        self.price_plot.addItem(line, ignoreBounds=True)
+        return line
+
+    def _handle_trade_line_moved(self, line):
+        if self._trade_overlay_updating:
+            return
+        try:
+            price = float(line.value())
+        except Exception:
+            return
+        if not np.isfinite(price) or price <= 0:
+            return
+        level = getattr(line, "_trade_level", "")
+        if not level:
+            return
+        self._trade_overlay_state[level] = price
+        self.sigTradeLevelChanged.emit(
+            {
+                "symbol": self.symbol,
+                "timeframe": self.timeframe,
+                "level": level,
+                "price": price,
+            }
+        )
+
+    def set_trade_overlay(self, entry=None, stop_loss=None, take_profit=None, side="buy"):
+        self._trade_overlay_updating = True
+        try:
+            normalized_side = str(side or "buy").strip().lower() or "buy"
+            self._trade_overlay_state = {
+                "side": normalized_side,
+                "entry": entry,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+            }
+
+            entry_color = "#32d296" if normalized_side == "buy" else "#ef5350"
+            self.trade_entry_line.setPen(mkPen(entry_color, width=1.4, style=QtCore.Qt.PenStyle.DashLine))
+            self.trade_entry_line.label.fill = pg.mkBrush(pg.mkColor(entry_color))
+            self.trade_entry_line.label.setColor(pg.mkColor("#ffffff"))
+
+            for line, value in (
+                (self.trade_entry_line, entry),
+                (self.trade_stop_line, stop_loss),
+                (self.trade_take_line, take_profit),
+            ):
+                numeric = None
+                try:
+                    if value not in (None, ""):
+                        numeric = float(value)
+                except Exception:
+                    numeric = None
+                if numeric is not None and np.isfinite(numeric) and numeric > 0:
+                    line.setPos(numeric)
+                    line.setVisible(True)
+                else:
+                    line.setVisible(False)
+        finally:
+            self._trade_overlay_updating = False
+
+    def clear_trade_overlay(self):
+        self.set_trade_overlay(
+            entry=None,
+            stop_loss=None,
+            take_profit=None,
+            side=self._trade_overlay_state.get("side", "buy"),
+        )
+
     def _sync_view_context(self):
         context = (self.symbol, self.timeframe)
         if context != self._last_view_context:
@@ -323,6 +540,11 @@ class ChartWidget(QWidget):
             self.heatmap_buffer.clear()
             self._last_heatmap_price_range = None
             self.heatmap_image.clear()
+            self._last_orderbook_bids = []
+            self._last_orderbook_asks = []
+            self.depth_bid_curve.setData([], [])
+            self.depth_ask_curve.setData([], [])
+            self.depth_summary_label.setText("Depth chart will populate when live order book data arrives.")
 
     def _should_fit_chart_view(self, x):
         if self._auto_fit_pending:
@@ -443,6 +665,88 @@ class ChartWidget(QWidget):
         self.text_item.setPos(x, y)
         self._update_ohlcv_for_x(x)
 
+    def _mouse_clicked(self, event):
+        if event.button() == QtCore.Qt.MouseButton.RightButton:
+            self._show_trade_context_menu(event)
+            return
+        try:
+            is_double = bool(event.double())
+        except Exception:
+            is_double = False
+        if not is_double:
+            return
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            return
+        pos = event.scenePos()
+        if not self.price_plot.sceneBoundingRect().contains(pos):
+            return
+
+        mouse_point = self.price_plot.getPlotItem().vb.mapSceneToView(pos)
+        price = float(mouse_point.y())
+        if not np.isfinite(price) or price <= 0:
+            return
+
+        self.sigTradeLevelRequested.emit(
+            {
+                "symbol": self.symbol,
+                "timeframe": self.timeframe,
+                "price": price,
+                "x": float(mouse_point.x()),
+            }
+        )
+        try:
+            event.accept()
+        except Exception:
+            pass
+
+    def _show_trade_context_menu(self, event):
+        pos = event.scenePos()
+        if not self.price_plot.sceneBoundingRect().contains(pos):
+            return
+
+        mouse_point = self.price_plot.getPlotItem().vb.mapSceneToView(pos)
+        price = float(mouse_point.y())
+        if not np.isfinite(price) or price <= 0:
+            return
+
+        menu = QMenu(self)
+        buy_limit = menu.addAction("Buy Limit Here")
+        sell_limit = menu.addAction("Sell Limit Here")
+        menu.addSeparator()
+        set_entry = menu.addAction("Set Entry Here")
+        set_stop = menu.addAction("Set Stop Loss Here")
+        set_take = menu.addAction("Set Take Profit Here")
+        menu.addSeparator()
+        clear_levels = menu.addAction("Clear Trade Levels")
+        chosen = menu.exec(event.screenPos().toPoint())
+        if chosen is None:
+            return
+
+        mapping = {
+            buy_limit: "buy_limit",
+            sell_limit: "sell_limit",
+            set_entry: "set_entry",
+            set_stop: "set_stop_loss",
+            set_take: "set_take_profit",
+            clear_levels: "clear_levels",
+        }
+        action_name = mapping.get(chosen)
+        if not action_name:
+            return
+
+        self.sigTradeContextAction.emit(
+            {
+                "action": action_name,
+                "symbol": self.symbol,
+                "timeframe": self.timeframe,
+                "price": price,
+            }
+        )
+        try:
+            event.accept()
+        except Exception:
+            pass
+
     def _active_broker_name(self):
         broker = getattr(self.controller, "broker", None)
         if broker is not None:
@@ -530,8 +834,145 @@ class ChartWidget(QWidget):
 
     def refresh_context_display(self):
         self._update_chart_header()
+        self._refresh_market_panels()
         self._update_watermark_html()
         self._update_watermark_position()
+
+    def _refresh_market_panels(self):
+        self._update_depth_chart()
+        self._update_market_info()
+
+    def _update_depth_chart(self):
+        bids = []
+        asks = []
+        for level in self._last_orderbook_bids or []:
+            if isinstance(level, (list, tuple)) and len(level) >= 2:
+                price = self._format_numeric_value(level[0])
+                size = self._format_numeric_value(level[1])
+                if price is not None and size is not None and price > 0 and size > 0:
+                    bids.append((price, size))
+        for level in self._last_orderbook_asks or []:
+            if isinstance(level, (list, tuple)) and len(level) >= 2:
+                price = self._format_numeric_value(level[0])
+                size = self._format_numeric_value(level[1])
+                if price is not None and size is not None and price > 0 and size > 0:
+                    asks.append((price, size))
+
+        if not bids and not asks:
+            self.depth_bid_curve.setData([], [])
+            self.depth_ask_curve.setData([], [])
+            return
+
+        if bids:
+            bids = sorted(bids, key=lambda item: item[0], reverse=True)
+            bid_prices = np.array([price for price, _size in bids], dtype=float)
+            bid_sizes = np.cumsum(np.array([size for _price, size in bids], dtype=float))
+            self.depth_bid_curve.setData(bid_prices, bid_sizes)
+        else:
+            self.depth_bid_curve.setData([], [])
+
+        if asks:
+            asks = sorted(asks, key=lambda item: item[0])
+            ask_prices = np.array([price for price, _size in asks], dtype=float)
+            ask_sizes = np.cumsum(np.array([size for _price, size in asks], dtype=float))
+            self.depth_ask_curve.setData(ask_prices, ask_sizes)
+        else:
+            self.depth_ask_curve.setData([], [])
+
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+        spread_text = "-"
+        if best_bid is not None and best_ask is not None and best_ask >= best_bid:
+            spread_text = self._format_metric(best_ask - best_bid, 8)
+        self.depth_summary_label.setText(
+            f"Best bid {self._format_metric(best_bid, 8)} | Best ask {self._format_metric(best_ask, 8)} | Spread {spread_text}"
+        )
+
+    def _update_market_info(self):
+        stats = self._last_candle_stats or {}
+        bid = self._format_numeric_value(self._last_bid)
+        ask = self._format_numeric_value(self._last_ask)
+        last_price = self._format_numeric_value(stats.get("last_price")) if stats else None
+        if last_price is None:
+            if bid is not None and ask is not None:
+                last_price = (bid + ask) / 2.0
+            else:
+                last_price = bid or ask
+
+        mid = None
+        if bid is not None and ask is not None:
+            mid = (bid + ask) / 2.0
+        spread = None
+        if bid is not None and ask is not None and ask >= bid:
+            spread = ask - bid
+
+        bid_depth = sum(max(0.0, self._format_numeric_value(level[1]) or 0.0) for level in self._last_orderbook_bids or [] if isinstance(level, (list, tuple)) and len(level) >= 2)
+        ask_depth = sum(max(0.0, self._format_numeric_value(level[1]) or 0.0) for level in self._last_orderbook_asks or [] if isinstance(level, (list, tuple)) and len(level) >= 2)
+        depth_bias = None
+        total_depth = bid_depth + ask_depth
+        if total_depth > 0:
+            depth_bias = ((bid_depth - ask_depth) / total_depth) * 100.0
+
+        range_text = "-"
+        if stats:
+            range_text = (
+                f"{self._format_metric(stats.get('min_price'), 6)} - "
+                f"{self._format_metric(stats.get('max_price'), 6)}"
+            )
+
+        card_values = {
+            "Last": self._format_metric(last_price, 8),
+            "Mid": self._format_metric(mid, 8),
+            "Spread": self._format_metric(spread, 8),
+            "Best Bid": self._format_metric(bid, 8),
+            "Best Ask": self._format_metric(ask, 8),
+            "Range": range_text,
+            "Visible Vol": self._format_volume(stats.get("cumulative_volume", 0.0)) if stats else "-",
+            "Depth Bias": "-" if depth_bias is None else f"{depth_bias:+.2f}%",
+        }
+        for key, value_label in self.market_info_cards.items():
+            value_label.setText(card_values.get(key, "-"))
+
+        base, quote = self._symbol_parts()
+        headline = f"{self.symbol.upper()} on {self._active_broker_name().upper()} | {self.timeframe.upper()} context"
+        if stats and stats.get("variation_pct") is not None:
+            headline += f" | Visible move {float(stats.get('variation_pct') or 0.0):+.2f}%"
+        self.market_info_summary.setText(headline)
+
+        detail_lines = [
+            f"<h3>{self.symbol.upper()}</h3>",
+            (
+                f"<p><b>Market structure:</b> {base} / {quote if quote else 'quote unavailable'} | "
+                f"<b>Broker:</b> {self._active_broker_name().upper()} | "
+                f"<b>Timeframe:</b> {self.timeframe.upper()}</p>"
+            ),
+            (
+                f"<p><b>Visible range:</b> {range_text} | "
+                f"<b>Average close:</b> {self._format_metric(stats.get('average_close'), 8) if stats else '-'} | "
+                f"<b>Visible volume:</b> {self._format_volume(stats.get('cumulative_volume', 0.0)) if stats else '-'}</p>"
+            ),
+            (
+                f"<p><b>Order book:</b> bid depth {self._format_volume(bid_depth)} | "
+                f"ask depth {self._format_volume(ask_depth)} | "
+                f"spread {self._format_metric(spread, 8)} | "
+                f"mid {self._format_metric(mid, 8)}</p>"
+            ),
+        ]
+        if depth_bias is not None:
+            tilt = "buyers" if depth_bias > 0 else "sellers" if depth_bias < 0 else "balanced flow"
+            detail_lines.append(
+                f"<p><b>Depth tilt:</b> {tilt} with a {depth_bias:+.2f}% balance versus the opposing side.</p>"
+            )
+        self.market_info_details.setHtml("".join(detail_lines))
+
+    def _format_numeric_value(self, value):
+        try:
+            numeric = float(value)
+        except Exception:
+            return None
+        if not np.isfinite(numeric):
+            return None
+        return numeric
 
     def _update_watermark_position(self, *_args):
         try:
@@ -640,6 +1081,9 @@ class ChartWidget(QWidget):
         return max(min(step * 0.64, step * 0.8), 1e-6)
 
     def update_orderbook_heatmap(self, bids, asks):
+        self._last_orderbook_bids = list(bids or [])
+        self._last_orderbook_asks = list(asks or [])
+        self._refresh_market_panels()
         if not bids and not asks:
             return
 
@@ -749,6 +1193,126 @@ class ChartWidget(QWidget):
             self.signal_markers.addPoints(x=[index], y=[price], symbol="t1", brush="#26a69a", size=12)
         elif signal == "SELL":
             self.signal_markers.addPoints(x=[index], y=[price], symbol="t", brush="#ef5350", size=12)
+
+    def clear_news_events(self):
+        self._news_events = []
+        self.news_markers.setData([], [])
+        for item in list(self._news_items):
+            try:
+                self.price_plot.removeItem(item)
+            except Exception:
+                pass
+        self._news_items = []
+
+    def set_news_events(self, events):
+        self._news_events = list(events or [])
+        self._render_news_events()
+
+    def _render_news_events(self):
+        self.news_markers.setData([], [])
+        for item in list(self._news_items):
+            try:
+                self.price_plot.removeItem(item)
+            except Exception:
+                pass
+        self._news_items = []
+
+        if self._last_x is None or self._last_df is None or len(self._last_x) == 0 or not self._news_events:
+            return
+
+        try:
+            high_values = self._last_df["high"].astype(float).to_numpy()
+            price_anchor = float(np.nanmax(high_values))
+            low_anchor = float(np.nanmin(self._last_df["low"].astype(float).to_numpy()))
+        except Exception:
+            return
+
+        visible_min = float(np.nanmin(self._last_x))
+        visible_max = float(np.nanmax(self._last_x))
+        price_span = max(price_anchor - low_anchor, 1e-6)
+        marker_y = price_anchor + (price_span * 0.03)
+
+        xs = []
+        ys = []
+        tooltips = []
+        visible_events = []
+
+        for event in self._news_events[:12]:
+            timestamp_text = str(event.get("timestamp", "") or "")
+            try:
+                event_dt = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if event_dt.tzinfo is None:
+                event_dt = event_dt.replace(tzinfo=timezone.utc)
+            x_value = float(event_dt.timestamp())
+            if x_value < visible_min or x_value > visible_max:
+                continue
+            xs.append(x_value)
+            ys.append(marker_y)
+            headline = str(event.get("title", "") or "News event")
+            source = str(event.get("source", "") or "News Feed")
+            summary = str(event.get("summary", "") or "").strip()
+            impact = event.get("impact", "")
+            sentiment = event.get("sentiment_score", "")
+            timestamp_label = event_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            tooltip_parts = [f"{source} | {timestamp_label}", headline]
+            if summary:
+                tooltip_parts.append(summary)
+            if impact not in ("", None) or sentiment not in ("", None):
+                tooltip_parts.append(f"Impact {impact} | Sentiment {sentiment}")
+            tooltips.append("\n".join(str(part) for part in tooltip_parts if str(part).strip()))
+            visible_events.append(
+                {
+                    "x": x_value,
+                    "headline": headline,
+                    "source": source,
+                    "time": timestamp_label,
+                    "impact": impact,
+                    "sentiment": sentiment,
+                }
+            )
+
+        if not xs:
+            return
+
+        self.news_markers.setData(
+            x=xs,
+            y=ys,
+            symbol="d",
+            size=9,
+            brush=pg.mkBrush("#ffd166"),
+            pen=mkPen("#f4a261", width=1.1),
+            data=tooltips,
+        )
+
+        for event in visible_events[:5]:
+            x_value = float(event["x"])
+            line = InfiniteLine(
+                pos=x_value,
+                angle=90,
+                movable=False,
+                pen=mkPen((244, 162, 97, 70), width=1, style=QtCore.Qt.PenStyle.DotLine),
+            )
+            self.price_plot.addItem(line, ignoreBounds=True)
+            self._news_items.append(line)
+
+            label = TextItem(
+                html=(
+                    "<div style='background-color: rgba(11,18,32,0.92); color: #f8fbff; "
+                    "padding: 4px 7px; border: 1px solid rgba(244,162,97,0.55); border-radius: 6px;'>"
+                    f"<div style='color: #ffd166; font-size: 10px; font-weight: 700;'>{event['source']} | {event['time']}</div>"
+                    f"<div style='color: #f8fbff; font-size: 11px; font-weight: 600;'>{event['headline'][:68]}{'...' if len(event['headline']) > 68 else ''}</div>"
+                    f"<div style='color: #9ec1ff; font-size: 10px;'>Impact {event['impact']} | Sentiment {event['sentiment']}</div>"
+                    "</div>"
+                ),
+                anchor=(0.0, 1.0),
+                border=None,
+                fill=None,
+            )
+            label.setPos(x_value, marker_y)
+            self.price_plot.addItem(label)
+            self._news_items.append(label)
 
     def _pivot_window(self, period: int) -> int:
         return max(2, int(period) // 2)
@@ -1404,6 +1968,7 @@ class ChartWidget(QWidget):
             self._fit_chart_view(self._last_candle_stats, width)
         self.refresh_context_display()
         self._update_ohlcv_for_x(self._last_x[-1] if len(self._last_x) else 0.0)
+        self._render_news_events()
 
         try:
             last_close = float(df["close"].iloc[-1])
@@ -1446,6 +2011,7 @@ class ChartWidget(QWidget):
         if last_f > 0:
             self.last_line.setPos(last_f)
             self.last_line.setVisible(True)
+        self._refresh_market_panels()
 
     def set_bid_ask_lines_visible(self, visible: bool):
         self.show_bid_ask_lines = bool(visible)

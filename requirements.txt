@@ -59,6 +59,8 @@ celery>=5.3
 pyqtgraph>=0.13
 pyside6>=6.5
 matplotlib>=3.7
+SpeechRecognition>=3.10
+sounddevice>=0.4
 
 # ==========================================
 # REPORT GENERATION

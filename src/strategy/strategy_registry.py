@@ -10,7 +10,7 @@ class StrategyRegistry:
         self._register_builtin_strategies()
 
     def _register_builtin_strategies(self):
-        for name in ["Trend Following", "Mean Reversion", "Breakout", "AI Hybrid"]:
+        for name in Strategy.AVAILABLE_STRATEGIES:
             if name not in self.strategies:
                 self.register(name, Strategy(strategy_name=name))
 

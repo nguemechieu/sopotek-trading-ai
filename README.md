@@ -17,10 +17,10 @@ Sopotek Trading AI is a desktop trading workstation built by Sopotek Corporation
 
 - Dashboard for broker selection, mode, credentials, strategy choice, licensing, and launch control
 - Terminal workspace with chart tabs, detachable charts, tiled/cascaded layouts, and layout restore
-- MT4/MT5-style chart handling including candlesticks, indicators, orderbook heatmap, Fibonacci, and chart trading interactions
+- MT4/MT5-style chart handling including candlesticks, indicators, orderbook heatmap, depth chart, market info, Fibonacci, and chart trading interactions
 - Manual trade ticket with broker-aware formatting, suggested SL/TP, and chart-linked entry, stop, and take-profit levels
-- AI trading controls, AI signal monitor, recommendations, Market ChatGPT, news overlays, and Telegram command handling
-- Open orders, positions, trade log, closed journal, trade review, position analysis, performance analytics, and system health tools
+- AI trading controls, AI signal monitor, recommendations, Sopotek Pilot, news overlays, and Telegram command handling
+- Open orders, positions, trade log, closed journal, trade review, position analysis, performance analytics, system health tools, and Coinbase-style recent market trades in the Order Book dock
 - Risk and behavior protection including risk profiles, behavior guard, kill switch, drawdown-aware restrictions, and session health status
 - Backtesting, strategy optimization, journaling, trade checklist workflow, and local persistence through SQLite and QSettings
 
@@ -30,22 +30,23 @@ Sopotek Trading AI is a desktop trading workstation built by Sopotek Corporation
 1. Launch from the dashboard.
 2. Select broker, mode, and strategy.
 3. Open one or more charts.
-4. Use the `Trade Checklist` and `Trade Recommendations` windows before placing risk.
-5. Place a manual order or enable AI trading only after confirming status, balances, and data quality.
-6. Monitor `Trade Log`, `Open Orders`, `Positions`, `System Status`, `Behavior Guard`, and `Performance`.
-7. Review trades later in `Closed Journal`, `Trade Review`, and `Journal Review`.
+4. Use the chart tabs to review `Candlestick`, `Depth Chart`, and `Market Info`, then inspect `Order Book` and `Recent Trades`.
+5. Use the `Trade Checklist` and `Trade Recommendations` windows before placing risk.
+6. Place a manual order or enable AI trading only after confirming status, balances, and data quality.
+7. Monitor `Trade Log`, `Open Orders`, `Positions`, `System Status`, `Behavior Guard`, and `Performance`.
+8. Review trades later in `Closed Journal`, `Trade Review`, and `Journal Review`.
 
 ### Remote Workflow
 - Receive Telegram notifications for trade activity.
 - Use Telegram commands and keyboard shortcuts for status, balances, screenshots, chart captures, recommendations, and position analysis.
-- Ask Market ChatGPT questions inside the app or through Telegram.
+- Ask Sopotek Pilot questions inside the app or through Telegram.
 
 ### Suggested First Validation Path
 1. Launch in `paper`, `practice`, or `sandbox`.
-2. Open one symbol and confirm candles, ticker, and orderbook behavior.
+2. Open one symbol and confirm candles, ticker, order book, recent trades, and depth behavior.
 3. Place one very small manual order.
 4. Confirm `Trade Log`, `Open Orders`, `Positions`, and `Closed Journal` update in a consistent way.
-5. Test `Market ChatGPT`, Telegram, and screenshots only after the broker session is healthy.
+5. Test `Sopotek Pilot`, Telegram, and screenshots only after the broker session is healthy.
 6. Enable AI trading only after manual execution and review workflows are behaving as expected.
 
 ## Architecture At A Glance
@@ -127,9 +128,9 @@ The bot can handle:
 - status, balances, positions, and open orders
 - screenshots and chart screenshots
 - recommendation and performance summaries
-- plain-text ChatGPT conversations in addition to slash commands
+- plain-text Sopotek Pilot conversations in addition to slash commands
 
-### Market ChatGPT
+### Sopotek Pilot
 The in-app assistant can:
 
 - answer questions about balances, positions, performance, journal state, and recommendations

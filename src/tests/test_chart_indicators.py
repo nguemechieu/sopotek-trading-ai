@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from frontend.ui.chart.chart_widget import ChartWidget
+from frontend.ui.panels.orderbook_panel import OrderBookPanel
 
 
 class DummyController:
@@ -85,3 +86,66 @@ def test_chart_widget_accepts_utc_timestamp_series():
     assert widget._last_x is not None
     assert len(widget._last_x) == 3
     assert widget._last_x[1] > widget._last_x[0]
+
+
+def test_chart_widget_exposes_depth_and_market_info_tabs():
+    _app()
+    widget = ChartWidget("BTC/USDT", "1h", DummyController())
+
+    df = pd.DataFrame(
+        {
+            "timestamp": [1700000000 + i * 60 for i in range(5)],
+            "open": [100.0, 101.0, 102.0, 101.5, 103.0],
+            "high": [101.0, 102.0, 103.5, 103.0, 104.0],
+            "low": [99.5, 100.5, 101.2, 100.8, 102.4],
+            "close": [100.8, 101.7, 102.4, 102.8, 103.6],
+            "volume": [12, 18, 14, 17, 22],
+        }
+    )
+    widget.update_candles(df)
+    widget.update_price_lines(103.4, 103.8, last=103.6)
+    widget.update_orderbook_heatmap(
+        bids=[[103.4, 2.0], [103.2, 1.5], [103.0, 1.2]],
+        asks=[[103.8, 1.0], [104.0, 1.6], [104.2, 2.1]],
+    )
+
+    tab_labels = [widget.market_tabs.tabText(index) for index in range(widget.market_tabs.count())]
+    assert "Candlestick" in tab_labels
+    assert "Depth Chart" in tab_labels
+    assert "Market Info" in tab_labels
+    assert widget.market_info_cards["Spread"].text() != "-"
+
+    bid_x, bid_y = widget.depth_bid_curve.getData()
+    ask_x, ask_y = widget.depth_ask_curve.getData()
+    assert bid_x is not None and len(bid_x) == 3
+    assert bid_y is not None and len(bid_y) == 3
+    assert ask_x is not None and len(ask_x) == 3
+    assert ask_y is not None and len(ask_y) == 3
+
+
+def test_orderbook_panel_shows_recent_market_trades():
+    _app()
+    panel = OrderBookPanel()
+    panel.update_recent_trades(
+        [
+            {
+                "time": "2026-03-12T10:05:00+00:00",
+                "side": "buy",
+                "price": 103.55,
+                "amount": 0.75,
+                "notional": 77.6625,
+            },
+            {
+                "time": "2026-03-12T10:05:02+00:00",
+                "side": "sell",
+                "price": 103.45,
+                "amount": 0.40,
+                "notional": 41.38,
+            },
+        ]
+    )
+
+    assert panel.tabs.count() == 2
+    assert panel.tabs.tabText(1) == "Recent Trades"
+    assert panel.recent_trades_table.item(0, 1).text() == "BUY"
+    assert panel.recent_trades_table.item(1, 1).text() == "SELL"

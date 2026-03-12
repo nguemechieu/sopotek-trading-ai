@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import html
 import json
 from pathlib import Path
@@ -7,31 +7,83 @@ import random
 import subprocess
 import sys
 import threading
+import time
 import tomllib
 import traceback
 
 import numpy as np
+import pandas as pd
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QSettings, QDateTime, Signal, QTimer
 from PySide6.QtGui import QAction, QColor, QTextCursor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QDockWidget,
     QTableWidget, QTableWidgetItem,
-    QPushButton, QLabel, QComboBox,
+    QAbstractItemView,
+    QPushButton, QLabel, QComboBox, QProgressBar,
     QTabWidget, QToolBar, QFileDialog, QDialog, QGridLayout, QDoubleSpinBox, QMessageBox, QFormLayout, QInputDialog, QColorDialog,
     QFrame,
-    QHBoxLayout, QSizePolicy, QTextEdit, QTextBrowser, QApplication, QLineEdit
+    QHBoxLayout, QSizePolicy, QTextEdit, QTextBrowser, QApplication, QLineEdit, QSlider, QCheckBox, QScrollArea
 )
 from shiboken6 import isValid
 
 from backtesting.backtest_engine import BacktestEngine
 from backtesting.report_generator import ReportGenerator
 from backtesting.simulator import Simulator
+from broker.market_venues import MARKET_VENUE_CHOICES
 from frontend.console.system_console import SystemConsole
 from frontend.ui.chart.chart_widget import ChartWidget
 from frontend.ui.i18n import iter_supported_languages
 from frontend.ui.panels.orderbook_panel import OrderBookPanel
+from integrations.news_service import NewsService
+from quant.ml_research import MLResearchPipeline
 from strategy.strategy import Strategy
+
+RISK_PROFILE_PRESETS = {
+    "Capital Preservation": {
+        "max_portfolio_risk": 0.03,
+        "max_risk_per_trade": 0.005,
+        "max_position_size_pct": 0.03,
+        "max_gross_exposure_pct": 0.50,
+        "description": "Very defensive. Small risk budget, small positions, and low total exposure.",
+    },
+    "Conservative": {
+        "max_portfolio_risk": 0.05,
+        "max_risk_per_trade": 0.01,
+        "max_position_size_pct": 0.05,
+        "max_gross_exposure_pct": 1.00,
+        "description": "Controlled risk for steady participation with tighter exposure limits.",
+    },
+    "Balanced": {
+        "max_portfolio_risk": 0.10,
+        "max_risk_per_trade": 0.02,
+        "max_position_size_pct": 0.10,
+        "max_gross_exposure_pct": 2.00,
+        "description": "General-purpose default. Balanced between protection and opportunity.",
+    },
+    "Growth": {
+        "max_portfolio_risk": 0.15,
+        "max_risk_per_trade": 0.03,
+        "max_position_size_pct": 0.16,
+        "max_gross_exposure_pct": 2.50,
+        "description": "Moderately aggressive growth profile with room for larger positions.",
+    },
+    "Active Trader": {
+        "max_portfolio_risk": 0.18,
+        "max_risk_per_trade": 0.025,
+        "max_position_size_pct": 0.12,
+        "max_gross_exposure_pct": 3.50,
+        "description": "Designed for more active rotation across symbols with controlled per-trade risk.",
+    },
+    "Aggressive": {
+        "max_portfolio_risk": 0.25,
+        "max_risk_per_trade": 0.05,
+        "max_position_size_pct": 0.25,
+        "max_gross_exposure_pct": 4.00,
+        "description": "High-risk profile for experienced users who accept deeper swings.",
+    },
+}
+
 
 def global_exception_hook(exctype, value, tb):
     # Ignore expected shutdown interrupts so the terminal closes quietly.
@@ -75,6 +127,7 @@ class Terminal(QMainWindow):
             self.symbol = "BTC/USDT"
 
         self.MAX_LOG_ROWS = 200
+        self.AI_TABLE_REFRESH_MIN_SECONDS = 0.5
         self.current_timeframe = getattr(controller,"time_frame")
         self.autotrading_enabled = False
         self.autotrade_scope_value = str(getattr(controller, "autotrade_scope", "all") or "all").lower()
@@ -85,9 +138,15 @@ class Terminal(QMainWindow):
         self._ui_shutting_down = False
         self._positions_refresh_task = None
         self._open_orders_refresh_task = None
+        self._broker_status_refresh_task = None
         self._latest_positions_snapshot = []
         self._latest_open_orders_snapshot = []
+        self._latest_broker_status_snapshot = {"status": "disconnected", "summary": "Disconnected"}
+        self._last_broker_status_refresh_at = 0.0
+        self._last_ai_table_refresh_at = 0.0
         self._ai_signal_records = {}
+        self._recommendation_records = {}
+        self._closed_journal_refresh_task = None
 
         self.candle_up_color = self.settings.value("chart/candle_up_color", "#26a69a")
         self.candle_down_color = self.settings.value("chart/candle_down_color", "#ef5350")
@@ -103,6 +162,8 @@ class Terminal(QMainWindow):
 
         if hasattr(self.controller, "language_changed"):
             self.controller.language_changed.connect(lambda _code: self.apply_language())
+        if hasattr(self.controller, "license_changed"):
+            self.controller.license_changed.connect(lambda _status: self._handle_license_status_change())
 
         self.controller.symbols_signal.connect(self._update_symbols)
 
@@ -135,6 +196,12 @@ class Terminal(QMainWindow):
         self.system_status_button = None
         self.system_status_dock = None
         self.trading_activity_label = None
+        self.live_trading_bar_frame = None
+        self.live_trading_bar_label = None
+        self.live_trading_bar = None
+        self.session_mode_badge = None
+        self.license_badge = None
+        self.kill_switch_button = None
         self.symbol_picker = None
         self.detached_tool_windows = {}
         self._last_chart_request_key = None
@@ -538,6 +605,25 @@ class Terminal(QMainWindow):
         except Exception:
             return []
 
+    def _all_chart_widgets(self):
+        charts = []
+        if self._chart_tabs_ready():
+            try:
+                count = self.chart_tabs.count()
+            except RuntimeError:
+                count = 0
+
+            for index in range(count):
+                try:
+                    page = self.chart_tabs.widget(index)
+                except RuntimeError:
+                    break
+                charts.extend(self._chart_widgets_in_page(page))
+
+        for page in self._iter_detached_chart_pages():
+            charts.extend(self._chart_widgets_in_page(page))
+        return charts
+
     def _single_chart_window_key(self, symbol, timeframe):
         safe_symbol = str(symbol or "").upper().replace("/", "_").replace(":", "_")
         safe_timeframe = str(timeframe or "").lower().replace("/", "_")
@@ -728,7 +814,9 @@ class Terminal(QMainWindow):
             ("equity_signal", self._update_equity),
             ("trade_signal", self._update_trade_log),
             ("ticker_signal", self._update_ticker),
+            ("news_signal", self._update_news),
             ("orderbook_signal", self._update_orderbook),
+            ("recent_trades_signal", self._update_recent_trades),
             ("strategy_debug_signal", self._handle_strategy_debug),
             ("training_status_signal", self._update_training_status),
             ("symbols_signal", self._update_symbols),
@@ -779,6 +867,144 @@ class Terminal(QMainWindow):
             }
         """
 
+    def _danger_button_style(self):
+        return """
+            QPushButton {
+                background-color: #3a1014;
+                color: #ffd7db;
+                border: 1px solid #8d3f49;
+                border-radius: 12px;
+                padding: 8px 14px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background-color: #4d151c;
+                border-color: #c25f6d;
+            }
+        """
+
+    def _session_badge_style(self, live=False):
+        background = "#4a151b" if live else "#123126"
+        border = "#d36b77" if live else "#2b8d68"
+        text = "#ffe4e7" if live else "#d9ffee"
+        return (
+            "QLabel { "
+            f"background-color: {background}; color: {text}; border: 1px solid {border}; "
+            "border-radius: 12px; padding: 8px 14px; font-weight: 800; letter-spacing: 0.5px; }"
+        )
+
+    def _live_trading_bar_style(self, armed=False):
+        frame_background = "#301117" if armed else "#24161a"
+        frame_border = "#de6b7f" if armed else "#805760"
+        label_color = "#ffe3e8" if armed else "#d8b9c0"
+        chunk_color = "#ff6b81" if armed else "#b85b69"
+        chunk_glow = "#ffc2cc" if armed else "#e59aa7"
+        return (
+            "QFrame {{ "
+            f"background-color: {frame_background}; border: 1px solid {frame_border}; border-radius: 14px; "
+            "}}"
+            "QLabel {{ "
+            f"color: {label_color}; font-size: 11px; font-weight: 800; letter-spacing: 0.8px; "
+            "padding: 0 2px; border: 0; background: transparent; }}"
+            "QProgressBar {{ "
+            "background-color: #12070a; border: 1px solid #5d3139; border-radius: 6px; "
+            "padding: 0; min-height: 10px; max-height: 10px; }}"
+            "QProgressBar::chunk {{ "
+            f"background-color: {chunk_color}; border-radius: 5px; margin: 1px; "
+            f"selection-background-color: {chunk_glow}; }}"
+        )
+
+    def _update_session_badge(self):
+        badge = getattr(self, "session_mode_badge", None)
+        if badge is None:
+            return
+        live = bool(getattr(self.controller, "is_live_mode", lambda: False)())
+        mode_text = "LIVE" if live else "PAPER"
+        exchange = str(
+            getattr(getattr(self.controller, "broker", None), "exchange_name", None)
+            or getattr(getattr(getattr(self.controller, "config", None), "broker", None), "exchange", "")
+            or ""
+        ).upper() or "BROKER"
+        badge.setText(f"{mode_text} | {exchange}")
+        badge.setStyleSheet(self._session_badge_style(live=live))
+        account = getattr(self.controller, "current_account_label", lambda: "Not set")()
+        badge.setToolTip(f"Mode: {mode_text}\nBroker: {exchange}\nAccount: {account}")
+        self._update_live_trading_bar()
+
+    def _update_live_trading_bar(self):
+        frame = getattr(self, "live_trading_bar_frame", None)
+        label = getattr(self, "live_trading_bar_label", None)
+        bar = getattr(self, "live_trading_bar", None)
+        if frame is None or label is None or bar is None:
+            return
+
+        live_mode = bool(getattr(self.controller, "is_live_mode", lambda: False)())
+        if not live_mode:
+            frame.setVisible(False)
+            return
+
+        frame.setVisible(True)
+        armed = bool(self.autotrading_enabled)
+        if armed:
+            label.setText("LIVE TRADING ACTIVE")
+            label.setToolTip("Live session is active and AI trading is currently enabled.")
+        else:
+            label.setText("LIVE MODE ARMED")
+            label.setToolTip("Live broker session is open. AI trading is currently off.")
+        frame.setStyleSheet(self._live_trading_bar_style(armed=armed))
+        bar.setRange(0, 0)
+        bar.setTextVisible(False)
+        bar.setFormat("")
+
+
+    def _update_license_badge(self):
+        badge = getattr(self, "license_badge", None)
+        if badge is None:
+            return
+        status = {}
+        if hasattr(self.controller, "get_license_status"):
+            try:
+                status = self.controller.get_license_status()
+            except Exception:
+                status = {}
+        tier = str(status.get("tier", "community") or "community").lower()
+        badge_text = str(status.get("badge", "FREE") or "FREE").upper()
+        if tier == "full":
+            background, border, text = "#1f3424", "#40bf73", "#ddffee"
+        elif tier == "subscription":
+            background, border, text = "#102d3a", "#49b6ff", "#dff5ff"
+        elif tier == "trial":
+            background, border, text = "#3a2a10", "#e3b04b", "#fff2d6"
+        else:
+            background, border, text = "#2b2630", "#80798f", "#ece8f5"
+        badge.setText(badge_text)
+        badge.setStyleSheet(
+            "QLabel { "
+            f"background-color: {background}; color: {text}; border: 1px solid {border}; "
+            "border-radius: 12px; padding: 8px 12px; font-weight: 800; letter-spacing: 0.5px; }"
+        )
+        badge.setToolTip(
+            f"{status.get('plan_name', 'License')} | {status.get('summary', 'Status unavailable')}\n"
+            f"{status.get('description', '')}"
+        )
+
+    def _handle_license_status_change(self):
+        self._update_license_badge()
+        if hasattr(self, "status_labels"):
+            self._refresh_terminal()
+
+    def _update_kill_switch_button(self):
+        button = getattr(self, "kill_switch_button", None)
+        if button is None:
+            return
+        active = bool(getattr(self.controller, "is_emergency_stop_active", lambda: False)())
+        if active:
+            button.setText("Resume")
+            button.setToolTip("Clear the emergency lock so new orders can be submitted again.")
+        else:
+            button.setText("Kill Switch")
+            button.setToolTip("Stop auto trading, cancel open orders, close tracked positions, and block new entries.")
+
     def _set_active_timeframe_button(self, active_tf):
         for tf, button in self.timeframe_buttons.items():
             button.setChecked(tf == active_tf)
@@ -790,16 +1016,19 @@ class Terminal(QMainWindow):
 
     def _update_autotrade_button(self):
         scope_suffix = f" [{self._autotrade_scope_label()}]"
+        phase = getattr(self, "_spinner_index", 0) % 3
+        self.auto_button.setChecked(bool(self.autotrading_enabled))
         if self.autotrading_enabled:
-            self.auto_button.setText(f"{self._tr('terminal.autotrade.on')}{scope_suffix}")
+            live_texts = ["AI Trading ON", "AI Trading ON.", "AI Trading ON.."]
+            self.auto_button.setText(f"{live_texts[phase]}{scope_suffix}")
             self.auto_button.setStyleSheet(
                 """
                 QPushButton {
                     background-color: #123524;
                     color: #d7ffe9;
-                    border: 1px solid #28a86b;
+                    border: 2px solid #32d296;
                     border-radius: 14px;
-                    padding: 9px 16px;
+                    padding: 10px 18px;
                     font-weight: 700;
                 }
                 QPushButton:hover {
@@ -809,15 +1038,15 @@ class Terminal(QMainWindow):
             )
             self._update_trading_activity_indicator(active=True)
         else:
-            self.auto_button.setText(f"{self._tr('terminal.autotrade.off')}{scope_suffix}")
+            self.auto_button.setText(f"AI Trading OFF{scope_suffix}")
             self.auto_button.setStyleSheet(
                 """
                 QPushButton {
                     background-color: #34161a;
                     color: #ffd9de;
-                    border: 1px solid #b45b68;
+                    border: 2px solid #b45b68;
                     border-radius: 14px;
-                    padding: 9px 16px;
+                    padding: 10px 18px;
                     font-weight: 700;
                 }
                 QPushButton:hover {
@@ -826,6 +1055,12 @@ class Terminal(QMainWindow):
                 """
             )
             self._update_trading_activity_indicator(active=False)
+        self.auto_button.setMinimumWidth(188)
+        self.auto_button.setToolTip(
+            "Turn AI auto trading on or off for the current scope. "
+            "When enabled, the bot scans the chosen symbols and sends live signals/orders."
+        )
+        self._update_live_trading_bar()
 
     def _update_trading_activity_indicator(self, active=None):
         label = getattr(self, "trading_activity_label", None)
@@ -910,6 +1145,9 @@ class Terminal(QMainWindow):
         self.action_cancel_orders = QAction(self)
         self.action_cancel_orders.triggered.connect(self._cancel_all_orders)
         self.trading_menu.addAction(self.action_cancel_orders)
+        self.action_kill_switch = QAction("Emergency Kill Switch", self)
+        self.action_kill_switch.triggered.connect(self._toggle_emergency_stop)
+        self.trading_menu.addAction(self.action_kill_switch)
 
         self.backtest_menu = menu_bar.addMenu("")
         self.action_run_backtest = QAction(self)
@@ -995,6 +1233,12 @@ class Terminal(QMainWindow):
             self.language_actions[code] = action
 
         self.tools_menu = menu_bar.addMenu("")
+        self.action_market_chat = QAction("Sopotek Pilot", self)
+        self.action_market_chat.triggered.connect(self._open_market_chat_window)
+        self.tools_menu.addAction(self.action_market_chat)
+        self.action_recommendations = QAction("Recommendations", self)
+        self.action_recommendations.triggered.connect(self._open_recommendations_window)
+        self.tools_menu.addAction(self.action_recommendations)
         self.action_ml_monitor = QAction(self)
         self.action_ml_monitor.triggered.connect(self._open_ml_monitor)
         self.tools_menu.addAction(self.action_ml_monitor)
@@ -1004,6 +1248,27 @@ class Terminal(QMainWindow):
         self.action_performance = QAction(self)
         self.action_performance.triggered.connect(self._open_performance)
         self.tools_menu.addAction(self.action_performance)
+        self.action_closed_journal = QAction("Closed Journal", self)
+        self.action_closed_journal.triggered.connect(self._open_closed_journal_window)
+        self.tools_menu.addAction(self.action_closed_journal)
+        self.action_trade_checklist = QAction("Trade Checklist", self)
+        self.action_trade_checklist.triggered.connect(self._open_trade_checklist_window)
+        self.tools_menu.addAction(self.action_trade_checklist)
+        self.action_journal_review = QAction("Journal Review", self)
+        self.action_journal_review.triggered.connect(self._open_trade_journal_review_window)
+        self.tools_menu.addAction(self.action_journal_review)
+        self.action_system_health = QAction("System Health", self)
+        self.action_system_health.triggered.connect(self._open_system_health_window)
+        self.tools_menu.addAction(self.action_system_health)
+        self.action_quant_pm = QAction("Quant PM", self)
+        self.action_quant_pm.triggered.connect(self._open_quant_pm_window)
+        self.tools_menu.addAction(self.action_quant_pm)
+        self.action_ml_research = QAction("ML Research Lab", self)
+        self.action_ml_research.triggered.connect(self._open_ml_research_window)
+        self.tools_menu.addAction(self.action_ml_research)
+        self.action_position_analysis = QAction("Position Analysis", self)
+        self.action_position_analysis.triggered.connect(self._open_position_analysis_window)
+        self.tools_menu.addAction(self.action_position_analysis)
 
         self.help_menu = menu_bar.addMenu("")
         self.action_documentation = QAction(self)
@@ -1013,6 +1278,9 @@ class Terminal(QMainWindow):
         self.action_api_docs.triggered.connect(self._open_api_docs)
         self.help_menu.addAction(self.action_api_docs)
         self.help_menu.addSeparator()
+        self.action_license = QAction("License", self)
+        self.action_license.triggered.connect(self._open_license_manager)
+        self.help_menu.addAction(self.action_license)
         self.action_about = QAction(self)
         self.action_about.triggered.connect(self._show_about)
         self.help_menu.addAction(self.action_about)
@@ -1060,6 +1328,7 @@ class Terminal(QMainWindow):
             self.action_manual_trade.setText(self._tr("terminal.action.manual_trade"))
             self.action_close_all.setText(self._tr("terminal.action.close_all"))
             self.action_cancel_orders.setText(self._tr("terminal.action.cancel_all"))
+            self.action_kill_switch.setText("Emergency Kill Switch")
             self.action_run_backtest.setText(self._tr("terminal.action.run_backtest"))
             self.action_optimize_strategy.setText(self._tr("terminal.action.optimize"))
             self.action_new_chart.setText(self._tr("terminal.action.new_chart"))
@@ -1077,9 +1346,19 @@ class Terminal(QMainWindow):
             self.action_reload_balance.setText(self._tr("terminal.action.reload_balance"))
             self.action_app_settings.setText(self._tr("terminal.action.app_settings"))
             self.action_portfolio_view.setText(self._tr("terminal.action.portfolio"))
+            self.action_market_chat.setText("Sopotek Pilot")
+            self.action_recommendations.setText("Recommendations")
             self.action_ml_monitor.setText(self._tr("terminal.action.ml_monitor"))
             self.action_logs.setText(self._tr("terminal.action.logs"))
             self.action_performance.setText(self._tr("terminal.action.performance"))
+            self.action_closed_journal.setText("Closed Journal")
+            self.action_trade_checklist.setText("Trade Checklist")
+            self.action_journal_review.setText("Journal Review")
+            self.action_system_health.setText("System Health")
+            self.action_quant_pm.setText("Quant PM")
+            self.action_ml_research.setText("ML Research Lab")
+            self.action_position_analysis.setText("Position Analysis")
+            self.action_license.setText("License")
             self.action_documentation.setText(self._tr("terminal.action.documentation"))
             self.action_api_docs.setText(self._tr("terminal.action.api_reference"))
             self.action_about.setText(self._tr("terminal.action.about"))
@@ -1099,6 +1378,12 @@ class Terminal(QMainWindow):
         if getattr(self, "system_status_button", None) is not None:
             self.system_status_button.setText("Status")
             self.system_status_button.setToolTip("Show or hide the System Status panel")
+        if getattr(self, "kill_switch_button", None) is not None:
+            self._update_kill_switch_button()
+        if getattr(self, "session_mode_badge", None) is not None:
+            self._update_session_badge()
+        if getattr(self, "license_badge", None) is not None:
+            self._update_license_badge()
         if getattr(self, "trading_activity_label", None) is not None:
             self.trading_activity_label.setToolTip("Shows whether AI trading is currently active")
 
@@ -1210,6 +1495,36 @@ class Terminal(QMainWindow):
         self.screenshot_button.clicked.connect(self.take_screen_shot)
         utility_layout.addWidget(self.screenshot_button)
 
+        self.session_mode_badge = QLabel("PAPER")
+        self.session_mode_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        utility_layout.addWidget(self.session_mode_badge)
+
+        self.license_badge = QLabel("TRIAL")
+        self.license_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        utility_layout.addWidget(self.license_badge)
+
+        self.live_trading_bar_frame = QFrame()
+        self.live_trading_bar_frame.setMinimumWidth(180)
+        live_bar_layout = QVBoxLayout(self.live_trading_bar_frame)
+        live_bar_layout.setContentsMargins(10, 6, 10, 6)
+        live_bar_layout.setSpacing(4)
+        self.live_trading_bar_label = QLabel("LIVE MODE")
+        self.live_trading_bar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        live_bar_layout.addWidget(self.live_trading_bar_label)
+        self.live_trading_bar = QProgressBar()
+        self.live_trading_bar.setFixedWidth(160)
+        self.live_trading_bar.setFixedHeight(12)
+        self.live_trading_bar.setRange(0, 0)
+        self.live_trading_bar.setTextVisible(False)
+        live_bar_layout.addWidget(self.live_trading_bar, alignment=Qt.AlignmentFlag.AlignCenter)
+        utility_layout.addWidget(self.live_trading_bar_frame)
+
+        self.kill_switch_button = QPushButton("Kill Switch")
+        self.kill_switch_button.setStyleSheet(self._danger_button_style())
+        self.kill_switch_button.setMinimumWidth(108)
+        self.kill_switch_button.clicked.connect(self._toggle_emergency_stop)
+        utility_layout.addWidget(self.kill_switch_button)
+
         self.trading_activity_label = QLabel("AI Idle")
         self.trading_activity_label.setMinimumWidth(74)
         self.trading_activity_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1259,6 +1574,7 @@ class Terminal(QMainWindow):
         actions_layout.addWidget(self.autotrade_scope_picker)
 
         self.auto_button = QPushButton()
+        self.auto_button.setCheckable(True)
         self.auto_button.clicked.connect(self._toggle_autotrading)
         actions_layout.addWidget(self.auto_button)
 
@@ -1267,6 +1583,9 @@ class Terminal(QMainWindow):
         self._set_active_timeframe_button(self.current_timeframe)
         self._apply_autotrade_scope(self.autotrade_scope_value)
         self._update_autotrade_button()
+        self._update_session_badge()
+        self._update_live_trading_bar()
+        self._update_kill_switch_button()
         return
 
         toolbar = QToolBar("Main Toolbar")
@@ -1367,6 +1686,63 @@ class Terminal(QMainWindow):
             if hasattr(self, "system_console"):
                 self.system_console.log("AI auto trading disabled.", "INFO")
 
+    def _stop_autotrading_for_emergency(self):
+        self.autotrading_enabled = False
+        self._update_autotrade_button()
+        self.autotrade_toggle.emit(False)
+        trading_system = getattr(self.controller, "trading_system", None)
+        if trading_system is not None:
+            trading_system.running = False
+
+    def _toggle_emergency_stop(self):
+        if bool(getattr(self.controller, "is_emergency_stop_active", lambda: False)()):
+            self.controller.clear_emergency_stop()
+            self._update_kill_switch_button()
+            self._refresh_terminal()
+            self.system_console.log("Emergency lock cleared. New orders may be submitted again.", "WARN")
+            self._show_async_message(
+                "Trading Resumed",
+                "Emergency lock cleared. Auto trading remains OFF until you enable it again.",
+                QMessageBox.Icon.Information,
+            )
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Emergency Kill Switch",
+            (
+                "Activate the emergency kill switch?\n\n"
+                "This will stop auto trading, cancel open orders, close tracked positions, "
+                "and block new entries until you resume manually."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        asyncio.get_event_loop().create_task(self._activate_emergency_stop_async())
+
+    async def _activate_emergency_stop_async(self):
+        self.controller.activate_emergency_stop("Emergency kill switch engaged by operator")
+        self._update_kill_switch_button()
+        self._refresh_terminal()
+        self._stop_autotrading_for_emergency()
+        self.system_console.log("Emergency kill switch engaged. Canceling open orders and closing tracked positions.", "WARN")
+        try:
+            await self._cancel_all_orders_async(show_dialog=False)
+        except Exception:
+            pass
+        try:
+            await self._close_all_positions_async(show_dialog=False)
+        except Exception:
+            pass
+        self._refresh_terminal()
+        self._show_async_message(
+            "Emergency Kill Switch",
+            "Emergency lock is active. Auto trading is OFF and new orders are blocked until you press Resume.",
+            QMessageBox.Icon.Warning,
+        )
+
     # ==========================================================
     # CHARTS
     # ==========================================================
@@ -1379,7 +1755,7 @@ class Terminal(QMainWindow):
             candle_up_color=self.candle_up_color,
             candle_down_color=self.candle_down_color,
         )
-        chart.set_bid_ask_lines_visible(self.show_bid_ask_lines)
+        self._configure_chart_widget(chart)
 
         row = self._find_market_watch_row(symbol)
         if row is None:
@@ -1633,7 +2009,7 @@ class Terminal(QMainWindow):
             candle_up_color=self.candle_up_color,
             candle_down_color=self.candle_down_color,
         )
-        chart.set_bid_ask_lines_visible(self.show_bid_ask_lines)
+        self._configure_chart_widget(chart)
         window = self._show_chart_page_in_window(
             chart,
             f"{target_symbol} ({target_timeframe})",
@@ -1677,6 +2053,131 @@ class Terminal(QMainWindow):
         )
         if ok and symbol:
             self._open_symbol_chart(symbol.upper(), self.current_timeframe)
+
+    def _configure_chart_widget(self, chart):
+        if not isinstance(chart, ChartWidget):
+            return chart
+        chart.set_bid_ask_lines_visible(self.show_bid_ask_lines)
+        if not bool(getattr(chart, "_sopotek_trade_signal_hooks_installed", False)):
+            chart.sigTradeLevelRequested.connect(self._handle_chart_trade_level_request)
+            chart.sigTradeLevelChanged.connect(self._handle_chart_trade_level_changed)
+            chart.sigTradeContextAction.connect(self._handle_chart_trade_context_action)
+            chart._sopotek_trade_signal_hooks_installed = True
+        return chart
+
+    def _handle_chart_trade_level_request(self, payload):
+        if not isinstance(payload, dict):
+            return
+        price = self._safe_float(payload.get("price"))
+        if price is None or price <= 0:
+            return
+        symbol = str(payload.get("symbol") or self._current_chart_symbol() or getattr(self, "symbol", "")).strip()
+        if not symbol:
+            return
+        self._open_manual_trade(
+            {
+                "symbol": symbol,
+                "order_type": "limit",
+                "price": price,
+                "source": "chart_double_click",
+                "timeframe": payload.get("timeframe"),
+            }
+        )
+
+    def _handle_chart_trade_level_changed(self, payload):
+        if not isinstance(payload, dict):
+            return
+        window = self.detached_tool_windows.get("manual_trade_ticket")
+        if not self._is_qt_object_alive(window):
+            return
+        symbol_picker = getattr(window, "_manual_trade_symbol_picker", None)
+        current_symbol = str(symbol_picker.currentText() or "").strip() if symbol_picker is not None else ""
+        if str(payload.get("symbol") or "").strip() != current_symbol:
+            return
+
+        level = str(payload.get("level") or "").strip().lower()
+        price = self._safe_float(payload.get("price"))
+        if price is None or price <= 0:
+            return
+
+        if level == "entry":
+            self._set_manual_trade_order_type(window, "limit")
+            self._set_manual_trade_text_field(window, "_manual_trade_price_input", price)
+        elif level == "stop_loss":
+            self._set_manual_trade_text_field(window, "_manual_trade_stop_loss_input", price)
+        elif level == "take_profit":
+            self._set_manual_trade_text_field(window, "_manual_trade_take_profit_input", price)
+
+    def _handle_chart_trade_context_action(self, payload):
+        if not isinstance(payload, dict):
+            return
+        action = str(payload.get("action") or "").strip().lower()
+        symbol = str(payload.get("symbol") or self._current_chart_symbol() or "").strip()
+        price = self._safe_float(payload.get("price"))
+        if action == "clear_levels":
+            self._clear_trade_overlays(symbol=symbol)
+            window = self.detached_tool_windows.get("manual_trade_ticket")
+            if self._is_qt_object_alive(window):
+                ticket_symbol = str(getattr(getattr(window, "_manual_trade_symbol_picker", None), "currentText", lambda: "")()).strip()
+                if ticket_symbol == symbol:
+                    self._set_manual_trade_text_field(window, "_manual_trade_price_input", None)
+                    self._set_manual_trade_text_field(window, "_manual_trade_stop_loss_input", None)
+                    self._set_manual_trade_text_field(window, "_manual_trade_take_profit_input", None)
+            return
+        if price is None or price <= 0 or not symbol:
+            return
+
+        if action == "buy_limit":
+            self._open_manual_trade(
+                {
+                    "symbol": symbol,
+                    "side": "buy",
+                    "order_type": "limit",
+                    "price": price,
+                    "source": "chart_context_menu",
+                    "timeframe": payload.get("timeframe"),
+                }
+            )
+            return
+        if action == "sell_limit":
+            self._open_manual_trade(
+                {
+                    "symbol": symbol,
+                    "side": "sell",
+                    "order_type": "limit",
+                    "price": price,
+                    "source": "chart_context_menu",
+                    "timeframe": payload.get("timeframe"),
+                }
+            )
+            return
+
+        window = self.detached_tool_windows.get("manual_trade_ticket")
+        if not self._is_qt_object_alive(window):
+            self._open_manual_trade(
+                {
+                    "symbol": symbol,
+                    "order_type": "limit",
+                    "price": price if action == "set_entry" else None,
+                    "stop_loss": price if action == "set_stop_loss" else None,
+                    "take_profit": price if action == "set_take_profit" else None,
+                    "source": "chart_context_menu",
+                    "timeframe": payload.get("timeframe"),
+                }
+            )
+            return
+
+        symbol_picker = getattr(window, "_manual_trade_symbol_picker", None)
+        if symbol_picker is not None:
+            symbol_picker.setCurrentText(symbol)
+        if action == "set_entry":
+            self._set_manual_trade_order_type(window, "limit")
+            self._set_manual_trade_text_field(window, "_manual_trade_price_input", price)
+        elif action == "set_stop_loss":
+            self._set_manual_trade_text_field(window, "_manual_trade_stop_loss_input", price)
+        elif action == "set_take_profit":
+            self._set_manual_trade_text_field(window, "_manual_trade_take_profit_input", price)
+        self._refresh_manual_trade_ticket(window)
 
     def _find_chart_tab(self, symbol, timeframe):
         if not self._chart_tabs_ready():
@@ -1770,6 +2271,8 @@ class Terminal(QMainWindow):
                 chart.update_candles(df)
 
         self.heartbeat.setStyleSheet("color: green;")
+        if getattr(self.controller, "news_draw_on_chart", False) and hasattr(self.controller, "request_news"):
+            asyncio.get_event_loop().create_task(self.controller.request_news(symbol))
 
     def _update_equity(self, equity):
         if getattr(self, "equity_summary_label", None) is not None:
@@ -1828,6 +2331,11 @@ class Terminal(QMainWindow):
             entry = raw.get("entry_price", raw.get("avg_entry_price", raw.get("price", raw.get("avg_price", 0))))
             mark = raw.get("mark_price", raw.get("market_price"))
             pnl = raw.get("pnl", raw.get("unrealized_pnl", raw.get("unrealized_pl", raw.get("pl"))))
+            realized_pnl = raw.get("realized_pnl", raw.get("realized_pl"))
+            financing = raw.get("financing")
+            margin_used = raw.get("margin_used", raw.get("marginUsed"))
+            resettable_pl = raw.get("resettable_pl", raw.get("resettablePL"))
+            units = raw.get("units")
         else:
             symbol = getattr(raw, "symbol", "")
             side = getattr(raw, "side", "")
@@ -1835,6 +2343,11 @@ class Terminal(QMainWindow):
             entry = getattr(raw, "entry_price", getattr(raw, "avg_entry_price", getattr(raw, "avg_price", getattr(raw, "price", 0))))
             mark = getattr(raw, "mark_price", getattr(raw, "market_price", None))
             pnl = getattr(raw, "pnl", getattr(raw, "unrealized_pnl", getattr(raw, "unrealized_pl", None)))
+            realized_pnl = getattr(raw, "realized_pnl", getattr(raw, "realized_pl", None))
+            financing = getattr(raw, "financing", None)
+            margin_used = getattr(raw, "margin_used", getattr(raw, "marginUsed", None))
+            resettable_pl = getattr(raw, "resettable_pl", getattr(raw, "resettablePL", None))
+            units = getattr(raw, "units", None)
 
         try:
             amount = float(amount or 0)
@@ -1852,6 +2365,26 @@ class Terminal(QMainWindow):
             pnl = float(pnl) if pnl not in (None, "") else None
         except Exception:
             pnl = None
+        try:
+            realized_pnl = float(realized_pnl) if realized_pnl not in (None, "") else None
+        except Exception:
+            realized_pnl = None
+        try:
+            financing = float(financing) if financing not in (None, "") else None
+        except Exception:
+            financing = None
+        try:
+            margin_used = float(margin_used) if margin_used not in (None, "") else None
+        except Exception:
+            margin_used = None
+        try:
+            resettable_pl = float(resettable_pl) if resettable_pl not in (None, "") else None
+        except Exception:
+            resettable_pl = None
+        try:
+            units = float(units) if units not in (None, "") else None
+        except Exception:
+            units = None
 
         normalized_symbol = str(symbol or "")
         if not normalized_symbol:
@@ -1874,10 +2407,15 @@ class Terminal(QMainWindow):
             "symbol": normalized_symbol,
             "side": normalized_side,
             "amount": abs_amount,
+            "units": float(units if units is not None else (abs_amount if normalized_side != "short" else -abs_amount)),
             "entry_price": entry,
             "mark_price": float(mark or 0),
             "value": value,
             "pnl": float(pnl or 0),
+            "realized_pnl": float(realized_pnl or 0),
+            "financing": float(financing or 0),
+            "margin_used": float(margin_used or 0),
+            "resettable_pl": float(resettable_pl or 0),
         }
 
     def _portfolio_positions_snapshot(self):
@@ -2052,6 +2590,7 @@ class Terminal(QMainWindow):
 
         self._latest_positions_snapshot = positions or []
         self._populate_positions_table(self._latest_positions_snapshot)
+        self._refresh_position_analysis_window()
 
     def _schedule_positions_refresh(self):
         task = getattr(self, "_positions_refresh_task", None)
@@ -2063,6 +2602,809 @@ class Terminal(QMainWindow):
         except Exception as exc:
             self.logger.debug("Unable to schedule positions refresh: %s", exc)
 
+    def _resolve_position_analysis_metric(self, account, balances, *keys):
+        candidates = []
+        for key in keys:
+            if key is None:
+                continue
+            key_text = str(key)
+            variants = {
+                key_text,
+                key_text.lower(),
+                key_text.upper(),
+                key_text.replace("_", ""),
+                key_text.replace("_", "").lower(),
+                key_text.replace("_", "").upper(),
+            }
+            variants.update(
+                {
+                    key_text.replace("_", " "),
+                    key_text.replace("_", "-"),
+                    key_text.replace("_", " ").title(),
+                    "".join(part.capitalize() for part in key_text.split("_")),
+                }
+            )
+            for variant in variants:
+                if variant not in candidates:
+                    candidates.append(variant)
+
+        for source in (account, balances):
+            if not isinstance(source, dict):
+                continue
+            for candidate in candidates:
+                if candidate in source:
+                    numeric = self._safe_float(source.get(candidate))
+                    if numeric is not None:
+                        return numeric
+        return None
+
+    def _position_analysis_has_key(self, account, balances, *keys):
+        candidates = []
+        for key in keys:
+            if key is None:
+                continue
+            key_text = str(key)
+            variants = {
+                key_text,
+                key_text.lower(),
+                key_text.upper(),
+                key_text.replace("_", ""),
+                key_text.replace("_", "").lower(),
+                key_text.replace("_", "").upper(),
+                key_text.replace("_", " "),
+                key_text.replace("_", "-"),
+                "".join(part.capitalize() for part in key_text.split("_")),
+            }
+            for variant in variants:
+                if variant not in candidates:
+                    candidates.append(variant)
+
+        for source in (account, balances):
+            if not isinstance(source, dict):
+                continue
+            for candidate in candidates:
+                if candidate in source:
+                    return True
+        return False
+
+    def _position_analysis_metric_labels(self, payload):
+        account = dict(payload.get("account") or {})
+        balances = dict(payload.get("balances") or {})
+
+        equity_label = "Equity"
+        if self._position_analysis_has_key(account, balances, "nav"):
+            equity_label = "NAV"
+        elif self._position_analysis_has_key(account, balances, "net_liquidation"):
+            equity_label = "Net Liquidation"
+        elif self._position_analysis_has_key(account, balances, "account_value", "total_account_value"):
+            equity_label = "Account Value"
+
+        balance_label = "Balance"
+        if self._position_analysis_has_key(account, balances, "cash", "cash_balance"):
+            balance_label = "Cash"
+
+        available_label = "Available Margin"
+        if self._position_analysis_has_key(account, balances, "buying_power", "buyingPower"):
+            available_label = "Buying Power"
+        elif self._position_analysis_has_key(account, balances, "free"):
+            available_label = "Free Balance"
+
+        used_label = "Margin Used"
+        if self._position_analysis_has_key(account, balances, "used") and not self._position_analysis_has_key(account, balances, "margin_used", "marginUsed"):
+            used_label = "Used Balance"
+
+        ratio_label = "Margin Ratio"
+        if self._position_analysis_has_key(account, balances, "margin_closeout_percent", "marginCloseoutPercent"):
+            ratio_label = "Margin Closeout %"
+
+        return {
+            "equity": equity_label,
+            "balance": balance_label,
+            "available": available_label,
+            "used": used_label,
+            "ratio": ratio_label,
+        }
+
+    def _position_analysis_window_payload(self):
+        broker = getattr(self.controller, "broker", None)
+        exchange = str(getattr(broker, "exchange_name", "") or "").lower()
+        balances = dict(getattr(self.controller, "balances", {}) or {})
+        account = dict((balances or {}).get("raw", {}) or {})
+        positions = [self._normalize_position_entry(item) for item in (getattr(self, "_latest_positions_snapshot", []) or [])]
+        positions = [item for item in positions if item is not None]
+        payload = {
+            "available": broker is not None,
+            "exchange": exchange or "-",
+            "account": account,
+            "balances": balances,
+            "positions": positions,
+        }
+
+        nav = self._resolve_position_analysis_metric(account, balances, "nav", "equity", "net_liquidation", "account_value", "total_account_value")
+        balance = self._resolve_position_analysis_metric(account, balances, "balance", "cash", "cash_balance")
+        margin_used = self._resolve_position_analysis_metric(account, balances, "margin_used", "used_margin", "used")
+        margin_available = self._resolve_position_analysis_metric(account, balances, "margin_available", "free_margin", "free")
+        unrealized = self._resolve_position_analysis_metric(account, balances, "unrealized_pl", "unrealized_pnl", "upl", "pl_unrealized")
+        realized = self._resolve_position_analysis_metric(account, balances, "realized_pl", "realized_pnl", "pl")
+        position_value = self._resolve_position_analysis_metric(account, balances, "position_value", "positions_value", "exposure", "gross_exposure")
+        margin_closeout = self._resolve_position_analysis_metric(account, balances, "margin_closeout_percent", "margin_ratio")
+
+        if nav is None:
+            nav = balance
+        if balance is None:
+            balance = nav
+        if unrealized is None:
+            unrealized = sum(float(item.get("pnl", 0.0) or 0.0) for item in positions)
+        if realized is None:
+            realized = sum(float(item.get("realized_pnl", 0.0) or 0.0) for item in positions)
+        if position_value is None:
+            position_value = sum(float(item.get("value", 0.0) or 0.0) for item in positions)
+        if margin_used is None:
+            margin_used = sum(float(item.get("margin_used", 0.0) or 0.0) for item in positions)
+
+        payload["nav"] = nav
+        payload["balance"] = balance
+        payload["margin_used"] = margin_used
+        payload["margin_available"] = margin_available
+        payload["unrealized_pl"] = unrealized
+        payload["realized_pl"] = realized
+        payload["position_value"] = position_value
+        payload["margin_closeout_percent"] = margin_closeout
+        payload["labels"] = self._position_analysis_metric_labels(payload)
+        return payload
+
+    def _build_position_analysis_html(self, payload):
+        broker_name = html.escape(str(payload.get("exchange", "-") or "-").upper())
+        labels = dict(payload.get("labels") or {})
+        equity_label = html.escape(str(labels.get("equity") or "Equity"))
+        balance_label = html.escape(str(labels.get("balance") or "Balance"))
+        available_label = html.escape(str(labels.get("available") or "Available Margin"))
+        used_label = html.escape(str(labels.get("used") or "Margin Used"))
+        ratio_label = html.escape(str(labels.get("ratio") or "Margin Ratio"))
+        if not payload.get("available"):
+            return (
+                "<h3 style='margin-top:0;'>Position Analysis</h3>"
+                "<p>Connect a broker to see account metrics, open positions, exposure, and P/L analysis here.</p>"
+            )
+
+        positions = list(payload.get("positions", []) or [])
+        if not positions:
+            equity_text = self._format_currency(payload.get("nav"))
+            balance_text = self._format_currency(payload.get("balance"))
+            return (
+                "<h3 style='margin-top:0;'>Position Analysis</h3>"
+                f"<p>Broker <b>{broker_name}</b> is connected. No open positions were found.</p>"
+                f"<p>{equity_label}: <b>{equity_text}</b> | {balance_label}: <b>{balance_text}</b></p>"
+            )
+
+        total_unrealized = sum(float(item.get("pnl", 0.0) or 0.0) for item in positions)
+        total_realized = sum(float(item.get("realized_pnl", 0.0) or 0.0) for item in positions)
+        total_margin = sum(float(item.get("margin_used", 0.0) or 0.0) for item in positions)
+        long_count = sum(1 for item in positions if item.get("side") != "short")
+        short_count = len(positions) - long_count
+        biggest_winner = max(positions, key=lambda item: float(item.get("pnl", 0.0) or 0.0))
+        biggest_loser = min(positions, key=lambda item: float(item.get("pnl", 0.0) or 0.0))
+        concentrated = max(positions, key=lambda item: float(item.get("value", 0.0) or 0.0))
+        nav = float(payload.get("nav", 0.0) or 0.0)
+        margin_available = self._safe_float(payload.get("margin_available"))
+        margin_closeout = payload.get("margin_closeout_percent")
+
+        bullets = [
+            f"Broker <b>{broker_name}</b> {equity_label.lower()} is <b>{self._format_currency(nav)}</b> with {balance_label.lower()} <b>{self._format_currency(payload.get('balance'))}</b>.",
+            f"Open positions: <b>{len(positions)}</b> total, with <b>{long_count}</b> long and <b>{short_count}</b> short exposures.",
+            f"Combined unrealized P/L is <b>{self._format_currency(total_unrealized)}</b>; realized P/L contribution in open positions is <b>{self._format_currency(total_realized)}</b>.",
+            f"Aggregate position {used_label.lower()} is <b>{self._format_currency(total_margin)}</b>.",
+            f"Biggest winner: <b>{html.escape(biggest_winner.get('symbol', '-'))}</b> at <b>{self._format_currency(biggest_winner.get('pnl'))}</b>.",
+            f"Biggest loser: <b>{html.escape(biggest_loser.get('symbol', '-'))}</b> at <b>{self._format_currency(biggest_loser.get('pnl'))}</b>.",
+            f"Largest exposure by value is <b>{html.escape(concentrated.get('symbol', '-'))}</b> at <b>{self._format_currency(concentrated.get('value'))}</b>.",
+        ]
+        if margin_available is not None:
+            bullets.insert(1, f"{available_label} is <b>{self._format_currency(margin_available)}</b>.")
+        if margin_closeout is not None:
+            bullets.append(f"{ratio_label} is <b>{float(margin_closeout):.4f}</b>.")
+        else:
+            bullets.append("Broker did not expose a margin-ratio style metric in the current balance payload.")
+
+        return (
+            "<h3 style='margin-top:0;'>Position Analysis</h3>"
+            "<ul style='margin-top:6px;'>"
+            + "".join(f"<li>{item}</li>" for item in bullets)
+            + "</ul>"
+        )
+
+    def _refresh_position_analysis_window(self, window=None):
+        window = window or self.detached_tool_windows.get("position_analysis")
+        if not self._is_qt_object_alive(window):
+            return
+
+        summary = getattr(window, "_position_analysis_summary", None)
+        table = getattr(window, "_position_analysis_table", None)
+        details = getattr(window, "_position_analysis_details", None)
+        if summary is None or table is None or details is None:
+            return
+
+        payload = self._position_analysis_window_payload()
+        window._position_analysis_payload = payload
+
+        if not payload.get("available"):
+            summary.setText("Position analysis is available after a broker is connected.")
+            table.setRowCount(0)
+            details.setHtml(self._build_position_analysis_html(payload))
+            return
+
+        positions = list(payload.get("positions", []) or [])
+        exchange_label = str(payload.get("exchange") or "-").upper()
+        labels = dict(payload.get("labels") or {})
+        equity_label = str(labels.get("equity") or "Equity")
+        balance_label = str(labels.get("balance") or "Balance")
+        available_label = str(labels.get("available") or "Available Margin")
+        used_label = str(labels.get("used") or "Margin Used")
+        summary.setText(
+            f"Broker {exchange_label} | {equity_label} {self._format_currency(payload.get('nav'))} | {balance_label} {self._format_currency(payload.get('balance'))} | "
+            f"Unrealized P/L {self._format_currency(payload.get('unrealized_pl'))} | {used_label} {self._format_currency(payload.get('margin_used'))} | "
+            f"{available_label} {self._format_currency(payload.get('margin_available'))}"
+        )
+
+        columns = [
+            ("Symbol", "symbol"),
+            ("Side", "side"),
+            ("Units", "units"),
+            ("Amount", "amount"),
+            ("Entry", "entry_price"),
+            ("Mark", "mark_price"),
+            ("Value", "value"),
+            ("Unrealized P/L", "pnl"),
+            ("Realized P/L", "realized_pnl"),
+            ("Financing", "financing"),
+            ("Margin Used", "margin_used"),
+            ("Resettable P/L", "resettable_pl"),
+        ]
+        table.setRowCount(len(positions))
+        for row_index, position in enumerate(positions):
+            for col_index, (title, key) in enumerate(columns):
+                raw_value = position.get(key, "")
+                if isinstance(raw_value, float):
+                    if title in {"Symbol", "Side"}:
+                        text = str(raw_value)
+                    elif title in {"Units", "Amount"}:
+                        text = f"{raw_value:.6f}".rstrip("0").rstrip(".")
+                    elif title in {"Entry", "Mark"}:
+                        text = f"{raw_value:.6f}".rstrip("0").rstrip(".")
+                    else:
+                        text = f"{raw_value:.2f}"
+                else:
+                    text = str(raw_value).upper() if title == "Side" else str(raw_value)
+                item = QTableWidgetItem(text)
+                if title in {"Unrealized P/L", "Realized P/L"}:
+                    numeric = self._safe_float(raw_value, 0.0) or 0.0
+                    item.setForeground(QColor("#32d296" if numeric >= 0 else "#ef5350"))
+                table.setItem(row_index, col_index, item)
+
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+        details.setHtml(self._build_position_analysis_html(payload))
+
+    def _open_position_analysis_window(self):
+        window = self._get_or_create_tool_window(
+            "position_analysis",
+            "Position Analysis",
+            width=1200,
+            height=680,
+        )
+
+        if getattr(window, "_position_analysis_table", None) is None:
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+
+            summary = QLabel("Loading broker position analysis.")
+            summary.setWordWrap(True)
+            summary.setStyleSheet(
+                "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
+                "border-radius: 12px; padding: 12px; font-size: 13px; font-weight: 600;"
+            )
+            layout.addWidget(summary)
+
+            table = QTableWidget()
+            table.setColumnCount(12)
+            table.setHorizontalHeaderLabels(
+                ["Symbol", "Side", "Units", "Amount", "Entry", "Mark", "Value", "Unrealized P/L", "Realized P/L", "Financing", "Margin Used", "Resettable P/L"]
+            )
+            layout.addWidget(table)
+
+            details = QTextBrowser()
+            details.setStyleSheet(
+                "QTextBrowser { background-color: #0b1220; color: #e6edf7; border: 1px solid #20324d; "
+                "border-radius: 10px; padding: 12px; }"
+            )
+            layout.addWidget(details)
+
+            window.setCentralWidget(container)
+            window._position_analysis_summary = summary
+            window._position_analysis_table = table
+            window._position_analysis_details = details
+            window._position_analysis_payload = {}
+
+            sync_timer = QTimer(window)
+            sync_timer.timeout.connect(lambda: self._schedule_positions_refresh())
+            sync_timer.timeout.connect(lambda: self._refresh_position_analysis_window(window))
+            sync_timer.start(2500)
+            window._position_analysis_timer = sync_timer
+
+        self._schedule_positions_refresh()
+        self._refresh_position_analysis_window(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    # Backward-compatible aliases
+    def _oanda_position_window_payload(self):
+        return self._position_analysis_window_payload()
+
+    def _build_oanda_positions_analysis_html(self, payload):
+        return self._build_position_analysis_html(payload)
+
+    def _refresh_oanda_positions_window(self, window=None):
+        return self._refresh_position_analysis_window(window)
+
+    def _open_oanda_positions_window(self):
+        return self._open_position_analysis_window()
+
+    def _quant_pm_strategy_exposure_rows(self):
+        controller = self.controller
+        allocator = getattr(controller, "portfolio_allocator", None)
+        portfolio_manager = getattr(getattr(controller, "trading_system", None), "portfolio", None)
+        portfolio = getattr(portfolio_manager, "portfolio", None)
+        market_prices = getattr(portfolio_manager, "market_prices", {}) or {}
+        positions = getattr(portfolio, "positions", {}) or {}
+        symbol_map = dict(getattr(allocator, "_symbol_strategy_map", {}) or {})
+        current_strategy = str(getattr(controller, "strategy_name", "") or "Unassigned").strip() or "Unassigned"
+        rows = {}
+        total_exposure = 0.0
+
+        for symbol, position in positions.items():
+            quantity = self._safe_float(getattr(position, "quantity", 0.0), 0.0) or 0.0
+            if quantity == 0:
+                continue
+            symbol_text = str(symbol or "").upper().strip()
+            price = self._safe_float(market_prices.get(symbol_text), getattr(position, "avg_price", 0.0)) or 0.0
+            exposure = abs(quantity * price)
+            total_exposure += exposure
+            strategy_name = str(symbol_map.get(symbol_text) or current_strategy).strip() or "Unassigned"
+            bucket = rows.setdefault(
+                strategy_name,
+                {"strategy": strategy_name, "symbols": 0, "exposure": 0.0, "weight": 0.0},
+            )
+            bucket["symbols"] += 1
+            bucket["exposure"] += exposure
+
+        if total_exposure > 0:
+            for item in rows.values():
+                item["weight"] = item["exposure"] / total_exposure
+
+        ordered = sorted(
+            rows.values(),
+            key=lambda item: (
+                self._safe_float(item.get("exposure"), 0.0) or 0.0,
+                self._safe_float(item.get("weight"), 0.0) or 0.0,
+            ),
+            reverse=True,
+        )
+        return ordered, total_exposure
+
+    def _quant_pm_position_rows(self):
+        controller = self.controller
+        allocator = getattr(controller, "portfolio_allocator", None)
+        portfolio_manager = getattr(getattr(controller, "trading_system", None), "portfolio", None)
+        portfolio = getattr(portfolio_manager, "portfolio", None)
+        market_prices = getattr(portfolio_manager, "market_prices", {}) or {}
+        positions = getattr(portfolio, "positions", {}) or {}
+        symbol_map = dict(getattr(allocator, "_symbol_strategy_map", {}) or {})
+        current_strategy = str(getattr(controller, "strategy_name", "") or "Unassigned").strip() or "Unassigned"
+        rows = []
+
+        for symbol, position in positions.items():
+            quantity = self._safe_float(getattr(position, "quantity", 0.0), 0.0) or 0.0
+            if quantity == 0:
+                continue
+            symbol_text = str(symbol or "").upper().strip()
+            avg_price = self._safe_float(getattr(position, "avg_price", 0.0), 0.0) or 0.0
+            mark_price = self._safe_float(market_prices.get(symbol_text), avg_price) or avg_price
+            exposure = quantity * mark_price
+            rows.append(
+                {
+                    "symbol": symbol_text,
+                    "strategy": str(symbol_map.get(symbol_text) or current_strategy).strip() or "Unassigned",
+                    "quantity": quantity,
+                    "entry": avg_price,
+                    "mark": mark_price,
+                    "exposure": exposure,
+                    "abs_exposure": abs(exposure),
+                    "direction": "LONG" if quantity > 0 else "SHORT",
+                }
+            )
+
+        rows.sort(key=lambda item: item.get("abs_exposure", 0.0), reverse=True)
+        return rows
+
+    async def _quant_pm_correlation_rows(self, symbols, timeframe="1h", limit=160):
+        trading_system = getattr(self.controller, "trading_system", None)
+        data_hub = getattr(trading_system, "data_hub", None)
+        if data_hub is None:
+            return [], "Quant data hub is not active yet."
+
+        unique_symbols = []
+        for symbol in symbols:
+            normalized = str(symbol or "").upper().strip()
+            if normalized and normalized not in unique_symbols:
+                unique_symbols.append(normalized)
+        unique_symbols = unique_symbols[:6]
+        if len(unique_symbols) < 2:
+            return [], "At least two active symbols with market data are needed for correlation analysis."
+
+        series_map = {}
+        for symbol in unique_symbols:
+            try:
+                dataset = await data_hub.get_symbol_dataset(symbol=symbol, timeframe=timeframe, limit=limit, prefer_live=False)
+            except Exception as exc:
+                self.logger.debug("Quant PM dataset load failed for %s: %s", symbol, exc)
+                continue
+            frame = getattr(dataset, "frame", None)
+            if frame is None or frame.empty or "close" not in frame.columns:
+                continue
+            closes = pd.to_numeric(frame["close"], errors="coerce").dropna()
+            returns = closes.pct_change().dropna()
+            if len(returns) < 8:
+                continue
+            series_map[symbol] = returns.reset_index(drop=True)
+
+        ordered_symbols = [symbol for symbol in unique_symbols if symbol in series_map]
+        if len(ordered_symbols) < 2:
+            return [], "Not enough historical data is available yet for a stable correlation matrix."
+
+        matrix = []
+        for left in ordered_symbols:
+            row = {"symbol": left}
+            left_series = series_map[left]
+            for right in ordered_symbols:
+                aligned = pd.concat([left_series, series_map[right]], axis=1).dropna()
+                if len(aligned) < 6:
+                    corr = 0.0
+                else:
+                    corr = aligned.iloc[:, 0].corr(aligned.iloc[:, 1])
+                    if pd.isna(corr):
+                        corr = 0.0
+                row[right] = float(corr)
+            matrix.append(row)
+
+        return matrix, ""
+
+    async def _quant_pm_payload(self):
+        controller = self.controller
+        trading_system = getattr(controller, "trading_system", None)
+        allocator = getattr(controller, "portfolio_allocator", None)
+        risk_engine = getattr(controller, "institutional_risk_engine", None)
+        behavior_guard = getattr(controller, "behavior_guard", None)
+        available = trading_system is not None and allocator is not None and risk_engine is not None
+
+        strategy_rows, strategy_total_exposure = self._quant_pm_strategy_exposure_rows()
+        position_rows = self._quant_pm_position_rows()
+        live_mode = bool(getattr(controller, "is_live_mode", lambda: False)())
+        account_label = str(getattr(controller, "current_account_label", lambda: "Not set")() or "").strip()
+        if not account_label or account_label.lower() == "not set":
+            account_label = "Profile unavailable"
+
+        equity = None
+        equity_source = "unavailable"
+        extract_equity = getattr(controller, "_extract_balance_equity_value", None)
+        if callable(extract_equity):
+            try:
+                equity = self._safe_float(extract_equity(getattr(controller, "balances", {}) or {}))
+            except Exception:
+                equity = None
+            if equity is not None:
+                equity_source = "broker"
+
+        portfolio_manager = getattr(trading_system, "portfolio", None) if trading_system is not None else None
+        if equity is None and portfolio_manager is not None and not live_mode:
+            try:
+                equity = self._safe_float(portfolio_manager.equity())
+            except Exception:
+                equity = None
+            if equity is not None:
+                equity_source = "portfolio"
+        if equity is None and not live_mode:
+            equity = self._safe_float(getattr(controller, "initial_capital", None))
+            if equity is not None:
+                equity_source = "initial_capital"
+
+        allocation_snapshot = dict(getattr(controller, "quant_allocation_snapshot", {}) or {})
+        risk_snapshot = dict(getattr(controller, "quant_risk_snapshot", {}) or {})
+        allocator_status = allocator.status_snapshot() if allocator is not None else {}
+        institutional_status = risk_engine.status_snapshot() if risk_engine is not None else {}
+        behavior_status = behavior_guard.status_snapshot() if behavior_guard is not None else {}
+        health_report = []
+        health_report_getter = getattr(controller, "get_health_check_report", None)
+        if callable(health_report_getter):
+            try:
+                health_report = list(health_report_getter() or [])
+            except Exception:
+                health_report = []
+        health_attention = []
+        for item in health_report:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "").strip().lower()
+            if status not in {"fail", "warn"}:
+                continue
+            name = str(item.get("name") or "Check").strip() or "Check"
+            detail = str(item.get("detail") or "").strip()
+            health_attention.append(f"{name}: {detail}" if detail else name)
+
+        active_symbols = [row.get("symbol") for row in position_rows[:6]]
+        if len(active_symbols) < 2:
+            active_symbols.extend(list(getattr(controller, "symbols", []) or [])[: max(0, 6 - len(active_symbols))])
+        correlation_rows, correlation_note = await self._quant_pm_correlation_rows(
+            active_symbols,
+            timeframe=str(getattr(controller, "time_frame", "1h") or "1h"),
+            limit=160,
+        )
+
+        return {
+            "available": available,
+            "exchange": self._active_exchange_name() or "-",
+            "account": account_label,
+            "mode": "LIVE" if live_mode else "PAPER",
+            "health": getattr(controller, "get_health_check_summary", lambda: "Not run")(),
+            "equity": equity,
+            "equity_source": equity_source,
+            "health_attention": health_attention,
+            "strategy_rows": strategy_rows,
+            "strategy_total_exposure": strategy_total_exposure,
+            "position_rows": position_rows,
+            "allocation_snapshot": allocation_snapshot,
+            "allocator_status": allocator_status,
+            "risk_snapshot": risk_snapshot,
+            "institutional_status": institutional_status,
+            "behavior_status": behavior_status,
+            "correlation_rows": correlation_rows,
+            "correlation_note": correlation_note,
+        }
+
+    def _build_quant_pm_html(self, payload):
+        if not payload.get("available"):
+            return (
+                "<h3 style='margin-top:0;'>Quant PM</h3>"
+                "<p>Start the trading system to view allocator budgets, institutional risk, exposure, and correlation analysis.</p>"
+            )
+
+        allocation = dict(payload.get("allocation_snapshot") or {})
+        risk = dict(payload.get("risk_snapshot") or {})
+        behavior = dict(payload.get("behavior_status") or {})
+        top_strategy = next(iter(payload.get("strategy_rows") or []), None)
+        correlation_note = str(payload.get("correlation_note") or "").strip()
+        health_attention = [str(item).strip() for item in (payload.get("health_attention") or []) if str(item).strip()]
+        equity_source = str(payload.get("equity_source") or "unavailable").strip().lower()
+        equity_text = f"Equity snapshot is <b>{html.escape(self._format_currency(payload.get('equity')))}</b>"
+        if equity_source == "broker":
+            equity_text = f"Live broker equity snapshot is <b>{html.escape(self._format_currency(payload.get('equity')))}</b>"
+        elif equity_source == "unavailable" and str(payload.get("mode") or "").upper() == "LIVE":
+            equity_text = "Live broker equity snapshot is <b>unavailable</b>"
+        bullets = [
+            f"Mode <b>{html.escape(str(payload.get('mode') or '-'))}</b> on broker <b>{html.escape(str(payload.get('exchange') or '-').upper())}</b> for account <b>{html.escape(str(payload.get('account') or '-'))}</b>.",
+            f"{equity_text} with health check <b>{html.escape(str(payload.get('health') or 'Not run'))}</b>.",
+            f"Allocator model is <b>{html.escape(str((payload.get('allocator_status') or {}).get('allocation_model') or '-'))}</b>; latest target weight is <b>{html.escape(self._format_percent_text(allocation.get('target_weight')))}</b> for strategy <b>{html.escape(str(allocation.get('strategy_name') or '-'))}</b>.",
+            f"Institutional risk headline: <b>{html.escape(str(risk.get('reason') or 'No recent risk decision'))}</b>.",
+            f"Behavior guard state is <b>{html.escape(str(behavior.get('state') or 'UNKNOWN'))}</b> with summary <b>{html.escape(str(behavior.get('summary') or '-'))}</b>.",
+        ]
+        if health_attention:
+            bullets.append(f"Health attention: <b>{html.escape(' | '.join(health_attention[:3]))}</b>.")
+        if top_strategy is not None:
+            bullets.append(
+                f"Top deployed strategy is <b>{html.escape(str(top_strategy.get('strategy') or '-'))}</b> at <b>{html.escape(self._format_currency(top_strategy.get('exposure')))}</b> exposure."
+            )
+        if correlation_note:
+            bullets.append(html.escape(correlation_note))
+
+        return "<h3 style='margin-top:0;'>Quant PM</h3><ul>" + "".join(f"<li>{item}</li>" for item in bullets) + "</ul>"
+
+    def _populate_quant_pm_strategy_table(self, table, rows):
+        if table is None or not self._is_qt_object_alive(table):
+            return
+        rows = list(rows or [])
+        table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            values = [
+                row.get("strategy", ""),
+                str(int(row.get("symbols", 0) or 0)),
+                self._format_currency(row.get("exposure")),
+                self._format_percent_text(row.get("weight")),
+            ]
+            for col_index, value in enumerate(values):
+                table.setItem(row_index, col_index, QTableWidgetItem(str(value)))
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+
+    def _populate_quant_pm_position_table(self, table, rows, equity):
+        if table is None or not self._is_qt_object_alive(table):
+            return
+        rows = list(rows or [])
+        table.setRowCount(len(rows))
+        equity_value = self._safe_float(equity, 0.0) or 0.0
+        for row_index, row in enumerate(rows):
+            exposure = self._safe_float(row.get("exposure"), 0.0) or 0.0
+            exposure_pct = (abs(exposure) / equity_value) if equity_value > 0 else None
+            values = [
+                row.get("symbol", ""),
+                row.get("strategy", ""),
+                row.get("direction", ""),
+                f"{self._safe_float(row.get('quantity'), 0.0) or 0.0:.6f}".rstrip("0").rstrip("."),
+                f"{self._safe_float(row.get('entry'), 0.0) or 0.0:.6f}".rstrip("0").rstrip("."),
+                f"{self._safe_float(row.get('mark'), 0.0) or 0.0:.6f}".rstrip("0").rstrip("."),
+                self._format_currency(exposure),
+                self._format_percent_text(exposure_pct),
+            ]
+            for col_index, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if col_index == 6:
+                    item.setForeground(QColor("#32d296" if exposure >= 0 else "#ef5350"))
+                table.setItem(row_index, col_index, item)
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+
+    def _populate_quant_pm_correlation_table(self, table, rows):
+        if table is None or not self._is_qt_object_alive(table):
+            return
+        rows = list(rows or [])
+        if not rows:
+            table.clear()
+            table.setRowCount(0)
+            table.setColumnCount(0)
+            return
+
+        symbols = [str(item.get("symbol") or "").upper().strip() for item in rows]
+        table.clear()
+        table.setColumnCount(len(symbols))
+        table.setRowCount(len(symbols))
+        table.setHorizontalHeaderLabels(symbols)
+        table.setVerticalHeaderLabels(symbols)
+        for row_index, row in enumerate(rows):
+            for col_index, symbol in enumerate(symbols):
+                corr = self._safe_float(row.get(symbol), 0.0) or 0.0
+                item = QTableWidgetItem(f"{corr:.2f}")
+                intensity = min(255, int(abs(corr) * 160) + 40)
+                if corr >= 0:
+                    item.setBackground(QColor(40, 70, 40 + intensity // 3, min(220, intensity)))
+                    item.setForeground(QColor("#d7ffe9"))
+                else:
+                    item.setBackground(QColor(80 + intensity // 3, 35, 35, min(220, intensity)))
+                    item.setForeground(QColor("#ffe4e8"))
+                table.setItem(row_index, col_index, item)
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+
+    def _schedule_quant_pm_refresh(self, window):
+        if window is None or not self._is_qt_object_alive(window):
+            return
+        task = getattr(window, "_quant_pm_refresh_task", None)
+        if task is not None and not task.done():
+            return
+        try:
+            window._quant_pm_refresh_task = asyncio.get_event_loop().create_task(
+                self._refresh_quant_pm_async(window)
+            )
+        except Exception as exc:
+            self.logger.debug("Unable to schedule Quant PM refresh: %s", exc)
+
+    async def _refresh_quant_pm_async(self, window):
+        if window is None or not self._is_qt_object_alive(window):
+            return
+
+        summary = getattr(window, "_quant_pm_summary", None)
+        strategy_table = getattr(window, "_quant_pm_strategy_table", None)
+        position_table = getattr(window, "_quant_pm_position_table", None)
+        correlation_table = getattr(window, "_quant_pm_correlation_table", None)
+        details = getattr(window, "_quant_pm_details", None)
+        if (
+            summary is None
+            or strategy_table is None
+            or position_table is None
+            or correlation_table is None
+            or details is None
+        ):
+            return
+
+        try:
+            payload = await self._quant_pm_payload()
+        except Exception as exc:
+            self.logger.debug("Quant PM refresh failed: %s", exc)
+            return
+
+        if window is None or not self._is_qt_object_alive(window):
+            return
+
+        window._quant_pm_payload = payload
+        allocation = dict(payload.get("allocation_snapshot") or {})
+        risk = dict(payload.get("risk_snapshot") or {})
+        behavior = dict(payload.get("behavior_status") or {})
+        summary.setText(
+            f"{payload.get('mode', 'PAPER')} | {str(payload.get('exchange') or '-').upper()} | "
+            f"Equity {self._format_currency(payload.get('equity'))} | "
+            f"Allocator {self._format_percent_text(allocation.get('target_weight'))} | "
+            f"Risk VaR {self._format_percent_text(risk.get('trade_var_pct'))} | "
+            f"Behavior {behavior.get('state', 'UNKNOWN')}"
+        )
+        self._populate_quant_pm_strategy_table(strategy_table, payload.get("strategy_rows"))
+        self._populate_quant_pm_position_table(position_table, payload.get("position_rows"), payload.get("equity"))
+        self._populate_quant_pm_correlation_table(correlation_table, payload.get("correlation_rows"))
+        details.setHtml(self._build_quant_pm_html(payload))
+
+    def _open_quant_pm_window(self):
+        window = self._get_or_create_tool_window(
+            "quant_pm",
+            "Quant PM",
+            width=1240,
+            height=760,
+        )
+
+        if getattr(window, "_quant_pm_summary", None) is None:
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+
+            summary = QLabel("Loading quant PM dashboard.")
+            summary.setWordWrap(True)
+            summary.setStyleSheet(
+                "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
+                "border-radius: 12px; padding: 12px; font-size: 13px; font-weight: 600;"
+            )
+            layout.addWidget(summary)
+
+            top_row = QHBoxLayout()
+            top_row.setSpacing(10)
+
+            strategy_table = QTableWidget()
+            strategy_table.setColumnCount(4)
+            strategy_table.setHorizontalHeaderLabels(["Strategy", "Symbols", "Exposure", "Weight"])
+            top_row.addWidget(strategy_table, 1)
+
+            correlation_table = QTableWidget()
+            top_row.addWidget(correlation_table, 1)
+            layout.addLayout(top_row)
+
+            position_table = QTableWidget()
+            position_table.setColumnCount(8)
+            position_table.setHorizontalHeaderLabels(
+                ["Symbol", "Strategy", "Direction", "Qty", "Entry", "Mark", "Exposure", "% Equity"]
+            )
+            layout.addWidget(position_table)
+
+            details = QTextBrowser()
+            details.setStyleSheet(
+                "QTextBrowser { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; border-radius: 12px; padding: 12px; }"
+            )
+            layout.addWidget(details)
+
+            window.setCentralWidget(container)
+            window._quant_pm_summary = summary
+            window._quant_pm_strategy_table = strategy_table
+            window._quant_pm_position_table = position_table
+            window._quant_pm_correlation_table = correlation_table
+            window._quant_pm_details = details
+            window._quant_pm_payload = {}
+
+            sync_timer = QTimer(window)
+            sync_timer.timeout.connect(lambda: self._schedule_quant_pm_refresh(window))
+            sync_timer.start(3000)
+            window._quant_pm_timer = sync_timer
+
+        self._schedule_quant_pm_refresh(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
     async def _refresh_open_orders_async(self):
         if self._ui_shutting_down:
             return
@@ -2070,14 +3412,81 @@ class Terminal(QMainWindow):
         orders = []
         if broker is not None and hasattr(broker, "fetch_open_orders"):
             try:
-                orders = await broker.fetch_open_orders(limit=200)
+                snapshot = getattr(broker, "fetch_open_orders_snapshot", None)
+                if callable(snapshot):
+                    orders = await snapshot(symbols=getattr(self.controller, "symbols", []), limit=200)
+                else:
+                    active_symbol = str(self._current_chart_symbol() or "").strip()
+                    request = {"limit": 200}
+                    if active_symbol:
+                        request["symbol"] = active_symbol
+                    orders = await broker.fetch_open_orders(**request)
             except TypeError:
-                orders = await broker.fetch_open_orders()
+                active_symbol = str(self._current_chart_symbol() or "").strip()
+                if active_symbol:
+                    orders = await broker.fetch_open_orders(active_symbol, 200)
+                else:
+                    orders = await broker.fetch_open_orders()
             except Exception as exc:
                 self.logger.debug("Open orders refresh failed: %s", exc)
 
         self._latest_open_orders_snapshot = orders or []
         self._populate_open_orders_table(self._latest_open_orders_snapshot)
+
+    async def _refresh_broker_status_async(self):
+        if self._ui_shutting_down:
+            return
+
+        broker = getattr(self.controller, "broker", None)
+        if broker is None:
+            self._latest_broker_status_snapshot = {"status": "disconnected", "summary": "Disconnected"}
+            return
+
+        try:
+            status = await broker.fetch_status()
+            if isinstance(status, dict):
+                status_text = str(status.get("status") or "ok").strip() or "ok"
+                broker_label = str(status.get("broker") or getattr(broker, "exchange_name", "") or "").strip().upper()
+                summary = f"{broker_label + ' ' if broker_label else ''}{status_text.upper()}".strip()
+                self._latest_broker_status_snapshot = {
+                    "status": status_text.lower(),
+                    "summary": summary or "Connected",
+                    "detail": status,
+                }
+            else:
+                summary = str(status or "Connected").strip() or "Connected"
+                self._latest_broker_status_snapshot = {
+                    "status": summary.lower(),
+                    "summary": summary,
+                    "detail": status,
+                }
+        except NotImplementedError:
+            summary = "Connected" if getattr(self.controller, "connected", False) else "Unknown"
+            self._latest_broker_status_snapshot = {
+                "status": summary.lower(),
+                "summary": summary,
+            }
+        except Exception as exc:
+            self._latest_broker_status_snapshot = {
+                "status": "error",
+                "summary": "Error",
+                "detail": str(exc),
+            }
+
+    def _schedule_broker_status_refresh(self, force=False):
+        task = getattr(self, "_broker_status_refresh_task", None)
+        if task is not None and not task.done():
+            return
+
+        now = time.monotonic()
+        if not force and (now - float(getattr(self, "_last_broker_status_refresh_at", 0.0) or 0.0)) < 15.0:
+            return
+
+        self._last_broker_status_refresh_at = now
+        try:
+            self._broker_status_refresh_task = asyncio.get_event_loop().create_task(self._refresh_broker_status_async())
+        except Exception as exc:
+            self.logger.debug("Unable to schedule broker-status refresh: %s", exc)
 
     def _schedule_open_orders_refresh(self):
         task = getattr(self, "_open_orders_refresh_task", None)
@@ -2094,57 +3503,24 @@ class Terminal(QMainWindow):
         if table is None:
             return
 
-        rows = []
-        params = dict(getattr(self.controller, "strategy_params", {}) or {})
-        active_name = Strategy.normalize_strategy_name(
-            getattr(self.controller, "strategy_name", None) or getattr(getattr(self.controller, "config", None), "strategy", "Trend Following")
-        )
-        rows.append({
-            "strategy": active_name,
-            "source": "Active",
-            "rsi_period": params.get("rsi_period", ""),
-            "ema_fast": params.get("ema_fast", ""),
-            "ema_slow": params.get("ema_slow", ""),
-            "atr_period": params.get("atr_period", ""),
-            "min_confidence": params.get("min_confidence", ""),
-            "total_profit": "",
-            "sharpe_ratio": "",
-        })
-
-        results = getattr(self, "optimization_results", None)
-        if results is not None and hasattr(results, "empty") and not results.empty:
-            for _, result in results.head(5).iterrows():
-                rows.append({
-                    "strategy": active_name,
-                    "source": "Optimized",
-                    "rsi_period": result.get("rsi_period", ""),
-                    "ema_fast": result.get("ema_fast", ""),
-                    "ema_slow": result.get("ema_slow", ""),
-                    "atr_period": result.get("atr_period", ""),
-                    "min_confidence": params.get("min_confidence", ""),
-                    "total_profit": result.get("total_profit", ""),
-                    "sharpe_ratio": result.get("sharpe_ratio", ""),
-                })
-
+        rows = self._strategy_scorecard_rows()
         table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             values = [
                 row["strategy"],
                 row["source"],
-                row["rsi_period"],
-                row["ema_fast"],
-                row["ema_slow"],
-                row["atr_period"],
-                row["min_confidence"],
-                row["total_profit"],
-                row["sharpe_ratio"],
+                row.get("orders", ""),
+                row.get("realized", ""),
+                self._format_percent_text(row.get("win_rate")),
+                self._format_currency(row.get("net_pnl")),
+                self._format_currency(row.get("avg_trade")),
+                self._format_percent_text(row.get("avg_conf")),
+                "-" if row.get("avg_spread") is None else f"{float(row.get('avg_spread')):.2f} bps",
+                "-" if row.get("avg_slip") is None else f"{float(row.get('avg_slip')):.2f} bps",
+                self._format_currency(row.get("fees")),
             ]
             for col, value in enumerate(values):
-                if isinstance(value, float):
-                    text = f"{value:.4f}" if col == 6 else f"{value:.2f}"
-                else:
-                    text = str(value)
-                table.setItem(row_index, col, QTableWidgetItem(text))
+                table.setItem(row_index, col, QTableWidgetItem(str(value)))
 
         table.resizeColumnsToContents()
         table.horizontalHeader().setStretchLastSection(True)
@@ -2154,8 +3530,10 @@ class Terminal(QMainWindow):
             return None
 
         normalized = {
+            "trade_db_id": trade.get("trade_db_id", trade.get("id", "")),
             "timestamp": trade.get("timestamp", ""),
             "symbol": trade.get("symbol", ""),
+            "source": self._format_trade_source_label(trade.get("source", "bot")),
             "side": trade.get("side", ""),
             "price": trade.get("price", ""),
             "size": trade.get("size", trade.get("amount", "")),
@@ -2165,6 +3543,17 @@ class Terminal(QMainWindow):
             "pnl": trade.get("pnl", ""),
             "stop_loss": trade.get("stop_loss", trade.get("sl", "")),
             "take_profit": trade.get("take_profit", trade.get("tp", "")),
+            "reason": trade.get("reason", ""),
+            "strategy_name": trade.get("strategy_name", ""),
+            "confidence": trade.get("confidence", ""),
+            "expected_price": trade.get("expected_price", ""),
+            "spread_bps": trade.get("spread_bps", ""),
+            "slippage_bps": trade.get("slippage_bps", ""),
+            "fee": trade.get("fee", ""),
+            "setup": trade.get("setup", ""),
+            "outcome": trade.get("outcome", ""),
+            "lessons": trade.get("lessons", ""),
+            "blocked_by_guard": bool(trade.get("blocked_by_guard", False)),
         }
         return normalized
 
@@ -2173,13 +3562,26 @@ class Terminal(QMainWindow):
             return ""
         return str(value)
 
+    def _format_trade_source_label(self, value):
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return ""
+        mapping = {
+            "chatgpt": "Sopotek Pilot",
+            "manual": "Manual",
+            "bot": "Bot",
+            "chart_double_click": "Chart Double Click",
+            "chart_context_menu": "Chart Context Menu",
+        }
+        return mapping.get(normalized, str(value).replace("_", " ").title())
+
     def _trade_log_row_for_entry(self, entry):
         order_id = str(entry.get("order_id") or "").strip()
         if not order_id:
             return None
 
         for row in range(self.trade_log.rowCount()):
-            item = self.trade_log.item(row, 7)
+            item = self.trade_log.item(row, 8)
             if item is not None and item.text() == order_id:
                 return row
 
@@ -2204,6 +3606,7 @@ class Terminal(QMainWindow):
         column_values = [
             entry["timestamp"],
             entry["symbol"],
+            entry["source"],
             entry["side"],
             entry["price"],
             entry["size"],
@@ -2220,6 +3623,19 @@ class Terminal(QMainWindow):
             tooltip_parts.append(f"SL: {entry['stop_loss']}")
         if entry["take_profit"] not in ("", None):
             tooltip_parts.append(f"TP: {entry['take_profit']}")
+        if entry["reason"] not in ("", None):
+            prefix = "Guard" if entry.get("blocked_by_guard") else "Reason"
+            tooltip_parts.append(f"{prefix}: {entry['reason']}")
+        if entry["strategy_name"] not in ("", None):
+            tooltip_parts.append(f"Strategy: {entry['strategy_name']}")
+        if entry["confidence"] not in ("", None, 0):
+            tooltip_parts.append(f"Confidence: {entry['confidence']}")
+        if entry["spread_bps"] not in ("", None):
+            tooltip_parts.append(f"Spread: {entry['spread_bps']} bps")
+        if entry["slippage_bps"] not in ("", None):
+            tooltip_parts.append(f"Slippage: {entry['slippage_bps']} bps")
+        if entry["fee"] not in ("", None):
+            tooltip_parts.append(f"Fee: {entry['fee']}")
         if tooltip_parts:
             tooltip = " | ".join(tooltip_parts)
             for column in range(self.trade_log.columnCount()):
@@ -2338,9 +3754,9 @@ class Terminal(QMainWindow):
     def _create_trade_log_panel(self):
         dock = QDockWidget("Trade Log", self)
         self.trade_log = QTableWidget()
-        self.trade_log.setColumnCount(9)
+        self.trade_log.setColumnCount(10)
         self.trade_log.setHorizontalHeaderLabels(
-            ["Timestamp", "Symbol", "Side", "Price", "Size", "Order Type", "Status", "Order ID", "PnL"]
+            ["Timestamp", "Symbol", "Source", "Side", "Price", "Size", "Order Type", "Status", "Order ID", "PnL"]
         )
         dock.setWidget(self.trade_log)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
@@ -2402,8 +3818,8 @@ class Terminal(QMainWindow):
             "Sharpe Ratio",
             "Win Rate",
             "Profit Factor",
-            "Realized Trades",
-            "Pending Orders",
+            "Fees",
+            "Avg Slippage",
         ]
         metrics_grid, metric_labels = self._build_performance_metric_grid(metric_names, columns=2)
         layout.addLayout(metrics_grid)
@@ -2484,13 +3900,13 @@ class Terminal(QMainWindow):
             plot.setLabel("left", left_label, color="#8fa7c6")
         plot.setLabel("bottom", "Samples", color="#8fa7c6")
 
-    def _safe_float(self, value):
+    def _safe_float(self, value, default=None):
         try:
             numeric = float(value)
         except Exception:
-            return None
+            return default
         if not np.isfinite(numeric):
-            return None
+            return default
         return numeric
 
     def _format_currency(self, value):
@@ -2554,16 +3970,138 @@ class Terminal(QMainWindow):
                 {
                     "timestamp": table.item(row, 0).text() if table.item(row, 0) else "",
                     "symbol": table.item(row, 1).text() if table.item(row, 1) else "",
-                    "side": table.item(row, 2).text() if table.item(row, 2) else "",
-                    "price": table.item(row, 3).text() if table.item(row, 3) else "",
-                    "size": table.item(row, 4).text() if table.item(row, 4) else "",
-                    "order_type": table.item(row, 5).text() if table.item(row, 5) else "",
-                    "status": table.item(row, 6).text() if table.item(row, 6) else "",
-                    "order_id": table.item(row, 7).text() if table.item(row, 7) else "",
-                    "pnl": table.item(row, 8).text() if table.item(row, 8) else "",
+                    "source": table.item(row, 2).text() if table.item(row, 2) else "",
+                    "side": table.item(row, 3).text() if table.item(row, 3) else "",
+                    "price": table.item(row, 4).text() if table.item(row, 4) else "",
+                    "size": table.item(row, 5).text() if table.item(row, 5) else "",
+                    "order_type": table.item(row, 6).text() if table.item(row, 6) else "",
+                    "status": table.item(row, 7).text() if table.item(row, 7) else "",
+                    "order_id": table.item(row, 8).text() if table.item(row, 8) else "",
+                    "pnl": table.item(row, 9).text() if table.item(row, 9) else "",
                 }
             )
         return fallback
+
+    def _strategy_scorecard_rows(self):
+        active_name = Strategy.normalize_strategy_name(
+            getattr(self.controller, "strategy_name", None)
+            or getattr(getattr(self.controller, "config", None), "strategy", "Trend Following")
+        )
+        grouped = {}
+
+        for trade in self._performance_trade_records():
+            source = str(trade.get("source") or "").strip().lower() or "runtime"
+            strategy_name = str(trade.get("strategy_name") or "").strip()
+            if source == "manual" and not strategy_name:
+                strategy_name = "Manual"
+            strategy_name = Strategy.normalize_strategy_name(strategy_name or active_name)
+
+            row = grouped.setdefault(
+                strategy_name,
+                {
+                    "strategy": strategy_name,
+                    "sources": set(),
+                    "orders": 0,
+                    "realized": 0,
+                    "wins": 0,
+                    "net_pnl": 0.0,
+                    "confidence_total": 0.0,
+                    "confidence_count": 0,
+                    "slippage_total": 0.0,
+                    "slippage_count": 0,
+                    "spread_total": 0.0,
+                    "spread_count": 0,
+                    "fee_total": 0.0,
+                },
+            )
+            row["sources"].add(source)
+            row["orders"] += 1
+
+            pnl = self._safe_float(trade.get("pnl"))
+            if pnl is not None:
+                row["realized"] += 1
+                row["net_pnl"] += pnl
+                if pnl > 0:
+                    row["wins"] += 1
+
+            confidence = self._safe_float(trade.get("confidence"))
+            if confidence is not None:
+                row["confidence_total"] += confidence
+                row["confidence_count"] += 1
+
+            slippage_bps = self._safe_float(trade.get("slippage_bps"))
+            if slippage_bps is not None:
+                row["slippage_total"] += slippage_bps
+                row["slippage_count"] += 1
+
+            spread_bps = self._safe_float(trade.get("spread_bps"))
+            if spread_bps is not None:
+                row["spread_total"] += spread_bps
+                row["spread_count"] += 1
+
+            fee = self._safe_float(trade.get("fee"))
+            if fee is not None:
+                row["fee_total"] += fee
+
+        if not grouped:
+            grouped[active_name] = {
+                "strategy": active_name,
+                "sources": {"runtime"},
+                "orders": 0,
+                "realized": 0,
+                "wins": 0,
+                "net_pnl": 0.0,
+                "confidence_total": 0.0,
+                "confidence_count": 0,
+                "slippage_total": 0.0,
+                "slippage_count": 0,
+                "spread_total": 0.0,
+                "spread_count": 0,
+                "fee_total": 0.0,
+            }
+
+        rows = []
+        for data in grouped.values():
+            realized = int(data["realized"])
+            avg_trade = (data["net_pnl"] / realized) if realized else None
+            win_rate = (data["wins"] / realized) if realized else None
+            avg_conf = (data["confidence_total"] / data["confidence_count"]) if data["confidence_count"] else None
+            avg_slip = (data["slippage_total"] / data["slippage_count"]) if data["slippage_count"] else None
+            avg_spread = (data["spread_total"] / data["spread_count"]) if data["spread_count"] else None
+            source_values = {str(item).title() for item in data["sources"] if item}
+            if len(source_values) == 1:
+                source_text = next(iter(source_values))
+            elif len(source_values) > 1:
+                source_text = "Mixed"
+            else:
+                source_text = "Runtime"
+
+            rows.append(
+                {
+                    "strategy": data["strategy"],
+                    "source": source_text,
+                    "orders": int(data["orders"]),
+                    "realized": realized,
+                    "win_rate": win_rate,
+                    "net_pnl": data["net_pnl"],
+                    "avg_trade": avg_trade,
+                    "avg_conf": avg_conf,
+                    "avg_spread": avg_spread,
+                    "avg_slip": avg_slip,
+                    "fees": data["fee_total"],
+                }
+            )
+
+        rows.sort(
+            key=lambda item: (
+                self._safe_float(item.get("net_pnl"), 0.0) or 0.0,
+                self._safe_float(item.get("win_rate"), 0.0) or 0.0,
+                int(item.get("realized", 0) or 0),
+                int(item.get("orders", 0) or 0),
+            ),
+            reverse=True,
+        )
+        return rows
 
     def _performance_snapshot(self):
         equity_series = []
@@ -2608,6 +4146,9 @@ class Terminal(QMainWindow):
         canceled_orders = 0
         symbol_stats = {}
         realized_pnls = []
+        fee_values = []
+        spread_values = []
+        slippage_values = []
 
         for trade in trades:
             status = str(trade.get("status") or "").strip().lower()
@@ -2634,6 +4175,18 @@ class Terminal(QMainWindow):
                 if pnl > 0:
                     stats["wins"] += 1
 
+            fee = self._safe_float(trade.get("fee"))
+            if fee is not None:
+                fee_values.append(fee)
+
+            spread_bps = self._safe_float(trade.get("spread_bps"))
+            if spread_bps is not None:
+                spread_values.append(spread_bps)
+
+            slippage_bps = self._safe_float(trade.get("slippage_bps"))
+            if slippage_bps is not None:
+                slippage_values.append(slippage_bps)
+
         realized_trade_count = len(realized_pnls)
         pnl_values = [entry["pnl"] for entry in realized_pnls]
         gross_profit = sum(value for value in pnl_values if value > 0)
@@ -2644,6 +4197,12 @@ class Terminal(QMainWindow):
         avg_trade = (sum(pnl_values) / realized_trade_count) if realized_trade_count else None
         best_trade = max(pnl_values) if pnl_values else None
         worst_trade = min(pnl_values) if pnl_values else None
+        total_fees = sum(fee_values) if fee_values else 0.0
+        avg_fee = (total_fees / len(fee_values)) if fee_values else None
+        avg_spread_bps = (sum(spread_values) / len(spread_values)) if spread_values else None
+        avg_slippage_bps = (sum(slippage_values) / len(slippage_values)) if slippage_values else None
+        worst_slippage_bps = max(slippage_values) if slippage_values else None
+        execution_drag = total_fees + sum(max(value, 0.0) for value in slippage_values)
         if gross_loss < 0:
             profit_factor = gross_profit / abs(gross_loss)
         elif gross_profit > 0:
@@ -2729,6 +4288,17 @@ class Terminal(QMainWindow):
         if execution_notes:
             insights.append("Execution state: " + ", ".join(execution_notes) + ".")
 
+        if spread_values or slippage_values or fee_values:
+            parts = []
+            if avg_spread_bps is not None:
+                parts.append(f"avg spread <b>{avg_spread_bps:.2f} bps</b>")
+            if avg_slippage_bps is not None:
+                parts.append(f"avg slippage <b>{avg_slippage_bps:.2f} bps</b>")
+            if total_fees:
+                parts.append(f"fees <b>{self._format_currency(total_fees)}</b>")
+            if parts:
+                insights.append("Execution quality: " + ", ".join(parts) + ".")
+
         if max_drawdown is not None and max_drawdown >= 0.15:
             insights.append("Drawdown is elevated relative to the current sample; position sizing or strategy selectivity may need tightening.")
         elif max_drawdown is not None:
@@ -2745,6 +4315,12 @@ class Terminal(QMainWindow):
             "Pending Orders": {"text": str(pending_orders), "tone": "warning" if pending_orders else "muted"},
             "Win Rate": {"text": self._format_percent_text(win_rate), "tone": "positive" if (win_rate or 0) >= 0.5 and win_rate is not None else "neutral"},
             "Profit Factor": {"text": "infinite" if profit_factor == float("inf") else self._format_ratio_text(profit_factor), "tone": "positive" if profit_factor not in (None, float("inf")) and profit_factor >= 1.2 else "neutral"},
+            "Fees": {"text": self._format_currency(total_fees), "tone": "warning" if total_fees > 0 else "muted"},
+            "Avg Fee": {"text": self._format_currency(avg_fee), "tone": "muted"},
+            "Avg Spread": {"text": "-" if avg_spread_bps is None else f"{avg_spread_bps:.2f} bps", "tone": "warning" if (avg_spread_bps or 0) >= 20 else "neutral"},
+            "Avg Slippage": {"text": "-" if avg_slippage_bps is None else f"{avg_slippage_bps:.2f} bps", "tone": "warning" if (avg_slippage_bps or 0) > 0 else "neutral"},
+            "Worst Slippage": {"text": "-" if worst_slippage_bps is None else f"{worst_slippage_bps:.2f} bps", "tone": "warning" if (worst_slippage_bps or 0) > 0 else "neutral"},
+            "Execution Drag": {"text": self._format_currency(execution_drag), "tone": "warning" if execution_drag > 0 else "muted"},
             "Volatility": {"text": self._format_percent_text(volatility), "tone": "warning" if (volatility or 0) > 0.4 else "neutral"},
             "Sharpe Ratio": {"text": self._format_ratio_text(sharpe_ratio), "tone": "positive" if (sharpe_ratio or 0) >= 1.0 else "negative" if sharpe_ratio is not None and sharpe_ratio < 0 else "neutral"},
             "Sortino Ratio": {"text": self._format_ratio_text(sortino_ratio), "tone": "positive" if (sortino_ratio or 0) >= 1.0 else "negative" if sortino_ratio is not None and sortino_ratio < 0 else "neutral"},
@@ -2825,11 +4401,11 @@ class Terminal(QMainWindow):
             self._populate_performance_view(getattr(window, "_performance_widgets", None), snapshot)
 
     def _create_strategy_comparison(self):
-        dock = QDockWidget("Strategy Comparison", self)
+        dock = QDockWidget("Strategy Scorecard", self)
         self.strategy_table = QTableWidget()
-        self.strategy_table.setColumnCount(9)
+        self.strategy_table.setColumnCount(11)
         self.strategy_table.setHorizontalHeaderLabels(
-            ["Strategy", "Source", "RSI", "EMA Fast", "EMA Slow", "ATR", "Min Conf", "Profit", "Sharpe"]
+            ["Strategy", "Source", "Orders", "Realized", "Win Rate", "Net PnL", "Avg Trade", "Avg Conf", "Avg Spread", "Avg Slip", "Fees"]
         )
         dock.setWidget(self.strategy_table)
         self.addDockWidget(Qt.BottomDockWidgetArea, dock)
@@ -3133,6 +4709,24 @@ class Terminal(QMainWindow):
             if chart.symbol == symbol:
                 chart.update_orderbook_heatmap(bids, asks)
 
+    def _update_recent_trades(self, symbol, trades):
+        if self._ui_shutting_down:
+            return
+
+        active_symbol = self._current_chart_symbol()
+        if hasattr(self, "orderbook_panel") and active_symbol == symbol:
+            self.orderbook_panel.update_recent_trades(trades)
+
+    def _update_news(self, symbol, events):
+        normalized = str(symbol or "").upper().strip()
+        for chart in self._iter_chart_widgets():
+            if str(getattr(chart, "symbol", "")).upper() != normalized:
+                continue
+            if getattr(self.controller, "news_draw_on_chart", False):
+                chart.set_news_events(events or [])
+            else:
+                chart.clear_news_events()
+
     def _create_strategy_debug_panel(self):
 
         dock = QDockWidget("Strategy Debug", self)
@@ -3156,6 +4750,17 @@ class Terminal(QMainWindow):
             print("DEBUG IS NONE")
             return
 
+        self._record_recommendation(
+            symbol=debug.get("symbol", ""),
+            signal=debug.get("signal", ""),
+            confidence=debug.get("ml_probability", 0.0),
+            reason=debug.get("reason", ""),
+            strategy="Strategy Engine",
+            timestamp=debug.get("timestamp", ""),
+        )
+
+        if self.debug_table.rowCount() >= int(self.MAX_LOG_ROWS or 200):
+            self.debug_table.removeRow(0)
         row = self.debug_table.rowCount()
         self.debug_table.insertRow(row)
 
@@ -3208,13 +4813,14 @@ class Terminal(QMainWindow):
     def _rotate_spinner(self):
 
      try:
+        self._spinner_index += 1
         self._update_trading_activity_indicator()
+        self._update_autotrade_button()
 
         # Lightweight spinner update: only touch existing rows that are in training state.
         if not hasattr(self, "symbols_table") or self.symbols_table is None:
             return
 
-        self._spinner_index += 1
         icon = self._spinner_frames[self._spinner_index % len(self._spinner_frames)]
 
         rows = self.symbols_table.rowCount()
@@ -3242,10 +4848,14 @@ class Terminal(QMainWindow):
         self.controller.equity_signal.connect(self._update_equity)
         self.controller.trade_signal.connect(self._update_trade_log)
         self.controller.ticker_signal.connect(self._update_ticker)
+        if hasattr(self.controller, "news_signal"):
+            self.controller.news_signal.connect(self._update_news)
 
         self.controller.orderbook_signal.connect(
             self._update_orderbook
         )
+        if hasattr(self.controller, "recent_trades_signal"):
+            self.controller.recent_trades_signal.connect(self._update_recent_trades)
 
         if hasattr(self.controller, "ai_signal_monitor"):
             self.controller.ai_signal_monitor.connect(self._update_ai_signal)
@@ -3273,7 +4883,6 @@ class Terminal(QMainWindow):
         self._create_positions_panel()
         self._create_open_orders_panel()
         self._create_trade_log_panel()
-        self._create_performance_panel()
         self._create_strategy_comparison()
         self._create_strategy_debug_panel()
         self._create_system_status_panel()
@@ -3291,12 +4900,17 @@ class Terminal(QMainWindow):
             return
 
         symbol = self._current_chart_symbol()
-        if not symbol or not hasattr(self.controller, "request_orderbook"):
+        if not symbol:
             return
 
-        asyncio.get_event_loop().create_task(
-            self.controller.request_orderbook(symbol=symbol, limit=20)
-        )
+        if hasattr(self.controller, "request_orderbook"):
+            asyncio.get_event_loop().create_task(
+                self.controller.request_orderbook(symbol=symbol, limit=20)
+            )
+        if hasattr(self.controller, "request_recent_trades"):
+            asyncio.get_event_loop().create_task(
+                self.controller.request_recent_trades(symbol=symbol, limit=40)
+            )
 
     def _setup_spinner(self):
 
@@ -3332,115 +4946,641 @@ class Terminal(QMainWindow):
         self.symbols_table.blockSignals(blocked)
         self._reorder_market_watch_rows()
 
-    def _open_manual_trade(self):
+    def _manual_trade_default_payload(self, prefill=None):
+        payload = dict(prefill or {})
+        symbol_options = list(getattr(self.controller, "symbols", []) or [])
+        default_symbol = (
+            str(payload.get("symbol") or self._current_chart_symbol() or getattr(self, "symbol", "") or "").strip()
+        )
+        if default_symbol and default_symbol not in symbol_options:
+            symbol_options.insert(0, default_symbol)
+        default_order_type = str(payload.get("order_type") or "market").strip().lower()
+        if default_order_type not in {"market", "limit", "stop_limit"}:
+            default_order_type = "market"
+        return {
+            "symbol_options": symbol_options,
+            "symbol": default_symbol,
+            "side": str(payload.get("side") or "buy").strip().lower() or "buy",
+            "order_type": default_order_type,
+            "amount": self._safe_float(payload.get("amount"), 1.0) or 1.0,
+            "price": self._safe_float(payload.get("price")),
+            "stop_price": self._safe_float(payload.get("stop_price")),
+            "stop_loss": self._safe_float(payload.get("stop_loss")),
+            "take_profit": self._safe_float(payload.get("take_profit")),
+            "source": str(payload.get("source") or "manual").strip().lower() or "manual",
+            "timeframe": str(payload.get("timeframe") or self.current_timeframe or "").strip(),
+        }
+
+    def _chart_for_symbol(self, symbol):
+        target = str(symbol or "").strip()
+        if not target:
+            return None
+        current_chart = self._current_chart_widget()
+        if isinstance(current_chart, ChartWidget) and getattr(current_chart, "symbol", "") == target:
+            return current_chart
+        for chart in self._all_chart_widgets():
+            if getattr(chart, "symbol", "") == target:
+                return chart
+        return None
+
+    def _default_entry_price_for_symbol(self, symbol, side="buy"):
+        chart = self._chart_for_symbol(symbol)
+        if chart is not None:
+            last_df = getattr(chart, "_last_df", None)
+            if last_df is not None and hasattr(last_df, "empty") and not last_df.empty:
+                try:
+                    if str(side or "buy").strip().lower() == "sell" and "bid" in last_df.columns:
+                        return float(last_df["bid"].iloc[-1])
+                    if str(side or "buy").strip().lower() == "buy" and "ask" in last_df.columns:
+                        return float(last_df["ask"].iloc[-1])
+                    return float(last_df["close"].iloc[-1])
+                except Exception:
+                    pass
+            last_bid = self._safe_float(getattr(chart, "_last_bid", None))
+            last_ask = self._safe_float(getattr(chart, "_last_ask", None))
+            if str(side or "buy").strip().lower() == "buy" and last_ask is not None:
+                return last_ask
+            if str(side or "buy").strip().lower() == "sell" and last_bid is not None:
+                return last_bid
+            if last_bid is not None and last_ask is not None:
+                return (last_bid + last_ask) / 2.0
+        return None
+
+    def _suggest_manual_trade_levels(self, symbol, side="buy", entry_price=None):
+        entry = self._safe_float(entry_price)
+        if entry is None or entry <= 0:
+            entry = self._default_entry_price_for_symbol(symbol, side=side)
+        if entry is None or entry <= 0:
+            return (None, None, None)
+
+        chart = self._chart_for_symbol(symbol)
+        risk_distance = None
+        if chart is not None:
+            last_df = getattr(chart, "_last_df", None)
+            if last_df is not None and hasattr(last_df, "empty") and not last_df.empty:
+                try:
+                    lookback = min(len(last_df), 14)
+                    high = last_df["high"].astype(float).tail(lookback)
+                    low = last_df["low"].astype(float).tail(lookback)
+                    close = last_df["close"].astype(float).tail(lookback)
+                    prev_close = close.shift(1).fillna(close)
+                    tr = np.maximum(high - low, np.maximum((high - prev_close).abs(), (low - prev_close).abs()))
+                    atr_value = float(tr.mean())
+                    if np.isfinite(atr_value) and atr_value > 0:
+                        risk_distance = atr_value * 1.5
+                except Exception:
+                    risk_distance = None
+
+        if risk_distance is None or risk_distance <= 0:
+            risk_distance = max(abs(entry) * 0.002, 1e-6)
+
+        reward_distance = risk_distance * 2.0
+        normalized_side = str(side or "buy").strip().lower() or "buy"
+        if normalized_side == "sell":
+            stop_loss = entry + risk_distance
+            take_profit = entry - reward_distance
+        else:
+            stop_loss = entry - risk_distance
+            take_profit = entry + reward_distance
+
+        entry = self._normalize_manual_trade_price(symbol, entry)
+        stop_loss = self._normalize_manual_trade_price(symbol, stop_loss)
+        take_profit = self._normalize_manual_trade_price(symbol, take_profit)
+        return (entry, stop_loss, take_profit)
+
+    def _manual_trade_format_context(self, symbol):
+        broker = getattr(self.controller, "broker", None)
+        context = {
+            "amount_decimals": 8,
+            "price_decimals": 6,
+            "min_amount": 0.0,
+            "amount_formatter": lambda value: value,
+            "price_formatter": lambda value: value,
+        }
+        if broker is None or not symbol:
+            return context
+
+        exchange_name = str(getattr(broker, "exchange_name", "") or "").strip().lower()
+
+        if exchange_name == "oanda":
+            try:
+                normalized_symbol = broker._normalize_symbol(symbol) if hasattr(broker, "_normalize_symbol") else symbol
+                details = getattr(broker, "_instrument_details", {}) or {}
+                meta = details.get(normalized_symbol, {}) if isinstance(details, dict) else {}
+                amount_decimals = max(0, int(meta.get("tradeUnitsPrecision", 0) or 0))
+                price_decimals = max(0, int(meta.get("displayPrecision", 5) or 5))
+                min_amount = float(meta.get("minimumTradeSize", 1) or 1)
+                context.update(
+                    {
+                        "amount_decimals": amount_decimals,
+                        "price_decimals": price_decimals,
+                        "min_amount": min_amount,
+                        "amount_formatter": lambda value, precision=amount_decimals: float(broker._format_units(value, precision)),
+                        "price_formatter": lambda value, precision=price_decimals: float(broker._format_price(value, precision)),
+                    }
+                )
+                return context
+            except Exception:
+                return context
+
+        exchange = getattr(broker, "exchange", None)
+        market = None
+        if exchange is not None:
+            try:
+                markets = getattr(exchange, "markets", None)
+                if isinstance(markets, dict):
+                    market = markets.get(symbol)
+            except Exception:
+                market = None
+
+        precision = market.get("precision", {}) if isinstance(market, dict) else {}
+        limits = market.get("limits", {}) if isinstance(market, dict) else {}
+        amount_precision = precision.get("amount")
+        price_precision = precision.get("price")
+        min_amount = (((limits.get("amount") or {}).get("min")) if isinstance(limits, dict) else None)
+
+        try:
+            if amount_precision is not None:
+                context["amount_decimals"] = max(0, int(amount_precision))
+        except Exception:
+            pass
+        try:
+            if price_precision is not None:
+                context["price_decimals"] = max(0, int(price_precision))
+        except Exception:
+            pass
+        try:
+            if min_amount not in (None, ""):
+                context["min_amount"] = float(min_amount)
+        except Exception:
+            pass
+
+        amount_converter = getattr(exchange, "amount_to_precision", None) if exchange is not None else None
+        price_converter = getattr(exchange, "price_to_precision", None) if exchange is not None else None
+        if callable(amount_converter):
+            context["amount_formatter"] = lambda value, converter=amount_converter, target=symbol: float(converter(target, value))
+        if callable(price_converter):
+            context["price_formatter"] = lambda value, converter=price_converter, target=symbol: float(converter(target, value))
+        return context
+
+    def _normalize_manual_trade_amount(self, symbol, amount):
+        try:
+            numeric = float(amount)
+        except Exception:
+            return None
+        context = self._manual_trade_format_context(symbol)
+        formatter = context.get("amount_formatter")
+        try:
+            return float(formatter(numeric)) if callable(formatter) else numeric
+        except Exception:
+            return numeric
+
+    def _validate_manual_trade_amount(self, symbol, amount):
+        try:
+            numeric = float(amount)
+        except Exception:
+            return None, "Amount must be a valid number."
+
+        context = self._manual_trade_format_context(symbol)
+        min_amount = float(context.get("min_amount") or 0.0)
+        normalized = self._normalize_manual_trade_amount(symbol, numeric)
+        if normalized is None or normalized <= 0:
+            return None, "Amount must be greater than zero."
+        if min_amount > 0 and abs(numeric) < min_amount:
+            return None, f"Amount is below the broker minimum size of {min_amount} for {symbol}."
+        if abs(normalized) <= 0:
+            return None, "Amount rounds to zero at the broker precision for this symbol."
+        return normalized, None
+
+    def _normalize_manual_trade_price(self, symbol, value):
+        if value in (None, ""):
+            return None
+        try:
+            numeric = float(value)
+        except Exception:
+            return None
+        formatter = self._manual_trade_format_context(symbol).get("price_formatter")
+        try:
+            return float(formatter(numeric)) if callable(formatter) else numeric
+        except Exception:
+            return numeric
+
+    def _apply_manual_trade_price_field_format(self, window, attr_name):
+        field = getattr(window, attr_name, None)
+        symbol_picker = getattr(window, "_manual_trade_symbol_picker", None)
+        if field is None or symbol_picker is None:
+            return
+        text = str(field.text() or "").strip()
+        if not text:
+            return
+        normalized = self._normalize_manual_trade_price(str(symbol_picker.currentText() or "").strip(), text)
+        field.blockSignals(True)
+        field.setText("" if normalized is None else str(normalized))
+        field.blockSignals(False)
+
+    def _manual_trade_target_charts(self, symbol):
+        target = str(symbol or "").strip()
+        if not target:
+            return []
+        return [chart for chart in self._all_chart_widgets() if getattr(chart, "symbol", "") == target]
+
+    def _clear_trade_overlays(self, symbol=None):
+        charts = self._manual_trade_target_charts(symbol) if symbol else self._all_chart_widgets()
+        for chart in charts:
+            try:
+                chart.clear_trade_overlay()
+            except Exception:
+                pass
+
+    def _sync_manual_trade_ticket_to_chart(self, window):
+        if window is None or not self._is_qt_object_alive(window):
+            return
+        symbol_picker = getattr(window, "_manual_trade_symbol_picker", None)
+        side_picker = getattr(window, "_manual_trade_side_picker", None)
+        type_picker = getattr(window, "_manual_trade_type_picker", None)
+        price_input = getattr(window, "_manual_trade_price_input", None)
+        stop_loss_input = getattr(window, "_manual_trade_stop_loss_input", None)
+        take_profit_input = getattr(window, "_manual_trade_take_profit_input", None)
+
+        symbol = str(symbol_picker.currentText() or "").strip() if symbol_picker is not None else ""
+        if not symbol:
+            self._clear_trade_overlays()
+            return
+
+        side = str(side_picker.currentText() or "buy").strip().lower() if side_picker is not None else "buy"
+        order_type = str(type_picker.currentText() or "market").strip().lower() if type_picker is not None else "market"
+        entry = self._safe_float(price_input.text()) if (price_input is not None and order_type in {"limit", "stop_limit"}) else None
+        stop_loss = self._safe_float(stop_loss_input.text()) if stop_loss_input is not None else None
+        take_profit = self._safe_float(take_profit_input.text()) if take_profit_input is not None else None
+
+        for chart in self._all_chart_widgets():
+            try:
+                if getattr(chart, "symbol", "") == symbol:
+                    chart.set_trade_overlay(entry=entry, stop_loss=stop_loss, take_profit=take_profit, side=side)
+                else:
+                    chart.clear_trade_overlay()
+            except Exception:
+                continue
+
+    def _set_manual_trade_text_field(self, window, attr_name, value):
+        field = getattr(window, attr_name, None)
+        if field is None:
+            return
+        field.blockSignals(True)
+        field.setText("" if value in (None, "") else str(value))
+        field.blockSignals(False)
+        self._refresh_manual_trade_ticket(window)
+
+    def _set_manual_trade_order_type(self, window, value):
+        picker = getattr(window, "_manual_trade_type_picker", None)
+        if picker is None:
+            return
+        picker.blockSignals(True)
+        picker.setCurrentText(str(value or "market"))
+        picker.blockSignals(False)
+        self._refresh_manual_trade_ticket(window)
+
+    def _submit_manual_trade_side(self, window, side):
+        if window is None:
+            return
+        side_picker = getattr(window, "_manual_trade_side_picker", None)
+        if side_picker is not None:
+            side_picker.blockSignals(True)
+            side_picker.setCurrentText(str(side or "buy"))
+            side_picker.blockSignals(False)
+        self._set_manual_trade_order_type(window, "limit")
+        self._submit_manual_trade_from_ticket(window)
+
+    def _refresh_manual_trade_ticket(self, window):
+        symbol_picker = getattr(window, "_manual_trade_symbol_picker", None)
+        side_picker = getattr(window, "_manual_trade_side_picker", None)
+        type_picker = getattr(window, "_manual_trade_type_picker", None)
+        amount_input = getattr(window, "_manual_trade_amount_input", None)
+        price_input = getattr(window, "_manual_trade_price_input", None)
+        stop_price_input = getattr(window, "_manual_trade_stop_price_input", None)
+        stop_loss_input = getattr(window, "_manual_trade_stop_loss_input", None)
+        take_profit_input = getattr(window, "_manual_trade_take_profit_input", None)
+        status = getattr(window, "_manual_trade_status", None)
+        price_label = getattr(window, "_manual_trade_price_label", None)
+        stop_price_label = getattr(window, "_manual_trade_stop_price_label", None)
+        submit_btn = getattr(window, "_manual_trade_submit_btn", None)
+        if symbol_picker is None or side_picker is None or type_picker is None or amount_input is None:
+            return
+
+        symbol_text = str(symbol_picker.currentText() or "").strip()
+        format_context = self._manual_trade_format_context(symbol_text)
+        broker_amount_decimals = max(0, int(format_context.get("amount_decimals", 8) or 8))
+        amount_decimals = max(8, broker_amount_decimals)
+        min_amount = max(0.0, float(format_context.get("min_amount", 0.0) or 0.0))
+        price_decimals = max(0, int(format_context.get("price_decimals", 6) or 6))
+        amount_input.setDecimals(amount_decimals)
+        amount_input.setMinimum(0.0)
+        amount_input.setSingleStep(10 ** (-amount_decimals) if amount_decimals > 0 else 1.0)
+
+        order_type = str(type_picker.currentText() or "market").strip().lower()
+        has_symbol = bool(symbol_text)
+        has_amount = amount_input.value() > 0
+        price_required = order_type in {"limit", "stop_limit"}
+        stop_price_required = order_type == "stop_limit"
+        has_price = bool(str(price_input.text() or "").strip()) if price_input is not None else True
+        has_stop_price = bool(str(stop_price_input.text() or "").strip()) if stop_price_input is not None else True
+
+        if price_input is not None:
+            price_input.setEnabled(price_required)
+            price_input.setPlaceholderText(f"{'Limit' if stop_price_required else 'Price'} ({price_decimals} dp)")
+            price_input.setToolTip(f"Broker price precision: {price_decimals} decimals")
+        if price_label is not None:
+            price_label.setEnabled(price_required)
+            price_label.setText("Limit Price" if stop_price_required else "Entry Price")
+        if stop_price_input is not None:
+            stop_price_input.setEnabled(stop_price_required)
+            stop_price_input.setPlaceholderText(f"Stop ({price_decimals} dp)")
+            stop_price_input.setToolTip(f"Broker price precision: {price_decimals} decimals")
+        if stop_price_label is not None:
+            stop_price_label.setEnabled(stop_price_required)
+        if stop_loss_input is not None:
+            stop_loss_input.setPlaceholderText(f"SL ({price_decimals} dp)")
+            stop_loss_input.setToolTip(f"Broker price precision: {price_decimals} decimals")
+        if take_profit_input is not None:
+            take_profit_input.setPlaceholderText(f"TP ({price_decimals} dp)")
+            take_profit_input.setToolTip(f"Broker price precision: {price_decimals} decimals")
+        amount_input.setToolTip(
+            f"Ticket amount decimals: {amount_decimals} | Broker amount precision: {broker_amount_decimals}"
+            + (f" | Min amount: {min_amount}" if min_amount > 0 else "")
+        )
+        if submit_btn is not None:
+            submit_btn.setEnabled(
+                has_symbol
+                and has_amount
+                and ((not price_required) or has_price)
+                and ((not stop_price_required) or has_stop_price)
+            )
+
+        entry_hint = "Market execution will use the broker's live price."
+        if price_required:
+            entry_hint = f"Limit order will be placed at {str(price_input.text() or '-').strip() or '-'}."
+        if stop_price_required:
+            entry_hint = (
+                f"Stop-limit will trigger at {str(stop_price_input.text() or '-').strip() or '-'} "
+                f"and rest as a limit at {str(price_input.text() or '-').strip() or '-'}."
+            )
+        stop_price_text = str(stop_price_input.text() or "").strip() if stop_price_input is not None else ""
+        stop_loss_text = str(stop_loss_input.text() or "").strip() if stop_loss_input is not None else ""
+        take_profit_text = str(take_profit_input.text() or "").strip() if take_profit_input is not None else ""
+        side_text = str(side_picker.currentText() or "").strip().upper() or "-"
+        if status is not None:
+            source = str(getattr(window, "_manual_trade_source", "manual") or "manual").replace("_", " ").title()
+            status.setText(
+                f"{source} ticket | {symbol_text} | {side_text} | {order_type.upper()} | "
+                f"{entry_hint} Stop: {stop_price_text or '-'} | SL: {stop_loss_text or '-'} | TP: {take_profit_text or '-'} | "
+                f"Amt dp {broker_amount_decimals} | Px dp {price_decimals}"
+            )
+        self._sync_manual_trade_ticket_to_chart(window)
+
+    def _populate_manual_trade_ticket(self, window, prefill=None):
+        defaults = self._manual_trade_default_payload(prefill)
+        if defaults["price"] in (None, ""):
+            defaults["price"] = self._default_entry_price_for_symbol(defaults["symbol"], side=defaults["side"])
+        if defaults["stop_loss"] in (None, "") or defaults["take_profit"] in (None, ""):
+            suggested_entry, suggested_sl, suggested_tp = self._suggest_manual_trade_levels(
+                defaults["symbol"],
+                side=defaults["side"],
+                entry_price=defaults["price"],
+            )
+            if defaults["price"] in (None, ""):
+                defaults["price"] = suggested_entry
+            if defaults["stop_loss"] in (None, ""):
+                defaults["stop_loss"] = suggested_sl
+            if defaults["take_profit"] in (None, ""):
+                defaults["take_profit"] = suggested_tp
+        symbol_picker = getattr(window, "_manual_trade_symbol_picker", None)
+        side_picker = getattr(window, "_manual_trade_side_picker", None)
+        type_picker = getattr(window, "_manual_trade_type_picker", None)
+        amount_input = getattr(window, "_manual_trade_amount_input", None)
+        price_input = getattr(window, "_manual_trade_price_input", None)
+        stop_price_input = getattr(window, "_manual_trade_stop_price_input", None)
+        stop_loss_input = getattr(window, "_manual_trade_stop_loss_input", None)
+        take_profit_input = getattr(window, "_manual_trade_take_profit_input", None)
+        hint = getattr(window, "_manual_trade_hint", None)
+
+        if symbol_picker is not None:
+            symbol_picker.blockSignals(True)
+            symbol_picker.clear()
+            symbol_picker.addItems(defaults["symbol_options"])
+            if defaults["symbol"]:
+                if symbol_picker.findText(defaults["symbol"]) == -1:
+                    symbol_picker.addItem(defaults["symbol"])
+                symbol_picker.setCurrentText(defaults["symbol"])
+            symbol_picker.blockSignals(False)
+        if side_picker is not None:
+            side_picker.blockSignals(True)
+            side_picker.setCurrentText(defaults["side"])
+            side_picker.blockSignals(False)
+        if type_picker is not None:
+            type_picker.blockSignals(True)
+            type_picker.setCurrentText(defaults["order_type"])
+            type_picker.blockSignals(False)
+        if amount_input is not None:
+            amount_input.blockSignals(True)
+            amount_input.setValue(max(float(defaults["amount"] or 0.0), 0.0))
+            amount_input.blockSignals(False)
+        if price_input is not None:
+            price_input.blockSignals(True)
+            price_input.setText("" if defaults["price"] is None else str(defaults["price"]))
+            price_input.blockSignals(False)
+        if stop_price_input is not None:
+            stop_price_input.blockSignals(True)
+            stop_price_input.setText("" if defaults["stop_price"] is None else str(defaults["stop_price"]))
+            stop_price_input.blockSignals(False)
+        if stop_loss_input is not None:
+            stop_loss_input.blockSignals(True)
+            stop_loss_input.setText("" if defaults["stop_loss"] is None else str(defaults["stop_loss"]))
+            stop_loss_input.blockSignals(False)
+        if take_profit_input is not None:
+            take_profit_input.blockSignals(True)
+            take_profit_input.setText("" if defaults["take_profit"] is None else str(defaults["take_profit"]))
+            take_profit_input.blockSignals(False)
+
+        window._manual_trade_source = defaults["source"]
+        if hint is not None:
+            if defaults["source"] in {"chart_double_click", "chart_context_menu"} and defaults["price"] is not None:
+                hint.setText(
+                    f"Chart captured {defaults['symbol']} at {defaults['price']:.6f}. "
+                    "Auto SL and TP were suggested from recent price action. Adjust them if needed before submitting."
+                )
+            else:
+                hint.setText("Entry, stop loss, and take profit were auto-suggested from the current chart. Adjust them before sending if you want.")
+        self._refresh_manual_trade_ticket(window)
+
+    def _open_manual_trade(self, prefill=None):
         if not getattr(self.controller, "broker", None):
             QMessageBox.warning(self, "Manual Order", "Connect a broker before placing an order.")
             return
+        window = self._get_or_create_tool_window(
+            "manual_trade_ticket",
+            "Manual Trade Ticket",
+            width=560,
+            height=460,
+        )
 
-        symbol_options = list(getattr(self.controller, "symbols", []) or [])
-        default_symbol = self._current_chart_symbol() or getattr(self, "symbol", None) or ""
-        if default_symbol and default_symbol not in symbol_options:
-            symbol_options.insert(0, default_symbol)
-        if not symbol_options:
-            symbol_options = [default_symbol] if default_symbol else []
+        if getattr(window, "_manual_trade_container", None) is None:
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
 
-        if symbol_options:
-            default_index = max(symbol_options.index(default_symbol), 0) if default_symbol in symbol_options else 0
-            symbol, ok = QInputDialog.getItem(
-                self,
-                "Manual Order",
-                "Symbol:",
-                symbol_options,
-                default_index,
-                True,
+            hint = QLabel("Set symbol, side, size, entry, stop loss, and take profit before sending the order.")
+            hint.setWordWrap(True)
+            hint.setStyleSheet(
+                "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
+                "border-radius: 12px; padding: 12px; font-size: 13px; font-weight: 600;"
             )
-            if not ok:
-                return
-            symbol = str(symbol).strip()
-        else:
-            symbol, ok = QInputDialog.getText(self, "Manual Order", "Symbol:")
-            if not ok:
-                return
-            symbol = str(symbol).strip()
+            layout.addWidget(hint)
+
+            form = QFormLayout()
+            form.setSpacing(10)
+
+            symbol_picker = QComboBox()
+            symbol_picker.setEditable(True)
+            side_picker = QComboBox()
+            side_picker.addItems(["buy", "sell"])
+            type_picker = QComboBox()
+            type_picker.addItems(["market", "limit", "stop_limit"])
+            amount_input = QDoubleSpinBox()
+            amount_input.setRange(0.0, 1_000_000_000.0)
+            amount_input.setDecimals(8)
+            amount_input.setValue(1.0)
+            price_input = QLineEdit()
+            stop_price_input = QLineEdit()
+            stop_loss_input = QLineEdit()
+            take_profit_input = QLineEdit()
+
+            form.addRow("Symbol", symbol_picker)
+            form.addRow("Side", side_picker)
+            form.addRow("Order Type", type_picker)
+            form.addRow("Amount", amount_input)
+            price_label = QLabel("Entry Price")
+            form.addRow(price_label, price_input)
+            stop_price_label = QLabel("Stop Trigger")
+            form.addRow(stop_price_label, stop_price_input)
+            form.addRow("Stop Loss", stop_loss_input)
+            form.addRow("Take Profit", take_profit_input)
+            layout.addLayout(form)
+
+            status = QLabel("")
+            status.setWordWrap(True)
+            status.setStyleSheet("color: #9fb0c7; padding: 4px 0;")
+            layout.addWidget(status)
+
+            controls = QHBoxLayout()
+            buy_limit_btn = QPushButton("Buy Limit")
+            sell_limit_btn = QPushButton("Sell Limit")
+            submit_btn = QPushButton("Submit Order")
+            reset_btn = QPushButton("Reset Ticket")
+            buy_limit_btn.setStyleSheet(
+                "QPushButton { background-color:#163726; color:#dcfff0; border:1px solid #2e8a5b; border-radius:10px; padding:8px 12px; font-weight:700; }"
+                "QPushButton:hover { background-color:#1c4a32; }"
+            )
+            sell_limit_btn.setStyleSheet(
+                "QPushButton { background-color:#46181c; color:#ffe0e3; border:1px solid #b45b68; border-radius:10px; padding:8px 12px; font-weight:700; }"
+                "QPushButton:hover { background-color:#5b2127; }"
+            )
+            controls.addStretch()
+            controls.addWidget(buy_limit_btn)
+            controls.addWidget(sell_limit_btn)
+            controls.addWidget(reset_btn)
+            controls.addWidget(submit_btn)
+            layout.addLayout(controls)
+
+            symbol_picker.currentTextChanged.connect(lambda *_: self._refresh_manual_trade_ticket(window))
+            side_picker.currentTextChanged.connect(lambda *_: self._refresh_manual_trade_ticket(window))
+            type_picker.currentTextChanged.connect(lambda *_: self._refresh_manual_trade_ticket(window))
+            amount_input.valueChanged.connect(lambda *_: self._refresh_manual_trade_ticket(window))
+            price_input.textChanged.connect(lambda *_: self._refresh_manual_trade_ticket(window))
+            stop_price_input.textChanged.connect(lambda *_: self._refresh_manual_trade_ticket(window))
+            stop_loss_input.textChanged.connect(lambda *_: self._refresh_manual_trade_ticket(window))
+            take_profit_input.textChanged.connect(lambda *_: self._refresh_manual_trade_ticket(window))
+            price_input.editingFinished.connect(lambda: self._apply_manual_trade_price_field_format(window, "_manual_trade_price_input"))
+            stop_price_input.editingFinished.connect(lambda: self._apply_manual_trade_price_field_format(window, "_manual_trade_stop_price_input"))
+            stop_loss_input.editingFinished.connect(lambda: self._apply_manual_trade_price_field_format(window, "_manual_trade_stop_loss_input"))
+            take_profit_input.editingFinished.connect(lambda: self._apply_manual_trade_price_field_format(window, "_manual_trade_take_profit_input"))
+            reset_btn.clicked.connect(lambda: self._populate_manual_trade_ticket(window, None))
+            submit_btn.clicked.connect(lambda: self._submit_manual_trade_from_ticket(window))
+            buy_limit_btn.clicked.connect(lambda: self._submit_manual_trade_side(window, "buy"))
+            sell_limit_btn.clicked.connect(lambda: self._submit_manual_trade_side(window, "sell"))
+
+            window.setCentralWidget(container)
+            window._manual_trade_container = container
+            window._manual_trade_hint = hint
+            window._manual_trade_symbol_picker = symbol_picker
+            window._manual_trade_side_picker = side_picker
+            window._manual_trade_type_picker = type_picker
+            window._manual_trade_amount_input = amount_input
+            window._manual_trade_price_label = price_label
+            window._manual_trade_price_input = price_input
+            window._manual_trade_stop_price_label = stop_price_label
+            window._manual_trade_stop_price_input = stop_price_input
+            window._manual_trade_stop_loss_input = stop_loss_input
+            window._manual_trade_take_profit_input = take_profit_input
+            window._manual_trade_status = status
+            window._manual_trade_submit_btn = submit_btn
+            window._manual_trade_reset_btn = reset_btn
+            window._manual_trade_buy_limit_btn = buy_limit_btn
+            window._manual_trade_sell_limit_btn = sell_limit_btn
+            window._manual_trade_source = "manual"
+            window.destroyed.connect(lambda *_: self._clear_trade_overlays())
+
+        self._populate_manual_trade_ticket(window, prefill=prefill)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _submit_manual_trade_from_ticket(self, window):
+        if window is None:
+            return
+        symbol_picker = getattr(window, "_manual_trade_symbol_picker", None)
+        side_picker = getattr(window, "_manual_trade_side_picker", None)
+        type_picker = getattr(window, "_manual_trade_type_picker", None)
+        amount_input = getattr(window, "_manual_trade_amount_input", None)
+        price_input = getattr(window, "_manual_trade_price_input", None)
+        stop_loss_input = getattr(window, "_manual_trade_stop_loss_input", None)
+        take_profit_input = getattr(window, "_manual_trade_take_profit_input", None)
+
+        symbol = str(symbol_picker.currentText() or "").strip() if symbol_picker is not None else ""
+        side = str(side_picker.currentText() or "").strip().lower() if side_picker is not None else "buy"
+        order_type = str(type_picker.currentText() or "").strip().lower() if type_picker is not None else "market"
+        amount = float(amount_input.value() or 0.0) if amount_input is not None else 0.0
+        price_text = str(price_input.text() or "").strip() if price_input is not None else ""
+        stop_price_text = str(stop_price_input.text() or "").strip() if stop_price_input is not None else ""
+        stop_loss_text = str(stop_loss_input.text() or "").strip() if stop_loss_input is not None else ""
+        take_profit_text = str(take_profit_input.text() or "").strip() if take_profit_input is not None else ""
 
         if not symbol:
             QMessageBox.warning(self, "Manual Order", "A symbol is required.")
             return
-
-        side, ok = QInputDialog.getItem(
-            self,
-            "Manual Order",
-            "Side:",
-            ["buy", "sell"],
-            0,
-            False,
-        )
-        if not ok:
+        amount, amount_error = self._validate_manual_trade_amount(symbol, amount)
+        if amount_error:
+            QMessageBox.warning(self, "Manual Order", amount_error)
             return
 
-        order_type, ok = QInputDialog.getItem(
-            self,
-            "Manual Order",
-            "Order Type:",
-            ["market", "limit"],
-            0,
-            False,
-        )
-        if not ok:
+        price = self._normalize_manual_trade_price(symbol, price_text) if price_text else None
+        if order_type in {"limit", "stop_limit"} and (price is None or price <= 0):
+            QMessageBox.warning(self, "Manual Order", "Limit orders require a positive entry price.")
             return
-
-        amount, ok = QInputDialog.getDouble(
-            self,
-            "Manual Order",
-            "Amount:",
-            1.0,
-            0.0,
-            1_000_000_000.0,
-            8,
-        )
-        if not ok:
+        stop_price = self._normalize_manual_trade_price(symbol, stop_price_text) if stop_price_text else None
+        if order_type == "stop_limit" and (stop_price is None or stop_price <= 0):
+            QMessageBox.warning(self, "Manual Order", "Stop-limit orders require a positive stop trigger price.")
             return
-
-        price = None
-        if order_type == "limit":
-            price, ok = QInputDialog.getDouble(
-                self,
-                "Manual Order",
-                "Limit Price:",
-                0.0,
-                0.0,
-                1_000_000_000.0,
-                8,
-            )
-            if not ok:
-                return
-            if price <= 0:
-                QMessageBox.warning(self, "Manual Order", "Limit orders require a positive price.")
-                return
-
-        stop_loss, ok = QInputDialog.getDouble(
-            self,
-            "Manual Order",
-            "Stop Loss (0 to skip):",
-            0.0,
-            0.0,
-            1_000_000_000.0,
-            8,
-        )
-        if not ok:
-            return
-
-        take_profit, ok = QInputDialog.getDouble(
-            self,
-            "Manual Order",
-            "Take Profit (0 to skip):",
-            0.0,
-            0.0,
-            1_000_000_000.0,
-            8,
-        )
-        if not ok:
-            return
+        stop_loss = self._normalize_manual_trade_price(symbol, stop_loss_text) if stop_loss_text else None
+        take_profit = self._normalize_manual_trade_price(symbol, take_profit_text) if take_profit_text else None
+        self._set_manual_trade_text_field(window, "_manual_trade_price_input", price)
+        self._set_manual_trade_text_field(window, "_manual_trade_stop_price_input", stop_price)
+        self._set_manual_trade_text_field(window, "_manual_trade_stop_loss_input", stop_loss)
+        self._set_manual_trade_text_field(window, "_manual_trade_take_profit_input", take_profit)
+        amount_input.blockSignals(True)
+        amount_input.setValue(amount)
+        amount_input.blockSignals(False)
+        self._refresh_manual_trade_ticket(window)
 
         asyncio.get_event_loop().create_task(
             self._submit_manual_trade(
@@ -3449,8 +5589,9 @@ class Terminal(QMainWindow):
                 amount=amount,
                 order_type=order_type,
                 price=price,
-                stop_loss=stop_loss or None,
-                take_profit=take_profit or None,
+                stop_price=stop_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
             )
         )
 
@@ -3491,25 +5632,73 @@ class Terminal(QMainWindow):
         return window
 
     def _clone_table_widget(self, source, target):
-        target.clear()
-        target.setColumnCount(source.columnCount())
-        target.setRowCount(source.rowCount())
+        if not self._is_qt_object_alive(source) or not self._is_qt_object_alive(target):
+            return
+        if self._monitor_table_is_busy(target):
+            return
 
-        headers = []
-        for col in range(source.columnCount()):
-            header_item = source.horizontalHeaderItem(col)
-            headers.append(header_item.text() if header_item else f"Column {col + 1}")
-        target.setHorizontalHeaderLabels(headers)
+        blocked = target.blockSignals(True)
+        target.setUpdatesEnabled(False)
+        try:
+            target.clearContents()
+            target.setColumnCount(source.columnCount())
+            target.setRowCount(source.rowCount())
 
-        for row in range(source.rowCount()):
+            headers = []
             for col in range(source.columnCount()):
-                source_item = source.item(row, col)
-                if source_item is None:
-                    continue
-                target.setItem(row, col, source_item.clone())
+                header_item = source.horizontalHeaderItem(col)
+                headers.append(header_item.text() if header_item else f"Column {col + 1}")
+            target.setHorizontalHeaderLabels(headers)
 
-        target.resizeColumnsToContents()
-        target.horizontalHeader().setStretchLastSection(True)
+            for row in range(source.rowCount()):
+                for col in range(source.columnCount()):
+                    source_item = source.item(row, col)
+                    if source_item is None:
+                        continue
+                    target.setItem(row, col, source_item.clone())
+
+            target.resizeColumnsToContents()
+            target.horizontalHeader().setStretchLastSection(True)
+        finally:
+            target.setUpdatesEnabled(True)
+            target.blockSignals(blocked)
+
+    def _configure_monitor_table(self, table):
+        if table is None or not self._is_qt_object_alive(table):
+            return
+
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        table.setDragEnabled(False)
+        table.setSortingEnabled(False)
+        table.setWordWrap(False)
+        table.setCornerButtonEnabled(False)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, False)
+        if table.viewport() is not None:
+            table.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, False)
+        table.setStyleSheet(
+            "QTableWidget { background-color: #0f1726; color: #d9e6f7; gridline-color: #20324d; }"
+            "QTableWidget::item:selected { background-color: #1c3150; color: #ffffff; }"
+        )
+
+    def _monitor_table_is_busy(self, table):
+        if table is None or not self._is_qt_object_alive(table):
+            return True
+
+        try:
+            viewport = table.viewport()
+        except Exception:
+            viewport = None
+
+        mouse_pressed = QApplication.mouseButtons() != Qt.MouseButton.NoButton
+        if mouse_pressed and (table.underMouse() or (viewport is not None and viewport.underMouse())):
+            return True
+
+        return bool(table.hasFocus() or (viewport is not None and viewport.hasFocus()))
 
     def _sync_logs_window(self, editor):
         source_text = self.system_console.console.toPlainText()
@@ -3556,7 +5745,7 @@ class Terminal(QMainWindow):
         table = getattr(window, "_monitor_table", None)
         if table is None:
             table = QTableWidget()
-            table.setAlternatingRowColors(True)
+            self._configure_monitor_table(table)
             window.setCentralWidget(table)
             window._monitor_table = table
 
@@ -3730,6 +5919,32 @@ class Terminal(QMainWindow):
             summary.setStyleSheet("color: #9fb0c7;")
             layout.addWidget(summary)
 
+            selection_frame = QFrame()
+            selection_frame.setStyleSheet(
+                "QFrame { background-color: #0f1727; border: 1px solid #24344f; border-radius: 10px; }"
+                "QLabel { color: #d7dfeb; font-weight: 700; }"
+                "QComboBox { background-color: #0b1220; color: #f4f8ff; border: 1px solid #2a3d5c; border-radius: 6px; padding: 6px 10px; min-width: 180px; }"
+            )
+            selection_layout = QGridLayout(selection_frame)
+            selection_layout.setContentsMargins(14, 12, 14, 12)
+            selection_layout.setHorizontalSpacing(16)
+            selection_layout.setVerticalSpacing(8)
+
+            symbol_picker = QComboBox()
+            symbol_picker.setEditable(False)
+            strategy_picker = QComboBox()
+            strategy_picker.setEditable(False)
+            timeframe_picker = QComboBox()
+            timeframe_picker.setEditable(False)
+
+            selection_layout.addWidget(QLabel("Backtest Symbol"), 0, 0)
+            selection_layout.addWidget(symbol_picker, 0, 1)
+            selection_layout.addWidget(QLabel("Backtest Strategy"), 0, 2)
+            selection_layout.addWidget(strategy_picker, 0, 3)
+            selection_layout.addWidget(QLabel("Timeframe"), 1, 0)
+            selection_layout.addWidget(timeframe_picker, 1, 1)
+            layout.addWidget(selection_frame)
+
             settings_frame = QFrame()
             settings_frame.setStyleSheet(
                 "QFrame { background-color: #101b2d; border: 1px solid #24344f; border-radius: 10px; }"
@@ -3838,6 +6053,9 @@ class Terminal(QMainWindow):
             window._backtest_container = container
             window._backtest_status = status
             window._backtest_summary = summary
+            window._backtest_symbol_picker = symbol_picker
+            window._backtest_strategy_picker = strategy_picker
+            window._backtest_timeframe_picker = timeframe_picker
             window._backtest_setting_labels = setting_labels
             window._backtest_metric_labels = metric_labels
             window._backtest_tabs = tabs
@@ -3847,7 +6065,11 @@ class Terminal(QMainWindow):
             window._backtest_journal = journal_text
             window._backtest_toggle_btn = toggle_btn
             window._backtest_report_btn = report_btn
+            symbol_picker.currentTextChanged.connect(lambda _text: _hotfix_backtest_selection_changed(self))
+            strategy_picker.currentTextChanged.connect(lambda _text: _hotfix_backtest_selection_changed(self))
+            timeframe_picker.currentTextChanged.connect(lambda _text: _hotfix_backtest_selection_changed(self))
 
+        _hotfix_refresh_backtest_selectors(self, window)
         self._refresh_backtest_window(window)
         window.show()
         window.raise_()
@@ -3869,6 +6091,9 @@ class Terminal(QMainWindow):
         journal_view = getattr(window, "_backtest_journal", None)
         toggle_btn = getattr(window, "_backtest_toggle_btn", None)
         report_btn = getattr(window, "_backtest_report_btn", None)
+        symbol_picker = getattr(window, "_backtest_symbol_picker", None)
+        strategy_picker = getattr(window, "_backtest_strategy_picker", None)
+        timeframe_picker = getattr(window, "_backtest_timeframe_picker", None)
         if (
             status is None
             or summary is None
@@ -3885,9 +6110,11 @@ class Terminal(QMainWindow):
         dataset = backtest_context.get("data")
         candle_count = len(dataset) if hasattr(dataset, "__len__") else 0
         has_engine = hasattr(self, "backtest_engine")
-        symbol = backtest_context.get("symbol", "-")
+        selected_symbol = str(symbol_picker.currentText()).strip() if symbol_picker is not None else ""
+        selected_strategy = str(strategy_picker.currentText()).strip() if strategy_picker is not None else ""
+        symbol = backtest_context.get("symbol", selected_symbol or "-")
         timeframe = backtest_context.get("timeframe", "-")
-        strategy_name = backtest_context.get("strategy_name") or getattr(self.controller, "strategy_name", None) or getattr(getattr(self.controller, "config", None), "strategy", "Trend Following")
+        strategy_name = backtest_context.get("strategy_name") or selected_strategy or getattr(self.controller, "strategy_name", None) or getattr(getattr(self.controller, "config", None), "strategy", "Trend Following")
         spread_pct = float(getattr(self.controller, "spread_pct", 0.0) or 0.0)
         initial_deposit = float(getattr(self.controller, "initial_capital", 10000) or 10000)
         range_text = self._format_backtest_range(dataset)
@@ -3898,6 +6125,12 @@ class Terminal(QMainWindow):
             toggle_btn.setText("Stop Backtest" if running else "Start Backtest")
         if report_btn is not None:
             report_btn.setEnabled((not running) and getattr(self, "results", None) is not None)
+        if symbol_picker is not None:
+            symbol_picker.setEnabled(not running)
+        if strategy_picker is not None:
+            strategy_picker.setEnabled(not running)
+        if timeframe_picker is not None:
+            timeframe_picker.setEnabled(not running)
 
         default_message = "Backtest stop requested..." if stop_requested else ("Backtest running..." if running else ("Strategy tester ready." if has_engine else "Backtest engine not initialized."))
         status.setText(message or default_message)
@@ -4107,6 +6340,13 @@ class Terminal(QMainWindow):
 
     def _show_about(self):
         version_text = html.escape(self._app_version_text())
+        license_status = {}
+        if hasattr(self.controller, "get_license_status"):
+            try:
+                license_status = self.controller.get_license_status()
+            except Exception:
+                license_status = {}
+        license_summary = html.escape(str(license_status.get("summary", "License status unavailable") or "License status unavailable"))
         self._open_text_window(
             "about_window",
             "About Sopotek Trading",
@@ -4114,6 +6354,7 @@ class Terminal(QMainWindow):
             <h2>Sopotek Trading Platform</h2>
             <p><b>Built by:</b> Sopotek Corporation</p>
             <p><b>Version:</b> {version_text}</p>
+            <p><b>License:</b> {license_summary}</p>
             <p><b>Purpose:</b> AI-assisted multi-broker trading workstation for live trading, paper trading, analytics, and historical testing.</p>
             <p><b>Main capabilities:</b> live charts, AI signal monitoring, orderbook analysis, risk controls, backtesting, strategy optimization, and broker abstraction across crypto, stocks, forex, paper, and Stellar.</p>
             <p><b>Best use:</b> start in paper mode, validate charts and signals, confirm balances and risk limits, then move into live trading only after the setup looks stable.</p>
@@ -4123,6 +6364,10 @@ class Terminal(QMainWindow):
             width=700,
             height=520,
         )
+
+    def _open_license_manager(self):
+        if hasattr(self.controller, "show_license_dialog"):
+            self.controller.show_license_dialog(self)
 
     def _app_version_text(self):
         repo_root = Path(__file__).resolve().parents[3]
@@ -4265,6 +6510,7 @@ class Terminal(QMainWindow):
         amount,
         order_type="market",
         price=None,
+        stop_price=None,
         stop_loss=None,
         take_profit=None,
     ):
@@ -4278,8 +6524,13 @@ class Terminal(QMainWindow):
                     amount=amount,
                     type=order_type,
                     price=price,
+                    stop_price=stop_price,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
+                    source="manual",
+                    strategy_name="Manual",
+                    reason="Manual order",
+                    confidence=1.0,
                 )
             else:
                 order = await self.controller.broker.create_order(
@@ -4288,9 +6539,12 @@ class Terminal(QMainWindow):
                     amount=amount,
                     type=order_type,
                     price=price,
+                    stop_price=stop_price,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                 )
+                if isinstance(order, dict):
+                    order.setdefault("source", "manual")
 
             if not order:
                 self._show_async_message(
@@ -4337,7 +6591,7 @@ class Terminal(QMainWindow):
             )
         return tracked
 
-    async def _close_all_positions_async(self):
+    async def _close_all_positions_async(self, show_dialog=True):
         broker = getattr(self.controller, "broker", None)
         if broker is None:
             return
@@ -4365,25 +6619,28 @@ class Terminal(QMainWindow):
 
             count = len(results or [])
             if count == 0:
-                QMessageBox.information(
-                    self,
-                    "Close Positions",
-                    "No open positions were found to close.",
-                )
+                if show_dialog:
+                    QMessageBox.information(
+                        self,
+                        "Close Positions",
+                        "No open positions were found to close.",
+                    )
                 return
 
             self.system_console.log(f"Closed {count} position(s).", "INFO")
-            QMessageBox.information(
-                self,
-                "Close Positions",
-                f"Submitted {count} closing order(s).",
-            )
+            if show_dialog:
+                QMessageBox.information(
+                    self,
+                    "Close Positions",
+                    f"Submitted {count} closing order(s).",
+                )
         except Exception as exc:
             self.logger.exception("Close-all positions failed")
             self.system_console.log(f"Close positions failed: {exc}", "ERROR")
-            QMessageBox.critical(self, "Close Positions Failed", str(exc))
+            if show_dialog:
+                QMessageBox.critical(self, "Close Positions Failed", str(exc))
 
-    async def _cancel_all_orders_async(self):
+    async def _cancel_all_orders_async(self, show_dialog=True):
         broker = getattr(self.controller, "broker", None)
         if broker is None:
             return
@@ -4403,15 +6660,17 @@ class Terminal(QMainWindow):
             self._latest_open_orders_snapshot = []
             self._populate_open_orders_table(self._latest_open_orders_snapshot)
             self._schedule_open_orders_refresh()
-            QMessageBox.information(
-                self,
-                "Cancel Orders",
-                "Canceled all open orders." if count else "No open orders were found.",
-            )
+            if show_dialog:
+                QMessageBox.information(
+                    self,
+                    "Cancel Orders",
+                    "Canceled all open orders." if count else "No open orders were found.",
+                )
         except Exception as exc:
             self.logger.exception("Cancel-all orders failed")
             self.system_console.log(f"Cancel orders failed: {exc}", "ERROR")
-            QMessageBox.critical(self, "Cancel Orders Failed", str(exc))
+            if show_dialog:
+                QMessageBox.critical(self, "Cancel Orders Failed", str(exc))
 
     def _open_docs(self):
         self._open_text_window(
@@ -4614,6 +6873,10 @@ class Terminal(QMainWindow):
                 "Realized Trades",
                 "Win Rate",
                 "Profit Factor",
+                "Fees",
+                "Execution Drag",
+                "Avg Spread",
+                "Avg Slippage",
                 "Sharpe Ratio",
                 "Sortino Ratio",
                 "Max Drawdown",
@@ -4675,6 +6938,1745 @@ class Terminal(QMainWindow):
             window._sync_timer = sync_timer
 
         self._refresh_performance_window(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _populate_closed_journal_table(self, table, rows):
+        if table is None or not self._is_qt_object_alive(table):
+            return
+        table.setRowCount(len(rows or []))
+        for row_index, row in enumerate(rows or []):
+            values = [
+                row.get("timestamp", ""),
+                row.get("symbol", ""),
+                self._format_trade_source_label(row.get("source", "")),
+                row.get("side", ""),
+                row.get("price", ""),
+                row.get("size", ""),
+                row.get("order_type", ""),
+                row.get("status", ""),
+                row.get("order_id", ""),
+                row.get("pnl", ""),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(self._format_trade_log_value(value))
+                table.setItem(row_index, column, item)
+            tooltip_lines = []
+            if row.get("strategy_name"):
+                tooltip_lines.append(f"Strategy: {row.get('strategy_name')}")
+            if row.get("reason"):
+                tooltip_lines.append(f"Reason: {row.get('reason')}")
+            if row.get("setup"):
+                tooltip_lines.append(f"Setup: {row.get('setup')}")
+            if row.get("outcome"):
+                tooltip_lines.append(f"Outcome: {row.get('outcome')}")
+            if row.get("lessons"):
+                tooltip_lines.append(f"Lessons: {row.get('lessons')}")
+            if self._safe_float(row.get("stop_loss")) is not None:
+                tooltip_lines.append(f"Stop Loss: {self._format_trade_log_value(row.get('stop_loss'))}")
+            if self._safe_float(row.get("take_profit")) is not None:
+                tooltip_lines.append(f"Take Profit: {self._format_trade_log_value(row.get('take_profit'))}")
+            if self._safe_float(row.get("confidence")) is not None:
+                tooltip_lines.append(f"Confidence: {float(row.get('confidence')) * 100.0:.1f}%")
+            if self._safe_float(row.get("spread_bps")) is not None:
+                tooltip_lines.append(f"Spread: {float(row.get('spread_bps')):.2f} bps")
+            if self._safe_float(row.get("slippage_bps")) is not None:
+                tooltip_lines.append(f"Slippage: {float(row.get('slippage_bps')):.2f} bps")
+            if self._safe_float(row.get("fee")) is not None:
+                tooltip_lines.append(f"Fee: {self._format_currency(row.get('fee'))}")
+            tooltip = "\n".join(tooltip_lines)
+            if tooltip:
+                for column in range(table.columnCount()):
+                    item = table.item(row_index, column)
+                    if item is not None:
+                        item.setToolTip(tooltip)
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+
+    def _schedule_closed_journal_refresh(self, window):
+        if window is None or not self._is_qt_object_alive(window):
+            return
+        task = getattr(window, "_closed_refresh_task", None)
+        if task is not None and not task.done():
+            return
+        try:
+            window._closed_refresh_task = asyncio.get_event_loop().create_task(
+                self._refresh_closed_journal_async(window)
+            )
+        except Exception as exc:
+            self.logger.debug("Unable to schedule closed journal refresh: %s", exc)
+
+    async def _refresh_closed_journal_async(self, window):
+        if window is None or not self._is_qt_object_alive(window):
+            return
+        controller = self.controller
+        table = getattr(window, "_closed_journal_table", None)
+        summary = getattr(window, "_closed_journal_summary", None)
+        if (
+            table is None
+            or summary is None
+            or not self._is_qt_object_alive(table)
+            or not self._is_qt_object_alive(summary)
+        ):
+            return
+        try:
+            rows = await controller.fetch_trade_history(limit=220)
+        except Exception as exc:
+            rows = []
+            self.logger.debug("Closed journal refresh failed: %s", exc)
+        if (
+            window is None
+            or not self._is_qt_object_alive(window)
+            or not self._is_qt_object_alive(table)
+            or not self._is_qt_object_alive(summary)
+        ):
+            return
+        window._closed_journal_rows = list(rows or [])
+        self._populate_closed_journal_table(table, rows)
+        summary.setText(
+            f"Closed journal shows {len(rows)} merged broker and local trade-history rows. Double-click a row for post-trade review."
+        )
+
+    def _open_closed_journal_window(self):
+        window = self._get_or_create_tool_window(
+            "closed_trade_journal",
+            "Closed Trade Journal",
+            width=1120,
+            height=620,
+        )
+
+        if getattr(window, "_closed_journal_table", None) is None:
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+
+            summary = QLabel("Loading closed-trade history from broker and local trade records.")
+            summary.setWordWrap(True)
+            summary.setStyleSheet(
+                "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
+                "border-radius: 12px; padding: 12px; font-size: 13px; font-weight: 600;"
+            )
+            layout.addWidget(summary)
+
+            controls = QHBoxLayout()
+            refresh_btn = QPushButton("Refresh")
+            refresh_btn.clicked.connect(lambda: self._schedule_closed_journal_refresh(window))
+            review_btn = QPushButton("Review Trade")
+            review_btn.clicked.connect(lambda: self._open_trade_review_from_journal(window))
+            summary_btn = QPushButton("Weekly/Monthly Review")
+            summary_btn.clicked.connect(self._open_trade_journal_review_window)
+            controls.addWidget(refresh_btn)
+            controls.addWidget(review_btn)
+            controls.addWidget(summary_btn)
+            controls.addStretch()
+            layout.addLayout(controls)
+
+            table = QTableWidget()
+            table.setColumnCount(10)
+            table.setHorizontalHeaderLabels(
+                ["Timestamp", "Symbol", "Source", "Side", "Price", "Size", "Order Type", "Status", "Order ID", "PnL"]
+            )
+            table.cellDoubleClicked.connect(lambda *_: self._open_trade_review_from_journal(window))
+            layout.addWidget(table)
+
+            window.setCentralWidget(container)
+            window._closed_journal_summary = summary
+            window._closed_journal_table = table
+            window._closed_journal_rows = []
+            window._closed_journal_review_btn = review_btn
+            window._closed_journal_summary_btn = summary_btn
+
+            sync_timer = QTimer(window)
+            sync_timer.timeout.connect(lambda: self._schedule_closed_journal_refresh(window))
+            sync_timer.start(4000)
+            window._closed_journal_timer = sync_timer
+
+        self._schedule_closed_journal_refresh(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _default_trade_checklist_snapshot(self):
+        mode = "live" if str(getattr(getattr(self.controller, "config", None), "mode", "demo") or "demo").strip().lower() == "live" else "demo"
+        timeframe = str(getattr(self, "current_timeframe", getattr(self.controller, "time_frame", "1h")) or "1h").strip() or "1h"
+        symbol = str(self._current_chart_symbol() or getattr(self, "symbol", "") or "").strip()
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        current_time = datetime.now().strftime("%H:%M")
+        watch_symbols = [symbol] if symbol else []
+        while len(watch_symbols) < 4:
+            watch_symbols.append("")
+        return {
+            "account": str(getattr(self.controller, "current_account_label", lambda: "")() or "").strip(),
+            "date": current_date,
+            "time": current_time,
+            "timeframe": timeframe,
+            "mode": mode,
+            "watch_symbols": watch_symbols[:4],
+            "news_bias": "",
+            "strategy_setup": "",
+            "setup_timeframe": timeframe,
+            "higher_tf_confirmed": "",
+            "entry_trigger": "",
+            "stop_loss_reason": "",
+            "take_profit_reason": "",
+            "risk_reward_target": "",
+            "account_equity": "",
+            "risk_per_trade": "",
+            "risk_dollar": "",
+            "stop_distance": "",
+            "position_formula": "Position lots = Risk $ / (Stop distance * pip/point value per lot)",
+            "exit_reason": "",
+            "actual_pnl": "",
+            "actual_pnl_pct": "",
+            "trade_duration": "",
+            "action_items": "",
+            "daily_max_loss": "",
+            "ai_enabled": "Y" if getattr(self, "autotrading_enabled", False) else "N",
+            "telegram_alerts": "Y" if getattr(self.controller, "telegram_enabled", False) else "N",
+            "journal_coverage": "Y",
+            "trader_name": "",
+            "signature": "",
+            "review_date": current_date,
+            "checkboxes": {
+                "economic_calendar": False,
+                "market_session": False,
+                "recent_news": False,
+                "spread_slippage": False,
+                "orders_placed_on_chart": False,
+                "size_matches_risk": False,
+                "planned_screenshot": False,
+                "stop_adjustment_rule": False,
+                "close_on_invalidation": False,
+                "no_averaging": False,
+                "journal_logged": False,
+                "weekly_review": False,
+                "daily_max_loss_rule": False,
+                "avoid_major_news": False,
+                "fixed_position_sizing": False,
+            },
+        }
+
+    def _trade_checklist_snapshot(self, window):
+        snapshot = self._default_trade_checklist_snapshot()
+        snapshot.update(
+            {
+                "account": window._trade_checklist_account.text().strip(),
+                "date": window._trade_checklist_date.text().strip(),
+                "time": window._trade_checklist_time.text().strip(),
+                "timeframe": window._trade_checklist_timeframe.text().strip(),
+                "mode": str(window._trade_checklist_mode.currentData() or "demo"),
+                "watch_symbols": [
+                    window._trade_checklist_watch_1.text().strip(),
+                    window._trade_checklist_watch_2.text().strip(),
+                    window._trade_checklist_watch_3.text().strip(),
+                    window._trade_checklist_watch_4.text().strip(),
+                ],
+                "news_bias": window._trade_checklist_news_bias.text().strip(),
+                "strategy_setup": window._trade_checklist_strategy_setup.toPlainText().strip(),
+                "setup_timeframe": window._trade_checklist_setup_timeframe.text().strip(),
+                "higher_tf_confirmed": window._trade_checklist_higher_tf.text().strip(),
+                "entry_trigger": window._trade_checklist_entry_trigger.toPlainText().strip(),
+                "stop_loss_reason": window._trade_checklist_stop_loss.toPlainText().strip(),
+                "take_profit_reason": window._trade_checklist_take_profit.toPlainText().strip(),
+                "risk_reward_target": window._trade_checklist_rr_target.text().strip(),
+                "account_equity": window._trade_checklist_equity.text().strip(),
+                "risk_per_trade": window._trade_checklist_risk_per_trade.text().strip(),
+                "risk_dollar": window._trade_checklist_risk_dollar.text().strip(),
+                "stop_distance": window._trade_checklist_stop_distance.text().strip(),
+                "position_formula": window._trade_checklist_position_formula.text().strip(),
+                "exit_reason": window._trade_checklist_exit_reason.text().strip(),
+                "actual_pnl": window._trade_checklist_actual_pnl.text().strip(),
+                "actual_pnl_pct": window._trade_checklist_actual_pnl_pct.text().strip(),
+                "trade_duration": window._trade_checklist_trade_duration.text().strip(),
+                "action_items": window._trade_checklist_action_items.toPlainText().strip(),
+                "daily_max_loss": window._trade_checklist_daily_max_loss.text().strip(),
+                "ai_enabled": window._trade_checklist_ai_enabled.text().strip(),
+                "telegram_alerts": window._trade_checklist_telegram_alerts.text().strip(),
+                "journal_coverage": window._trade_checklist_journal_coverage.text().strip(),
+                "trader_name": window._trade_checklist_trader_name.text().strip(),
+                "signature": window._trade_checklist_signature.text().strip(),
+                "review_date": window._trade_checklist_review_date.text().strip(),
+                "checkboxes": {
+                    key: checkbox.isChecked()
+                    for key, checkbox in getattr(window, "_trade_checklist_checkboxes", {}).items()
+                },
+            }
+        )
+        return snapshot
+
+    def _apply_trade_checklist_snapshot(self, window, snapshot):
+        data = self._default_trade_checklist_snapshot()
+        if isinstance(snapshot, dict):
+            data.update(snapshot)
+        watch_symbols = list(data.get("watch_symbols") or ["", "", "", ""])
+        while len(watch_symbols) < 4:
+            watch_symbols.append("")
+
+        window._trade_checklist_account.setText(str(data.get("account") or ""))
+        window._trade_checklist_date.setText(str(data.get("date") or ""))
+        window._trade_checklist_time.setText(str(data.get("time") or ""))
+        window._trade_checklist_timeframe.setText(str(data.get("timeframe") or ""))
+        mode_index = window._trade_checklist_mode.findData(str(data.get("mode") or "demo"))
+        window._trade_checklist_mode.setCurrentIndex(mode_index if mode_index >= 0 else 0)
+        window._trade_checklist_watch_1.setText(str(watch_symbols[0] or ""))
+        window._trade_checklist_watch_2.setText(str(watch_symbols[1] or ""))
+        window._trade_checklist_watch_3.setText(str(watch_symbols[2] or ""))
+        window._trade_checklist_watch_4.setText(str(watch_symbols[3] or ""))
+        window._trade_checklist_news_bias.setText(str(data.get("news_bias") or ""))
+        window._trade_checklist_strategy_setup.setPlainText(str(data.get("strategy_setup") or ""))
+        window._trade_checklist_setup_timeframe.setText(str(data.get("setup_timeframe") or ""))
+        window._trade_checklist_higher_tf.setText(str(data.get("higher_tf_confirmed") or ""))
+        window._trade_checklist_entry_trigger.setPlainText(str(data.get("entry_trigger") or ""))
+        window._trade_checklist_stop_loss.setPlainText(str(data.get("stop_loss_reason") or ""))
+        window._trade_checklist_take_profit.setPlainText(str(data.get("take_profit_reason") or ""))
+        window._trade_checklist_rr_target.setText(str(data.get("risk_reward_target") or ""))
+        window._trade_checklist_equity.setText(str(data.get("account_equity") or ""))
+        window._trade_checklist_risk_per_trade.setText(str(data.get("risk_per_trade") or ""))
+        window._trade_checklist_risk_dollar.setText(str(data.get("risk_dollar") or ""))
+        window._trade_checklist_stop_distance.setText(str(data.get("stop_distance") or ""))
+        window._trade_checklist_position_formula.setText(str(data.get("position_formula") or ""))
+        window._trade_checklist_exit_reason.setText(str(data.get("exit_reason") or ""))
+        window._trade_checklist_actual_pnl.setText(str(data.get("actual_pnl") or ""))
+        window._trade_checklist_actual_pnl_pct.setText(str(data.get("actual_pnl_pct") or ""))
+        window._trade_checklist_trade_duration.setText(str(data.get("trade_duration") or ""))
+        window._trade_checklist_action_items.setPlainText(str(data.get("action_items") or ""))
+        window._trade_checklist_daily_max_loss.setText(str(data.get("daily_max_loss") or ""))
+        window._trade_checklist_ai_enabled.setText(str(data.get("ai_enabled") or ""))
+        window._trade_checklist_telegram_alerts.setText(str(data.get("telegram_alerts") or ""))
+        window._trade_checklist_journal_coverage.setText(str(data.get("journal_coverage") or ""))
+        window._trade_checklist_trader_name.setText(str(data.get("trader_name") or ""))
+        window._trade_checklist_signature.setText(str(data.get("signature") or ""))
+        window._trade_checklist_review_date.setText(str(data.get("review_date") or ""))
+
+        checkbox_values = data.get("checkboxes") if isinstance(data.get("checkboxes"), dict) else {}
+        for key, checkbox in getattr(window, "_trade_checklist_checkboxes", {}).items():
+            checkbox.setChecked(bool(checkbox_values.get(key, False)))
+        self._update_trade_checklist_status(window)
+
+    def _update_trade_checklist_status(self, window, message=None):
+        if not self._is_qt_object_alive(window):
+            return
+        warning = getattr(window, "_trade_checklist_warning", None)
+        status = getattr(window, "_trade_checklist_status", None)
+        if warning is not None:
+            mode = str(window._trade_checklist_mode.currentData() or "demo")
+            equity_text = str(window._trade_checklist_equity.text() or "").replace("$", "").replace(",", "").strip()
+            equity = self._safe_float(equity_text)
+            if mode == "live" and equity is not None and equity < 100:
+                warning.setText("Live mode with equity under $100: strongly consider demo or micro-lots only.")
+                warning.setStyleSheet("color:#ffd7a8; background-color:#2a1d12; border:1px solid #8b5a2b; border-radius:10px; padding:8px 10px;")
+            else:
+                warning.setText("Checklist ready. Use it before entry, during management, and in post-trade review.")
+                warning.setStyleSheet("color:#9fd6c2; background-color:#11241d; border:1px solid #285746; border-radius:10px; padding:8px 10px;")
+        if status is not None and message is not None:
+            status.setText(message)
+
+    def _save_trade_checklist(self, window):
+        self.settings.setValue("trade_checklist/latest", json.dumps(self._trade_checklist_snapshot(window)))
+        self._update_trade_checklist_status(window, "Trade checklist saved.")
+
+    def _prefill_trade_checklist(self, window):
+        snapshot = self._default_trade_checklist_snapshot()
+        current = self._trade_checklist_snapshot(window)
+        for key in ("trader_name", "signature", "daily_max_loss", "risk_per_trade", "risk_dollar", "position_formula"):
+            snapshot[key] = current.get(key, snapshot.get(key, ""))
+        self._apply_trade_checklist_snapshot(window, snapshot)
+        self._update_trade_checklist_status(window, "Checklist prefilled from current app context.")
+
+    def _reset_trade_checklist(self, window):
+        self._apply_trade_checklist_snapshot(window, self._default_trade_checklist_snapshot())
+        self._update_trade_checklist_status(window, "Checklist reset to defaults.")
+
+    def _open_trade_checklist_window(self):
+        window = self._get_or_create_tool_window(
+            "trade_checklist",
+            "Trade Checklist",
+            width=980,
+            height=840,
+        )
+
+        if getattr(window, "_trade_checklist_container", None) is None:
+            container = QWidget()
+            root_layout = QVBoxLayout(container)
+            root_layout.setContentsMargins(12, 12, 12, 12)
+            root_layout.setSpacing(10)
+
+            intro = QLabel("Use this checklist to validate the trade before entry, manage it consistently, and review it afterward.")
+            intro.setWordWrap(True)
+            intro.setStyleSheet("color:#d9e6f7; font-weight:600; padding:4px 0;")
+            root_layout.addWidget(intro)
+
+            warning = QLabel("")
+            warning.setWordWrap(True)
+            root_layout.addWidget(warning)
+
+            button_row = QHBoxLayout()
+            prefill_btn = QPushButton("Prefill Current")
+            save_btn = QPushButton("Save Checklist")
+            reset_btn = QPushButton("Reset")
+            button_row.addWidget(prefill_btn)
+            button_row.addWidget(save_btn)
+            button_row.addWidget(reset_btn)
+            button_row.addStretch(1)
+            root_layout.addLayout(button_row)
+
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            form_holder = QWidget()
+            form_layout = QVBoxLayout(form_holder)
+            form_layout.setSpacing(12)
+
+            def section(title):
+                frame = QFrame()
+                frame.setStyleSheet(
+                    "QFrame { background-color:#101a2d; border:1px solid #20324d; border-radius:12px; }"
+                    "QLabel { color:#d8e6ff; }"
+                    "QLineEdit, QTextEdit, QComboBox { background-color:#09111f; color:#e7f0ff; border:1px solid #24344f; border-radius:8px; padding:6px; }"
+                    "QCheckBox { color:#d8e6ff; spacing:8px; }"
+                )
+                layout = QVBoxLayout(frame)
+                layout.setContentsMargins(12, 12, 12, 12)
+                layout.setSpacing(8)
+                title_label = QLabel(title)
+                title_label.setStyleSheet("font-size:14px; font-weight:700; color:#f4f8ff;")
+                layout.addWidget(title_label)
+                form_layout.addWidget(frame)
+                return layout
+
+            account_layout = section("Account & Setup")
+            account_grid = QGridLayout()
+            account = QLineEdit()
+            date_input = QLineEdit()
+            time_input = QLineEdit()
+            timeframe_input = QLineEdit()
+            mode = QComboBox()
+            mode.addItem("Demo", "demo")
+            mode.addItem("Live", "live")
+            watch_1 = QLineEdit()
+            watch_2 = QLineEdit()
+            watch_3 = QLineEdit()
+            watch_4 = QLineEdit()
+            account_grid.addWidget(QLabel("Account"), 0, 0)
+            account_grid.addWidget(account, 0, 1)
+            account_grid.addWidget(QLabel("Date"), 0, 2)
+            account_grid.addWidget(date_input, 0, 3)
+            account_grid.addWidget(QLabel("Time"), 1, 0)
+            account_grid.addWidget(time_input, 1, 1)
+            account_grid.addWidget(QLabel("Timeframe"), 1, 2)
+            account_grid.addWidget(timeframe_input, 1, 3)
+            account_grid.addWidget(QLabel("Mode"), 2, 0)
+            account_grid.addWidget(mode, 2, 1)
+            account_grid.addWidget(QLabel("Watch 1"), 3, 0)
+            account_grid.addWidget(watch_1, 3, 1)
+            account_grid.addWidget(QLabel("Watch 2"), 3, 2)
+            account_grid.addWidget(watch_2, 3, 3)
+            account_grid.addWidget(QLabel("Watch 3"), 4, 0)
+            account_grid.addWidget(watch_3, 4, 1)
+            account_grid.addWidget(QLabel("Watch 4"), 4, 2)
+            account_grid.addWidget(watch_4, 4, 3)
+            account_layout.addLayout(account_grid)
+
+            pretrade_layout = section("Pre-market / Pre-trade")
+            pretrade_checks = {
+                "economic_calendar": QCheckBox("Check economic calendar — avoid high-impact events for this trade"),
+                "market_session": QCheckBox("Confirm market session & liquidity for symbol"),
+                "recent_news": QCheckBox("Check recent news for symbol"),
+            }
+            for checkbox in pretrade_checks.values():
+                pretrade_layout.addWidget(checkbox)
+            news_bias = QLineEdit()
+            pretrade_layout.addWidget(QLabel("Recent news bias"))
+            pretrade_layout.addWidget(news_bias)
+
+            trade_layout = section("Trade Idea & Rule")
+            strategy_setup = QTextEdit()
+            strategy_setup.setMaximumHeight(70)
+            setup_timeframe = QLineEdit()
+            higher_tf = QLineEdit()
+            entry_trigger = QTextEdit()
+            entry_trigger.setMaximumHeight(60)
+            stop_loss = QTextEdit()
+            stop_loss.setMaximumHeight(60)
+            take_profit = QTextEdit()
+            take_profit.setMaximumHeight(60)
+            rr_target = QLineEdit()
+            trade_layout.addWidget(QLabel("Strategy / Setup"))
+            trade_layout.addWidget(strategy_setup)
+            trade_grid = QGridLayout()
+            trade_grid.addWidget(QLabel("Timeframe"), 0, 0)
+            trade_grid.addWidget(setup_timeframe, 0, 1)
+            trade_grid.addWidget(QLabel("Higher TF confirmed (Y/N)"), 0, 2)
+            trade_grid.addWidget(higher_tf, 0, 3)
+            trade_layout.addLayout(trade_grid)
+            trade_layout.addWidget(QLabel("Entry trigger (exact)"))
+            trade_layout.addWidget(entry_trigger)
+            trade_layout.addWidget(QLabel("Stop Loss (level & reason)"))
+            trade_layout.addWidget(stop_loss)
+            trade_layout.addWidget(QLabel("Take Profit (level & reason)"))
+            trade_layout.addWidget(take_profit)
+            trade_layout.addWidget(QLabel("Risk / Reward target (min)"))
+            trade_layout.addWidget(rr_target)
+
+            sizing_layout = section("Position Sizing")
+            sizing_grid = QGridLayout()
+            equity = QLineEdit()
+            risk_per_trade = QLineEdit()
+            risk_dollar = QLineEdit()
+            stop_distance = QLineEdit()
+            position_formula = QLineEdit()
+            sizing_grid.addWidget(QLabel("Account equity"), 0, 0)
+            sizing_grid.addWidget(equity, 0, 1)
+            sizing_grid.addWidget(QLabel("Risk per trade % or $"), 0, 2)
+            sizing_grid.addWidget(risk_per_trade, 0, 3)
+            sizing_grid.addWidget(QLabel("Calculated risk $"), 1, 0)
+            sizing_grid.addWidget(risk_dollar, 1, 1)
+            sizing_grid.addWidget(QLabel("Stop distance"), 1, 2)
+            sizing_grid.addWidget(stop_distance, 1, 3)
+            sizing_grid.addWidget(QLabel("Position size formula"), 2, 0)
+            sizing_grid.addWidget(position_formula, 2, 1, 1, 3)
+            sizing_layout.addLayout(sizing_grid)
+            sizing_layout.addWidget(QLabel("For small accounts: trade demo / micro-lots only"))
+
+            execution_layout = section("Execution / During Trade / Post-trade")
+            execution_checks = {
+                "spread_slippage": QCheckBox("Re-check spread & slippage risk"),
+                "orders_placed_on_chart": QCheckBox("Limit entry / take-profit / stop placed on chart"),
+                "size_matches_risk": QCheckBox("Confirm order size matches risk calc"),
+                "planned_screenshot": QCheckBox("Save / chart a screenshot of planned trade"),
+                "stop_adjustment_rule": QCheckBox("Do not adjust stop unless plan allows"),
+                "close_on_invalidation": QCheckBox("If invalidation is hit, close immediately"),
+                "no_averaging": QCheckBox("No averaging into a losing trade unless pre-planned"),
+            }
+            for checkbox in execution_checks.values():
+                execution_layout.addWidget(checkbox)
+            exit_grid = QGridLayout()
+            exit_reason = QLineEdit()
+            actual_pnl = QLineEdit()
+            actual_pnl_pct = QLineEdit()
+            trade_duration = QLineEdit()
+            exit_grid.addWidget(QLabel("Exit reason"), 0, 0)
+            exit_grid.addWidget(exit_reason, 0, 1, 1, 3)
+            exit_grid.addWidget(QLabel("Actual P&L $"), 1, 0)
+            exit_grid.addWidget(actual_pnl, 1, 1)
+            exit_grid.addWidget(QLabel("P&L %"), 1, 2)
+            exit_grid.addWidget(actual_pnl_pct, 1, 3)
+            exit_grid.addWidget(QLabel("Trade duration"), 2, 0)
+            exit_grid.addWidget(trade_duration, 2, 1)
+            execution_layout.addLayout(exit_grid)
+
+            review_layout = section("Journal & Review / Risk & Behavior Controls / Sopotek")
+            review_checks = {
+                "journal_logged": QCheckBox("Log trade in journal (entry, exit, size, screenshots)"),
+                "weekly_review": QCheckBox("Weekly review: Win rate, Avg RR, Expectancy, Max DD"),
+                "daily_max_loss_rule": QCheckBox("Daily max loss rule enforced"),
+                "avoid_major_news": QCheckBox("Avoid major news unless strategy is news-based"),
+                "fixed_position_sizing": QCheckBox("Keep position sizing fixed to plan"),
+            }
+            for checkbox in review_checks.values():
+                review_layout.addWidget(checkbox)
+            action_items = QTextEdit()
+            action_items.setMaximumHeight(80)
+            daily_max_loss = QLineEdit()
+            ai_enabled = QLineEdit()
+            telegram_alerts = QLineEdit()
+            journal_coverage = QLineEdit()
+            review_layout.addWidget(QLabel("Action items for improvement"))
+            review_layout.addWidget(action_items)
+            review_grid = QGridLayout()
+            review_grid.addWidget(QLabel("Daily max loss rule"), 0, 0)
+            review_grid.addWidget(daily_max_loss, 0, 1)
+            review_grid.addWidget(QLabel("AI Trading enabled?"), 1, 0)
+            review_grid.addWidget(ai_enabled, 1, 1)
+            review_grid.addWidget(QLabel("Telegram alerts set?"), 1, 2)
+            review_grid.addWidget(telegram_alerts, 1, 3)
+            review_grid.addWidget(QLabel("Journal coverage enabled?"), 2, 0)
+            review_grid.addWidget(journal_coverage, 2, 1)
+            review_layout.addLayout(review_grid)
+
+            signoff_layout = section("Sign-off")
+            signoff_grid = QGridLayout()
+            trader_name = QLineEdit()
+            signature = QLineEdit()
+            review_date = QLineEdit()
+            signoff_grid.addWidget(QLabel("Trader name"), 0, 0)
+            signoff_grid.addWidget(trader_name, 0, 1)
+            signoff_grid.addWidget(QLabel("Signature"), 0, 2)
+            signoff_grid.addWidget(signature, 0, 3)
+            signoff_grid.addWidget(QLabel("Review date"), 1, 0)
+            signoff_grid.addWidget(review_date, 1, 1)
+            signoff_layout.addLayout(signoff_grid)
+
+            form_layout.addStretch(1)
+            scroll.setWidget(form_holder)
+            root_layout.addWidget(scroll, 1)
+
+            status = QLabel("Checklist ready.")
+            status.setWordWrap(True)
+            status.setStyleSheet("color:#9fb0c7; padding-top:4px;")
+            root_layout.addWidget(status)
+
+            window.setCentralWidget(container)
+            window._trade_checklist_container = container
+            window._trade_checklist_warning = warning
+            window._trade_checklist_status = status
+            window._trade_checklist_account = account
+            window._trade_checklist_date = date_input
+            window._trade_checklist_time = time_input
+            window._trade_checklist_timeframe = timeframe_input
+            window._trade_checklist_mode = mode
+            window._trade_checklist_watch_1 = watch_1
+            window._trade_checklist_watch_2 = watch_2
+            window._trade_checklist_watch_3 = watch_3
+            window._trade_checklist_watch_4 = watch_4
+            window._trade_checklist_news_bias = news_bias
+            window._trade_checklist_strategy_setup = strategy_setup
+            window._trade_checklist_setup_timeframe = setup_timeframe
+            window._trade_checklist_higher_tf = higher_tf
+            window._trade_checklist_entry_trigger = entry_trigger
+            window._trade_checklist_stop_loss = stop_loss
+            window._trade_checklist_take_profit = take_profit
+            window._trade_checklist_rr_target = rr_target
+            window._trade_checklist_equity = equity
+            window._trade_checklist_risk_per_trade = risk_per_trade
+            window._trade_checklist_risk_dollar = risk_dollar
+            window._trade_checklist_stop_distance = stop_distance
+            window._trade_checklist_position_formula = position_formula
+            window._trade_checklist_exit_reason = exit_reason
+            window._trade_checklist_actual_pnl = actual_pnl
+            window._trade_checklist_actual_pnl_pct = actual_pnl_pct
+            window._trade_checklist_trade_duration = trade_duration
+            window._trade_checklist_action_items = action_items
+            window._trade_checklist_daily_max_loss = daily_max_loss
+            window._trade_checklist_ai_enabled = ai_enabled
+            window._trade_checklist_telegram_alerts = telegram_alerts
+            window._trade_checklist_journal_coverage = journal_coverage
+            window._trade_checklist_trader_name = trader_name
+            window._trade_checklist_signature = signature
+            window._trade_checklist_review_date = review_date
+            window._trade_checklist_checkboxes = {}
+            window._trade_checklist_checkboxes.update(pretrade_checks)
+            window._trade_checklist_checkboxes.update(execution_checks)
+            window._trade_checklist_checkboxes.update(review_checks)
+
+            prefill_btn.clicked.connect(lambda: self._prefill_trade_checklist(window))
+            save_btn.clicked.connect(lambda: self._save_trade_checklist(window))
+            reset_btn.clicked.connect(lambda: self._reset_trade_checklist(window))
+            mode.currentIndexChanged.connect(lambda *_: self._update_trade_checklist_status(window))
+            equity.textChanged.connect(lambda *_: self._update_trade_checklist_status(window))
+
+        raw_snapshot = self.settings.value("trade_checklist/latest", "")
+        try:
+            snapshot = json.loads(raw_snapshot or "{}") if raw_snapshot else {}
+        except Exception:
+            snapshot = {}
+        if not snapshot:
+            snapshot = self._default_trade_checklist_snapshot()
+        self._apply_trade_checklist_snapshot(window, snapshot)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _trade_review_selected_row(self, window):
+        table = getattr(window, "_closed_journal_table", None)
+        rows = list(getattr(window, "_closed_journal_rows", []) or [])
+        if table is None:
+            return None
+        row = table.currentRow()
+        if row < 0 or row >= len(rows):
+            return None
+        return rows[row]
+
+    def _trade_timestamp_ms(self, value):
+        if value in (None, ""):
+            return None
+        if isinstance(value, QDateTime):
+            return int(value.toMSecsSinceEpoch())
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+            if numeric > 1_000_000_000_000:
+                return int(numeric)
+            if numeric > 1_000_000_000:
+                return int(numeric * 1000)
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            if text.isdigit():
+                numeric = float(text)
+                if numeric > 1_000_000_000_000:
+                    return int(numeric)
+                if numeric > 1_000_000_000:
+                    return int(numeric * 1000)
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp() * 1000)
+        except Exception:
+            return None
+
+    def _trade_review_snapshot(self, trade, candles, trade_index):
+        if not candles:
+            return {"trade_index": 0, "post5": None, "post20": None}
+
+        entry_price = self._safe_float(trade.get("price"))
+        if entry_price is None:
+            try:
+                entry_price = float(candles[min(max(trade_index, 0), len(candles) - 1)].get("close"))
+            except Exception:
+                entry_price = None
+
+        def _move_after(offset):
+            target_index = trade_index + offset
+            if entry_price in (None, 0) or target_index >= len(candles):
+                return None
+            try:
+                target_close = float(candles[target_index].get("close"))
+            except Exception:
+                return None
+            side = str(trade.get("side") or "").strip().lower()
+            raw_move = (target_close - entry_price) / entry_price
+            return raw_move if side == "buy" else -raw_move if side == "sell" else raw_move
+
+        return {
+            "trade_index": trade_index,
+            "post5": _move_after(5),
+            "post20": _move_after(20),
+        }
+
+    def _trade_review_html(self, trade, candles, trade_index):
+        strategy = html.escape(str(trade.get("strategy_name") or "Not tagged"))
+        reason = html.escape(str(trade.get("reason") or "No reason recorded"))
+        source = html.escape(self._format_trade_source_label(trade.get("source") or "-") or "-")
+        side = html.escape(str(trade.get("side") or "-").upper())
+        status = html.escape(str(trade.get("status") or "-").upper())
+        symbol = html.escape(str(trade.get("symbol") or "-"))
+        review = self._trade_review_snapshot(trade, candles, trade_index)
+
+        lines = [
+            f"<h3 style='margin-bottom:6px;'>{symbol} | {side} | {status}</h3>",
+            f"<p><b>Source:</b> {source} | <b>Strategy:</b> {strategy}</p>",
+            f"<p><b>Why it was taken:</b> {reason}</p>",
+            f"<p><b>Entry:</b> {html.escape(self._format_trade_log_value(trade.get('price')))} | "
+            f"<b>Expected:</b> {html.escape(self._format_trade_log_value(trade.get('expected_price')))} | "
+            f"<b>Size:</b> {html.escape(self._format_trade_log_value(trade.get('size')))}</p>",
+        ]
+
+        details = []
+        confidence = self._safe_float(trade.get("confidence"))
+        if confidence is not None:
+            details.append(f"<b>Confidence:</b> {confidence * 100.0:.1f}%")
+        spread_bps = self._safe_float(trade.get("spread_bps"))
+        if spread_bps is not None:
+            details.append(f"<b>Spread:</b> {spread_bps:.2f} bps")
+        slippage_bps = self._safe_float(trade.get("slippage_bps"))
+        if slippage_bps is not None:
+            details.append(f"<b>Slippage:</b> {slippage_bps:.2f} bps")
+        fee = self._safe_float(trade.get("fee"))
+        if fee is not None:
+            details.append(f"<b>Fee:</b> {self._format_currency(fee)}")
+        pnl = self._safe_float(trade.get("pnl"))
+        if pnl is not None:
+            details.append(f"<b>Realized PnL:</b> {self._format_currency(pnl)}")
+        if details:
+            lines.append("<p>" + " | ".join(details) + "</p>")
+
+        review_bits = []
+        if review.get("post5") is not None:
+            review_bits.append(f"<b>5-candle move:</b> {self._format_percent_text(review.get('post5'))}")
+        if review.get("post20") is not None:
+            review_bits.append(f"<b>20-candle move:</b> {self._format_percent_text(review.get('post20'))}")
+        if review_bits:
+            lines.append("<p>" + " | ".join(review_bits) + "</p>")
+
+        journal_bits = []
+        stop_loss = self._safe_float(trade.get("stop_loss"))
+        take_profit = self._safe_float(trade.get("take_profit"))
+        if stop_loss is not None:
+            journal_bits.append(f"<b>Stop Loss:</b> {html.escape(self._format_trade_log_value(stop_loss))}")
+        if take_profit is not None:
+            journal_bits.append(f"<b>Take Profit:</b> {html.escape(self._format_trade_log_value(take_profit))}")
+        if trade.get("outcome"):
+            journal_bits.append(f"<b>Outcome:</b> {html.escape(str(trade.get('outcome')))}")
+        if journal_bits:
+            lines.append("<p>" + " | ".join(journal_bits) + "</p>")
+
+        if trade.get("setup"):
+            lines.append(f"<p><b>Setup:</b> {html.escape(str(trade.get('setup')))}</p>")
+        if trade.get("lessons"):
+            lines.append(f"<p><b>Lessons:</b> {html.escape(str(trade.get('lessons')))}</p>")
+
+        if not candles:
+            lines.append("<p>No candle context was available for replay.</p>")
+
+        return "".join(lines)
+
+    def _derived_trade_outcome(self, trade):
+        if not isinstance(trade, dict):
+            return ""
+        explicit = str(trade.get("outcome") or "").strip()
+        if explicit:
+            return explicit
+        pnl = self._safe_float(trade.get("pnl"))
+        status = str(trade.get("status") or "").strip().lower()
+        if pnl is not None:
+            if pnl > 0:
+                return "Win"
+            if pnl < 0:
+                return "Loss"
+            if status in {"filled", "closed"}:
+                return "Flat"
+        if status in {"rejected", "failed"}:
+            return "Rejected"
+        if status in {"canceled", "cancelled", "expired"}:
+            return "Canceled"
+        return status.title() if status else ""
+
+    def _set_text_edit_value(self, widget, value):
+        if widget is None:
+            return
+        widget.blockSignals(True)
+        widget.setPlainText(str(value or ""))
+        widget.blockSignals(False)
+
+    def _trade_review_journal_text(self, widget):
+        if widget is None:
+            return ""
+        try:
+            return str(widget.toPlainText() or "").strip()
+        except Exception:
+            return ""
+
+    def _populate_trade_review_journal_fields(self, window):
+        state = getattr(window, "_trade_review_state", {}) or {}
+        trade = state.get("trade") or {}
+        reason_edit = getattr(window, "_trade_review_reason_edit", None)
+        setup_edit = getattr(window, "_trade_review_setup_edit", None)
+        outcome_edit = getattr(window, "_trade_review_outcome_edit", None)
+        lessons_edit = getattr(window, "_trade_review_lessons_edit", None)
+        stop_loss_input = getattr(window, "_trade_review_stop_loss_input", None)
+        take_profit_input = getattr(window, "_trade_review_take_profit_input", None)
+
+        self._set_text_edit_value(reason_edit, trade.get("reason"))
+        self._set_text_edit_value(setup_edit, trade.get("setup"))
+        self._set_text_edit_value(outcome_edit, trade.get("outcome") or self._derived_trade_outcome(trade))
+        self._set_text_edit_value(lessons_edit, trade.get("lessons"))
+        if stop_loss_input is not None:
+            stop_loss_input.blockSignals(True)
+            stop_loss_input.setText("" if trade.get("stop_loss") in (None, "") else str(trade.get("stop_loss")))
+            stop_loss_input.blockSignals(False)
+        if take_profit_input is not None:
+            take_profit_input.blockSignals(True)
+            take_profit_input.setText("" if trade.get("take_profit") in (None, "") else str(trade.get("take_profit")))
+            take_profit_input.blockSignals(False)
+
+    def _merge_trade_journal_update(self, target, updated):
+        if not isinstance(target, dict):
+            return
+        for key in (
+            "trade_db_id",
+            "reason",
+            "stop_loss",
+            "take_profit",
+            "setup",
+            "outcome",
+            "lessons",
+        ):
+            if key in updated:
+                target[key] = updated.get(key)
+
+    def _sync_trade_journal_windows(self, updated_trade):
+        if not isinstance(updated_trade, dict):
+            return
+
+        trade_id = str(updated_trade.get("trade_db_id") or "").strip()
+        order_id = str(updated_trade.get("order_id") or "").strip()
+
+        closed_window = self.detached_tool_windows.get("closed_trade_journal")
+        if closed_window is not None:
+            rows = list(getattr(closed_window, "_closed_journal_rows", []) or [])
+            for row in rows:
+                row_trade_id = str(row.get("trade_db_id") or "").strip()
+                row_order_id = str(row.get("order_id") or "").strip()
+                if (trade_id and row_trade_id == trade_id) or (order_id and row_order_id == order_id):
+                    self._merge_trade_journal_update(row, updated_trade)
+            self._populate_closed_journal_table(getattr(closed_window, "_closed_journal_table", None), rows)
+
+        review_window = self.detached_tool_windows.get("trade_review")
+        if review_window is not None:
+            state = getattr(review_window, "_trade_review_state", {}) or {}
+            trade = state.get("trade") or {}
+            row_trade_id = str(trade.get("trade_db_id") or "").strip()
+            row_order_id = str(trade.get("order_id") or "").strip()
+            if (trade_id and row_trade_id == trade_id) or (order_id and row_order_id == order_id):
+                self._merge_trade_journal_update(trade, updated_trade)
+                state["trade"] = trade
+                review_window._trade_review_state = state
+                self._populate_trade_review_journal_fields(review_window)
+                self._render_trade_review_window(review_window)
+
+        journal_review_window = self.detached_tool_windows.get("trade_journal_review")
+        if journal_review_window is not None:
+            self._schedule_trade_journal_review_refresh(journal_review_window)
+
+    async def _save_trade_review_journal_async(self, window):
+        state = getattr(window, "_trade_review_state", {}) or {}
+        trade = dict(state.get("trade") or {})
+        status_label = getattr(window, "_trade_review_journal_status", None)
+        repository = getattr(self.controller, "trade_repository", None)
+        if repository is None:
+            if status_label is not None:
+                status_label.setText("Trade repository not available.")
+            return
+
+        update_payload = {
+            "trade_db_id": trade.get("trade_db_id"),
+            "order_id": trade.get("order_id"),
+            "exchange": getattr(getattr(self.controller, "broker", None), "exchange_name", None),
+            "reason": self._trade_review_journal_text(getattr(window, "_trade_review_reason_edit", None)),
+            "setup": self._trade_review_journal_text(getattr(window, "_trade_review_setup_edit", None)),
+            "outcome": self._trade_review_journal_text(getattr(window, "_trade_review_outcome_edit", None)),
+            "lessons": self._trade_review_journal_text(getattr(window, "_trade_review_lessons_edit", None)),
+            "stop_loss": str(getattr(window, "_trade_review_stop_loss_input", None).text() or "").strip()
+            if getattr(window, "_trade_review_stop_loss_input", None) is not None else "",
+            "take_profit": str(getattr(window, "_trade_review_take_profit_input", None).text() or "").strip()
+            if getattr(window, "_trade_review_take_profit_input", None) is not None else "",
+        }
+
+        if not update_payload["trade_db_id"] and not update_payload["order_id"]:
+            if status_label is not None:
+                status_label.setText("This trade cannot be journaled yet because no persistent trade id was found.")
+            return
+
+        if status_label is not None:
+            status_label.setText("Saving journal notes...")
+
+        try:
+            saved = await asyncio.to_thread(
+                repository.update_trade_journal,
+                trade_id=update_payload["trade_db_id"],
+                order_id=update_payload["order_id"],
+                exchange=update_payload["exchange"],
+                reason=update_payload["reason"],
+                stop_loss=update_payload["stop_loss"],
+                take_profit=update_payload["take_profit"],
+                setup=update_payload["setup"],
+                outcome=update_payload["outcome"],
+                lessons=update_payload["lessons"],
+            )
+        except Exception as exc:
+            self.logger.debug("Trade journal save failed: %s", exc)
+            if status_label is not None:
+                status_label.setText(f"Unable to save journal: {exc}")
+            return
+
+        if saved is None:
+            if status_label is not None:
+                status_label.setText("No matching stored trade was found to update.")
+            return
+
+        updated_trade = dict(trade)
+        updated_trade.update(
+            {
+                "trade_db_id": getattr(saved, "id", trade.get("trade_db_id")),
+                "reason": getattr(saved, "reason", None) or "",
+                "stop_loss": getattr(saved, "stop_loss", None),
+                "take_profit": getattr(saved, "take_profit", None),
+                "setup": getattr(saved, "setup", None) or "",
+                "outcome": getattr(saved, "outcome", None) or "",
+                "lessons": getattr(saved, "lessons", None) or "",
+            }
+        )
+        state["trade"] = updated_trade
+        window._trade_review_state = state
+        self._sync_trade_journal_windows(updated_trade)
+        if status_label is not None:
+            status_label.setText("Journal saved.")
+
+    def _save_trade_review_journal(self, window):
+        try:
+            asyncio.get_event_loop().create_task(self._save_trade_review_journal_async(window))
+        except Exception as exc:
+            self.logger.debug("Unable to schedule trade journal save: %s", exc)
+            status_label = getattr(window, "_trade_review_journal_status", None)
+            if status_label is not None:
+                status_label.setText("Unable to schedule journal save.")
+
+    def _render_trade_review_window(self, window):
+        state = getattr(window, "_trade_review_state", {}) or {}
+        trade = state.get("trade") or {}
+        candles = list(state.get("candles") or [])
+        summary = getattr(window, "_trade_review_summary", None)
+        details = getattr(window, "_trade_review_details", None)
+        slider = getattr(window, "_trade_review_slider", None)
+        curve = getattr(window, "_trade_review_curve", None)
+        marker = getattr(window, "_trade_review_marker", None)
+        vline = getattr(window, "_trade_review_vline", None)
+        hline = getattr(window, "_trade_review_hline", None)
+
+        if summary is not None:
+            summary.setText(
+                f"{trade.get('symbol', '-')} | {str(trade.get('side', '-')).upper()} | "
+                f"{str(trade.get('status', '-')).upper()} | Strategy: {trade.get('strategy_name') or 'Not tagged'}"
+            )
+
+        if details is not None:
+            details.setHtml(self._trade_review_html(trade, candles, int(state.get("trade_index", 0) or 0)))
+
+        if not candles or curve is None or slider is None:
+            if curve is not None:
+                curve.setData([], [])
+            if marker is not None:
+                marker.setData([], [])
+            return
+
+        trade_index = min(max(int(state.get("trade_index", 0) or 0), 0), len(candles) - 1)
+        slider.blockSignals(True)
+        slider.setMinimum(0)
+        slider.setMaximum(max(len(candles) - 1, 0))
+        slider.setValue(min(max(int(slider.value()), trade_index), len(candles) - 1))
+        slider.blockSignals(False)
+
+        visible_end = max(int(slider.value()), trade_index)
+        visible = candles[:visible_end + 1]
+        x_values = list(range(len(visible)))
+        close_values = [float(item.get("close", 0) or 0) for item in visible]
+        curve.setData(x_values, close_values)
+
+        marker_price = self._safe_float(trade.get("price"))
+        if marker_price is None and 0 <= trade_index < len(candles):
+            marker_price = self._safe_float(candles[trade_index].get("close"))
+        if marker is not None:
+            if trade_index <= visible_end and marker_price is not None:
+                marker.setData([trade_index], [marker_price])
+            else:
+                marker.setData([], [])
+        if vline is not None:
+            vline.setValue(trade_index)
+        if hline is not None and marker_price is not None:
+            hline.setValue(marker_price)
+
+    async def _load_trade_review_async(self, window, trade):
+        candles = []
+        trade_index = 0
+        try:
+            raw = await self.controller._safe_fetch_ohlcv(
+                trade.get("symbol"),
+                timeframe=self.current_timeframe,
+                limit=220,
+            )
+        except Exception as exc:
+            raw = []
+            self.logger.debug("Trade review candle load failed: %s", exc)
+
+        for row in raw or []:
+            if not isinstance(row, (list, tuple)) or len(row) < 5:
+                continue
+            candles.append(
+                {
+                    "timestamp": row[0],
+                    "open": row[1],
+                    "high": row[2],
+                    "low": row[3],
+                    "close": row[4],
+                    "volume": row[5] if len(row) > 5 else 0,
+                }
+            )
+
+        if candles:
+            target_ts = self._trade_timestamp_ms(trade.get("timestamp"))
+            if target_ts is not None:
+                indexed = []
+                for idx, candle in enumerate(candles):
+                    candle_ts = self._trade_timestamp_ms(candle.get("timestamp"))
+                    if candle_ts is None:
+                        continue
+                    indexed.append((abs(candle_ts - target_ts), idx))
+                if indexed:
+                    trade_index = min(indexed)[1]
+            trade_index = min(max(int(trade_index), 0), len(candles) - 1)
+
+        window._trade_review_state = {
+            "trade": dict(trade or {}),
+            "candles": candles,
+            "trade_index": trade_index,
+        }
+        self._populate_trade_review_journal_fields(window)
+        slider = getattr(window, "_trade_review_slider", None)
+        if slider is not None and candles:
+            slider.blockSignals(True)
+            slider.setMaximum(max(len(candles) - 1, 0))
+            slider.setValue(min(len(candles) - 1, max(trade_index + 20, trade_index)))
+            slider.blockSignals(False)
+        self._render_trade_review_window(window)
+
+    def _toggle_trade_review_playback(self, window):
+        timer = getattr(window, "_trade_review_timer", None)
+        button = getattr(window, "_trade_review_play_btn", None)
+        slider = getattr(window, "_trade_review_slider", None)
+        if timer is None or button is None or slider is None:
+            return
+        if timer.isActive():
+            timer.stop()
+            button.setText("Play Replay")
+            return
+        timer.start(220)
+        button.setText("Pause Replay")
+
+    def _advance_trade_review_playback(self, window):
+        slider = getattr(window, "_trade_review_slider", None)
+        timer = getattr(window, "_trade_review_timer", None)
+        button = getattr(window, "_trade_review_play_btn", None)
+        if slider is None or timer is None:
+            return
+        if slider.value() >= slider.maximum():
+            timer.stop()
+            if button is not None:
+                button.setText("Play Replay")
+            return
+        slider.setValue(slider.value() + 1)
+
+    def _open_trade_review_window(self, trade):
+        window = self._get_or_create_tool_window(
+            "trade_review",
+            "Trade Review",
+            width=1120,
+            height=760,
+        )
+
+        if getattr(window, "_trade_review_curve", None) is None:
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+
+            summary = QLabel("Loading trade review context.")
+            summary.setWordWrap(True)
+            summary.setStyleSheet(
+                "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
+                "border-radius: 12px; padding: 12px; font-size: 13px; font-weight: 600;"
+            )
+            layout.addWidget(summary)
+
+            controls = QHBoxLayout()
+            play_btn = QPushButton("Play Replay")
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setMinimum(0)
+            slider.setMaximum(0)
+            controls.addWidget(play_btn)
+            controls.addWidget(slider, 1)
+            layout.addLayout(controls)
+
+            plot = pg.PlotWidget()
+            self._style_performance_plot(plot, left_label="Price")
+            plot.setMinimumHeight(340)
+            curve = plot.plot(pen=pg.mkPen("#4ea1ff", width=2.2))
+            marker = pg.ScatterPlotItem(size=11, brush=pg.mkBrush("#ffb84d"), pen=pg.mkPen("#ffd37a", width=1.5))
+            plot.addItem(marker)
+            vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#ffb84d", width=1.2, style=Qt.PenStyle.DashLine))
+            hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#49d17d", width=1.0, style=Qt.PenStyle.DotLine))
+            plot.addItem(vline)
+            plot.addItem(hline)
+            layout.addWidget(plot)
+
+            details = QTextBrowser()
+            details.setStyleSheet(
+                "QTextBrowser { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; border-radius: 12px; padding: 12px; }"
+            )
+            layout.addWidget(details, 1)
+
+            journal_card = QFrame()
+            journal_card.setStyleSheet(
+                "QFrame { background-color: #101a2d; border: 1px solid #20324d; border-radius: 12px; }"
+                "QLabel { color: #d8e6ff; }"
+                "QLineEdit, QTextEdit { background-color: #09111f; color: #d8e6ff; border: 1px solid #20324d; border-radius: 8px; padding: 6px; }"
+            )
+            journal_layout = QVBoxLayout(journal_card)
+            journal_layout.setContentsMargins(12, 12, 12, 12)
+            journal_layout.setSpacing(8)
+
+            journal_title = QLabel("Trade Journal")
+            journal_title.setStyleSheet("font-size: 14px; font-weight: 700; color: #f4f8ff;")
+            journal_layout.addWidget(journal_title)
+
+            journal_form = QFormLayout()
+            reason_edit = QTextEdit()
+            reason_edit.setFixedHeight(60)
+            setup_edit = QTextEdit()
+            setup_edit.setFixedHeight(60)
+            outcome_edit = QTextEdit()
+            outcome_edit.setFixedHeight(50)
+            lessons_edit = QTextEdit()
+            lessons_edit.setFixedHeight(72)
+            stop_loss_input = QLineEdit()
+            take_profit_input = QLineEdit()
+            journal_form.addRow("Entry Reason", reason_edit)
+            journal_form.addRow("Setup", setup_edit)
+            journal_form.addRow("Stop Loss", stop_loss_input)
+            journal_form.addRow("Take Profit", take_profit_input)
+            journal_form.addRow("Outcome", outcome_edit)
+            journal_form.addRow("Lessons", lessons_edit)
+            journal_layout.addLayout(journal_form)
+
+            journal_controls = QHBoxLayout()
+            journal_status = QLabel("Add the setup, TP/SL, outcome, and lessons for this trade.")
+            journal_status.setWordWrap(True)
+            journal_status.setStyleSheet("color: #9eb4d2;")
+            save_journal_btn = QPushButton("Save Journal")
+            save_journal_btn.clicked.connect(lambda: self._save_trade_review_journal(window))
+            open_review_btn = QPushButton("Open Weekly/Monthly Review")
+            open_review_btn.clicked.connect(self._open_trade_journal_review_window)
+            journal_controls.addWidget(journal_status, 1)
+            journal_controls.addWidget(save_journal_btn)
+            journal_controls.addWidget(open_review_btn)
+            journal_layout.addLayout(journal_controls)
+
+            layout.addWidget(journal_card)
+
+            window.setCentralWidget(container)
+            window._trade_review_summary = summary
+            window._trade_review_slider = slider
+            window._trade_review_play_btn = play_btn
+            window._trade_review_curve = curve
+            window._trade_review_marker = marker
+            window._trade_review_vline = vline
+            window._trade_review_hline = hline
+            window._trade_review_details = details
+            window._trade_review_reason_edit = reason_edit
+            window._trade_review_setup_edit = setup_edit
+            window._trade_review_outcome_edit = outcome_edit
+            window._trade_review_lessons_edit = lessons_edit
+            window._trade_review_stop_loss_input = stop_loss_input
+            window._trade_review_take_profit_input = take_profit_input
+            window._trade_review_journal_status = journal_status
+            window._trade_review_save_btn = save_journal_btn
+            window._trade_review_state = {}
+
+            timer = QTimer(window)
+            timer.timeout.connect(lambda: self._advance_trade_review_playback(window))
+            window._trade_review_timer = timer
+            play_btn.clicked.connect(lambda: self._toggle_trade_review_playback(window))
+            slider.valueChanged.connect(lambda *_: self._render_trade_review_window(window))
+
+        timer = getattr(window, "_trade_review_timer", None)
+        button = getattr(window, "_trade_review_play_btn", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        if button is not None:
+            button.setText("Play Replay")
+
+        try:
+            window._trade_review_task = asyncio.get_event_loop().create_task(
+                self._load_trade_review_async(window, trade)
+            )
+        except Exception as exc:
+            self.logger.debug("Unable to schedule trade review load: %s", exc)
+            window._trade_review_state = {"trade": dict(trade or {}), "candles": [], "trade_index": 0}
+            self._populate_trade_review_journal_fields(window)
+            self._render_trade_review_window(window)
+
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _open_trade_review_from_journal(self, window):
+        trade = self._trade_review_selected_row(window)
+        if not isinstance(trade, dict):
+            QMessageBox.information(self, "Trade Review", "Select a closed trade first.")
+            return
+        self._open_trade_review_window(trade)
+
+    def _trade_datetime_utc(self, value):
+        timestamp_ms = self._trade_timestamp_ms(value)
+        if timestamp_ms is None:
+            return None
+        try:
+            return datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
+        except Exception:
+            return None
+
+    def _journal_review_bounds(self, mode):
+        now = datetime.now(timezone.utc)
+        label = str(mode or "Weekly").strip().title()
+        if label == "Monthly":
+            current_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            previous_anchor = current_start - timedelta(days=1)
+            previous_start = previous_anchor.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            label = "Weekly"
+            current_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            previous_start = current_start - timedelta(days=7)
+        return label, previous_start, current_start, now
+
+    def _rows_for_journal_period(self, rows, start_dt, end_dt):
+        selected = []
+        for row in rows or []:
+            trade_dt = self._trade_datetime_utc(row.get("timestamp"))
+            if trade_dt is None:
+                continue
+            if start_dt <= trade_dt < end_dt:
+                selected.append(row)
+        return selected
+
+    def _journal_review_analysis_rows(self, rows):
+        analysis_rows = []
+        for row in rows or []:
+            status = str(row.get("status") or "").strip().lower()
+            pnl = self._safe_float(row.get("pnl"))
+            if status in {"filled", "closed"} or pnl is not None:
+                analysis_rows.append(row)
+        return analysis_rows
+
+    def _summarize_journal_rows(self, rows):
+        trades = list(rows or [])
+        pnl_values = [self._safe_float(row.get("pnl")) for row in trades]
+        pnl_values = [value for value in pnl_values if value is not None]
+        fee_values = [self._safe_float(row.get("fee")) for row in trades]
+        fee_values = [value for value in fee_values if value is not None]
+        slippage_values = [self._safe_float(row.get("slippage_bps")) for row in trades]
+        slippage_values = [value for value in slippage_values if value is not None]
+        confidence_values = [self._safe_float(row.get("confidence")) for row in trades]
+        confidence_values = [value for value in confidence_values if value is not None]
+
+        wins = [value for value in pnl_values if value > 0]
+        losses = [value for value in pnl_values if value < 0]
+        complete_entries = 0
+        strategy_map = {}
+        symbol_loss_counts = {}
+
+        for row in trades:
+            if all(str(row.get(field) or "").strip() for field in ("reason", "setup", "outcome", "lessons")):
+                complete_entries += 1
+            strategy_name = str(row.get("strategy_name") or "Unlabeled").strip() or "Unlabeled"
+            bucket = strategy_map.setdefault(strategy_name, {"rows": [], "pnl": [], "wins": 0, "fees": 0.0})
+            bucket["rows"].append(row)
+            pnl = self._safe_float(row.get("pnl"))
+            if pnl is not None:
+                bucket["pnl"].append(pnl)
+                if pnl > 0:
+                    bucket["wins"] += 1
+                if pnl < 0:
+                    symbol = str(row.get("symbol") or "").strip() or "Unknown"
+                    symbol_loss_counts[symbol] = symbol_loss_counts.get(symbol, 0) + 1
+            fee = self._safe_float(row.get("fee"), 0.0)
+            bucket["fees"] += fee or 0.0
+
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+        strategy_rows = []
+        for strategy_name, bucket in strategy_map.items():
+            pnl_list = bucket["pnl"]
+            strategy_rows.append(
+                {
+                    "strategy": strategy_name,
+                    "trades": len(bucket["rows"]),
+                    "win_rate": (bucket["wins"] / len(pnl_list)) if pnl_list else None,
+                    "net_pnl": sum(pnl_list) if pnl_list else 0.0,
+                    "avg_pnl": (sum(pnl_list) / len(pnl_list)) if pnl_list else None,
+                    "journal_coverage": (
+                        sum(
+                            1 for item in bucket["rows"]
+                            if all(str(item.get(field) or "").strip() for field in ("reason", "setup", "outcome", "lessons"))
+                        ) / len(bucket["rows"])
+                    ) if bucket["rows"] else None,
+                    "fees": bucket["fees"],
+                }
+            )
+        strategy_rows.sort(key=lambda item: (item.get("net_pnl") is None, -(item.get("net_pnl") or 0.0), item["strategy"]))
+
+        return {
+            "trade_count": len(trades),
+            "wins": len(wins),
+            "losses": len(losses),
+            "net_pnl": sum(pnl_values) if pnl_values else 0.0,
+            "avg_pnl": (sum(pnl_values) / len(pnl_values)) if pnl_values else None,
+            "win_rate": (len(wins) / len(pnl_values)) if pnl_values else None,
+            "profit_factor": (gross_profit / gross_loss) if gross_loss > 0 else None,
+            "fees": sum(fee_values) if fee_values else 0.0,
+            "avg_slippage": (sum(slippage_values) / len(slippage_values)) if slippage_values else None,
+            "avg_confidence": (sum(confidence_values) / len(confidence_values)) if confidence_values else None,
+            "journal_coverage": (complete_entries / len(trades)) if trades else None,
+            "strategy_rows": strategy_rows,
+            "symbol_loss_counts": symbol_loss_counts,
+        }
+
+    def _journal_review_mistakes(self, rows, stats):
+        issues = []
+        missing_setup = sum(1 for row in rows if not str(row.get("setup") or "").strip())
+        missing_lessons = sum(
+            1 for row in rows
+            if self._safe_float(row.get("pnl")) is not None and self._safe_float(row.get("pnl")) < 0
+            and not str(row.get("lessons") or "").strip()
+        )
+        missing_risk = sum(
+            1 for row in rows
+            if str(row.get("status") or "").strip().lower() in {"filled", "closed"}
+            and (self._safe_float(row.get("stop_loss")) is None or self._safe_float(row.get("take_profit")) is None)
+        )
+        if missing_setup:
+            issues.append(f"{missing_setup} trade(s) are missing setup notes, which weakens pattern review.")
+        if missing_lessons:
+            issues.append(f"{missing_lessons} losing trade(s) have no lessons recorded yet.")
+        if missing_risk:
+            issues.append(f"{missing_risk} filled trade(s) are missing either stop loss or take profit documentation.")
+        avg_slippage = stats.get("avg_slippage")
+        if avg_slippage is not None and avg_slippage > 8:
+            issues.append(f"Average slippage is elevated at {avg_slippage:.2f} bps. Execution quality may be hurting edge.")
+        recurring_symbols = [symbol for symbol, count in (stats.get("symbol_loss_counts") or {}).items() if count >= 3]
+        if recurring_symbols:
+            issues.append(f"Repeated losses clustered on {', '.join(sorted(recurring_symbols)[:4])}. Review symbol selection and session quality.")
+        if not issues:
+            issues.append("No obvious discipline issue stands out in this period. Keep journaling every trade to preserve that visibility.")
+        return issues
+
+    def _journal_review_edge_decay(self, current_stats, previous_stats):
+        notes = []
+        current_trades = int(current_stats.get("trade_count") or 0)
+        previous_trades = int(previous_stats.get("trade_count") or 0)
+        if previous_trades <= 0:
+            return ["No prior period data was available, so edge decay cannot be measured yet."]
+
+        current_win = current_stats.get("win_rate")
+        previous_win = previous_stats.get("win_rate")
+        if current_win is not None and previous_win is not None and current_win < previous_win - 0.10:
+            notes.append(
+                f"Win rate cooled from {previous_win * 100.0:.1f}% to {current_win * 100.0:.1f}%."
+            )
+        current_avg = current_stats.get("avg_pnl")
+        previous_avg = previous_stats.get("avg_pnl")
+        if current_avg is not None and previous_avg not in (None, 0):
+            if current_avg < previous_avg * 0.7:
+                notes.append(
+                    f"Average trade expectancy slipped from {self._format_currency(previous_avg)} to {self._format_currency(current_avg)}."
+                )
+        current_pf = current_stats.get("profit_factor")
+        previous_pf = previous_stats.get("profit_factor")
+        if current_pf is not None and previous_pf not in (None, 0):
+            if current_pf < previous_pf * 0.75:
+                notes.append(f"Profit factor softened from {previous_pf:.2f} to {current_pf:.2f}.")
+        if current_trades > previous_trades * 1.5 and (current_stats.get("net_pnl") or 0.0) < (previous_stats.get("net_pnl") or 0.0):
+            notes.append("Trade count increased materially while returns weakened. That is a classic overtrading signal.")
+
+        previous_by_strategy = {
+            row["strategy"]: row for row in previous_stats.get("strategy_rows", [])
+        }
+        for row in current_stats.get("strategy_rows", []):
+            previous_row = previous_by_strategy.get(row["strategy"])
+            if not previous_row:
+                continue
+            if int(row.get("trades") or 0) < 3 or int(previous_row.get("trades") or 0) < 3:
+                continue
+            current_win_rate = row.get("win_rate")
+            previous_win_rate = previous_row.get("win_rate")
+            if current_win_rate is not None and previous_win_rate is not None and current_win_rate < previous_win_rate - 0.15:
+                notes.append(
+                    f"{row['strategy']} cooled from {previous_win_rate * 100.0:.1f}% to {current_win_rate * 100.0:.1f}% win rate."
+                )
+        if not notes:
+            notes.append("No strong edge decay signal stands out versus the prior period.")
+        return notes
+
+    def _journal_review_overview_html(self, mode, start_dt, end_dt, current_stats, previous_stats, mistakes, edge_decay):
+        period_label = f"{mode} review from {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}"
+        overview_lines = [
+            f"<h3>{html.escape(period_label)}</h3>",
+            "<p><b>Focus:</b> combine performance metrics with journaling quality so the review shows what happened and why.</p>",
+            "<p>"
+            f"<b>Current net PnL:</b> {html.escape(self._format_currency(current_stats.get('net_pnl')))} | "
+            f"<b>Win rate:</b> {html.escape(self._format_percent_text(current_stats.get('win_rate')))} | "
+            f"<b>Journal coverage:</b> {html.escape(self._format_percent_text(current_stats.get('journal_coverage')))}"
+            "</p>",
+            "<h4>Mistakes To Review</h4><ul>" + "".join(f"<li>{html.escape(item)}</li>" for item in mistakes) + "</ul>",
+            "<h4>Edge Decay Check</h4><ul>" + "".join(f"<li>{html.escape(item)}</li>" for item in edge_decay) + "</ul>",
+        ]
+        if int(previous_stats.get("trade_count") or 0) > 0:
+            overview_lines.append(
+                "<p>"
+                f"<b>Previous period net PnL:</b> {html.escape(self._format_currency(previous_stats.get('net_pnl')))} | "
+                f"<b>Previous win rate:</b> {html.escape(self._format_percent_text(previous_stats.get('win_rate')))}"
+                "</p>"
+            )
+        return "".join(overview_lines)
+
+    def _populate_journal_review_strategy_table(self, table, rows):
+        if table is None:
+            return
+        table.setRowCount(len(rows or []))
+        for row_index, row in enumerate(rows or []):
+            values = [
+                row.get("strategy", ""),
+                row.get("trades", ""),
+                self._format_percent_text(row.get("win_rate")),
+                self._format_currency(row.get("net_pnl")),
+                self._format_currency(row.get("avg_pnl")),
+                self._format_percent_text(row.get("journal_coverage")),
+                self._format_currency(row.get("fees")),
+            ]
+            for column, value in enumerate(values):
+                table.setItem(row_index, column, QTableWidgetItem(str(value)))
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+
+    def _schedule_trade_journal_review_refresh(self, window):
+        if window is None or not self._is_qt_object_alive(window):
+            return
+        task = getattr(window, "_journal_review_task", None)
+        if task is not None and not task.done():
+            return
+        try:
+            window._journal_review_task = asyncio.get_event_loop().create_task(
+                self._refresh_trade_journal_review_async(window)
+            )
+        except Exception as exc:
+            self.logger.debug("Unable to schedule journal review refresh: %s", exc)
+
+    async def _refresh_trade_journal_review_async(self, window):
+        if window is None or not self._is_qt_object_alive(window):
+            return
+        controller = self.controller
+        period_picker = getattr(window, "_journal_review_period_picker", None)
+        summary = getattr(window, "_journal_review_summary", None)
+        metrics = getattr(window, "_journal_review_metrics", {}) or {}
+        overview = getattr(window, "_journal_review_overview", None)
+        strategy_table = getattr(window, "_journal_review_strategy_table", None)
+        if (
+            period_picker is None
+            or summary is None
+            or overview is None
+            or strategy_table is None
+            or not self._is_qt_object_alive(period_picker)
+            or not self._is_qt_object_alive(summary)
+            or not self._is_qt_object_alive(overview)
+            or not self._is_qt_object_alive(strategy_table)
+        ):
+            return
+
+        try:
+            rows = await controller.fetch_trade_history(limit=700)
+        except Exception as exc:
+            rows = []
+            self.logger.debug("Journal review refresh failed: %s", exc)
+        if (
+            window is None
+            or not self._is_qt_object_alive(window)
+            or not self._is_qt_object_alive(period_picker)
+            or not self._is_qt_object_alive(summary)
+            or not self._is_qt_object_alive(overview)
+            or not self._is_qt_object_alive(strategy_table)
+        ):
+            return
+
+        mode, previous_start, current_start, now = self._journal_review_bounds(period_picker.currentText())
+        current_rows = self._journal_review_analysis_rows(self._rows_for_journal_period(rows, current_start, now))
+        previous_rows = self._journal_review_analysis_rows(self._rows_for_journal_period(rows, previous_start, current_start))
+        current_stats = self._summarize_journal_rows(current_rows)
+        previous_stats = self._summarize_journal_rows(previous_rows)
+        mistakes = self._journal_review_mistakes(current_rows, current_stats)
+        edge_decay = self._journal_review_edge_decay(current_stats, previous_stats)
+
+        summary.setText(
+            f"{mode} review loaded with {current_stats.get('trade_count', 0)} closed trade(s). "
+            "Use this to spot discipline issues, execution drag, and strategy fatigue."
+        )
+
+        metric_values = {
+            "Trades": str(current_stats.get("trade_count", 0)),
+            "Net PnL": self._format_currency(current_stats.get("net_pnl")),
+            "Win Rate": self._format_percent_text(current_stats.get("win_rate")),
+            "Avg Trade": self._format_currency(current_stats.get("avg_pnl")),
+            "Profit Factor": "-" if current_stats.get("profit_factor") is None else f"{float(current_stats.get('profit_factor')):.2f}",
+            "Fees": self._format_currency(current_stats.get("fees")),
+            "Avg Slippage": "-" if current_stats.get("avg_slippage") is None else f"{float(current_stats.get('avg_slippage')):.2f} bps",
+            "Journal Coverage": self._format_percent_text(current_stats.get("journal_coverage")),
+        }
+        for key, label in metrics.items():
+            if label is not None:
+                label.setText(metric_values.get(key, "-"))
+
+        overview.setHtml(
+            self._journal_review_overview_html(
+                mode,
+                current_start,
+                now,
+                current_stats,
+                previous_stats,
+                mistakes,
+                edge_decay,
+            )
+        )
+        self._populate_journal_review_strategy_table(strategy_table, current_stats.get("strategy_rows"))
+
+    def _open_trade_journal_review_window(self):
+        window = self._get_or_create_tool_window(
+            "trade_journal_review",
+            "Journal Review",
+            width=1180,
+            height=760,
+        )
+
+        if getattr(window, "_journal_review_summary", None) is None:
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+
+            summary = QLabel("Loading weekly/monthly journal review.")
+            summary.setWordWrap(True)
+            summary.setStyleSheet(
+                "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
+                "border-radius: 12px; padding: 12px; font-size: 13px; font-weight: 600;"
+            )
+            layout.addWidget(summary)
+
+            controls = QHBoxLayout()
+            period_picker = QComboBox()
+            period_picker.addItems(["Weekly", "Monthly"])
+            refresh_btn = QPushButton("Refresh Review")
+            refresh_btn.clicked.connect(lambda: self._schedule_trade_journal_review_refresh(window))
+            controls.addWidget(QLabel("Review Period"))
+            controls.addWidget(period_picker)
+            controls.addWidget(refresh_btn)
+            controls.addStretch()
+            layout.addLayout(controls)
+
+            metrics_widget = QWidget()
+            metrics_layout = QGridLayout(metrics_widget)
+            metrics_layout.setContentsMargins(0, 0, 0, 0)
+            metrics_layout.setHorizontalSpacing(10)
+            metrics_layout.setVerticalSpacing(10)
+            metric_labels = {}
+            metric_keys = ["Trades", "Net PnL", "Win Rate", "Avg Trade", "Profit Factor", "Fees", "Avg Slippage", "Journal Coverage"]
+            for index, key in enumerate(metric_keys):
+                card = QFrame()
+                card.setStyleSheet(
+                    "QFrame { background-color: #101a2d; border: 1px solid #20324d; border-radius: 12px; }"
+                )
+                card_layout = QVBoxLayout(card)
+                card_layout.setContentsMargins(12, 12, 12, 12)
+                title = QLabel(key)
+                title.setStyleSheet("color: #8ca8cc; font-size: 12px;")
+                value = QLabel("-")
+                value.setStyleSheet("color: #f4f8ff; font-size: 17px; font-weight: 700;")
+                card_layout.addWidget(title)
+                card_layout.addWidget(value)
+                metrics_layout.addWidget(card, index // 4, index % 4)
+                metric_labels[key] = value
+            layout.addWidget(metrics_widget)
+
+            overview = QTextBrowser()
+            overview.setStyleSheet(
+                "QTextBrowser { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; border-radius: 12px; padding: 12px; }"
+            )
+            layout.addWidget(overview)
+
+            strategy_table = QTableWidget()
+            strategy_table.setColumnCount(7)
+            strategy_table.setHorizontalHeaderLabels(
+                ["Strategy", "Trades", "Win Rate", "Net PnL", "Avg Trade", "Journal Coverage", "Fees"]
+            )
+            strategy_table.setStyleSheet(
+                "QTableWidget { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; "
+                "border-radius: 12px; gridline-color: #20324d; }"
+            )
+            layout.addWidget(strategy_table)
+
+            window.setCentralWidget(container)
+            window._journal_review_summary = summary
+            window._journal_review_period_picker = period_picker
+            window._journal_review_metrics = metric_labels
+            window._journal_review_overview = overview
+            window._journal_review_strategy_table = strategy_table
+
+            period_picker.currentTextChanged.connect(lambda *_: self._schedule_trade_journal_review_refresh(window))
+
+            sync_timer = QTimer(window)
+            sync_timer.timeout.connect(lambda: self._schedule_trade_journal_review_refresh(window))
+            sync_timer.start(7000)
+            window._journal_review_timer = sync_timer
+
+        self._schedule_trade_journal_review_refresh(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _refresh_health_window(self, window):
+        controller = self.controller
+        summary = getattr(window, "_health_summary", None)
+        checks_table = getattr(window, "_health_checks_table", None)
+        capabilities_browser = getattr(window, "_capabilities_browser", None)
+        if summary is None or checks_table is None or capabilities_browser is None:
+            return
+
+        report = controller.get_health_check_report() if hasattr(controller, "get_health_check_report") else []
+        summary.setText(
+            f"Startup health: {getattr(controller, 'get_health_check_summary', lambda: 'Not run')()} | "
+            f"Mode: {'LIVE' if getattr(controller, 'is_live_mode', lambda: False)() else 'PAPER'} | "
+            f"Account: {getattr(controller, 'current_account_label', lambda: 'Not set')()}"
+        )
+
+        checks_table.setRowCount(len(report))
+        for row_index, item in enumerate(report):
+            checks_table.setItem(row_index, 0, QTableWidgetItem(str(item.get("name", ""))))
+            checks_table.setItem(row_index, 1, QTableWidgetItem(str(item.get("status", "")).upper()))
+            checks_table.setItem(row_index, 2, QTableWidgetItem(str(item.get("detail", ""))))
+        checks_table.resizeColumnsToContents()
+        checks_table.horizontalHeader().setStretchLastSection(True)
+
+        capabilities = controller.get_broker_capabilities() if hasattr(controller, "get_broker_capabilities") else {}
+        capability_lines = [
+            f"<li><b>{html.escape(str(key).replace('_', ' ').title())}:</b> {'Yes' if value else 'No'}</li>"
+            for key, value in capabilities.items()
+        ]
+        capabilities_browser.setHtml("<h3>Broker Capabilities</h3><ul>" + "".join(capability_lines) + "</ul>")
+
+    def _open_system_health_window(self):
+        window = self._get_or_create_tool_window(
+            "system_health",
+            "System Health",
+            width=980,
+            height=620,
+        )
+
+        if getattr(window, "_health_checks_table", None) is None:
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+
+            summary = QLabel("Running startup health checks.")
+            summary.setWordWrap(True)
+            summary.setStyleSheet(
+                "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
+                "border-radius: 12px; padding: 12px; font-size: 13px; font-weight: 600;"
+            )
+            layout.addWidget(summary)
+
+            checks = QTableWidget()
+            checks.setColumnCount(3)
+            checks.setHorizontalHeaderLabels(["Check", "Status", "Detail"])
+            layout.addWidget(checks)
+
+            capabilities_browser = QTextBrowser()
+            capabilities_browser.setStyleSheet(
+                "QTextBrowser { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; border-radius: 12px; padding: 12px; }"
+            )
+            layout.addWidget(capabilities_browser)
+
+            window.setCentralWidget(container)
+            window._health_summary = summary
+            window._health_checks_table = checks
+            window._capabilities_browser = capabilities_browser
+
+            sync_timer = QTimer(window)
+            sync_timer.timeout.connect(lambda: self._refresh_health_window(window))
+            sync_timer.start(3000)
+            window._health_timer = sync_timer
+
+        if hasattr(self.controller, "run_startup_health_check") and hasattr(self.controller, "_create_task"):
+            self.controller._create_task(self.controller.run_startup_health_check(), "manual_health_check")
+        self._refresh_health_window(window)
         window.show()
         window.raise_()
         window.activateWindow()
@@ -4905,6 +8907,31 @@ class Terminal(QMainWindow):
             )
 
             self._set_status_value("Exchange", exchange_display, exchange_tooltip)
+            self._set_status_value("Mode", "LIVE" if getattr(controller, "is_live_mode", lambda: False)() else "PAPER")
+            self._set_status_value("Account", getattr(controller, "current_account_label", lambda: "Not set")())
+            license_status = {}
+            if hasattr(controller, "get_license_status"):
+                try:
+                    license_status = controller.get_license_status()
+                except Exception:
+                    license_status = {}
+            self._set_status_value("License", license_status.get("summary", "Status unavailable"))
+            self._set_status_value("Risk Profile", getattr(controller, "risk_profile_name", "Balanced"))
+            trade_venue = str(
+                getattr(getattr(controller, "broker", None), "resolved_market_preference", "")
+                or getattr(controller, "market_trade_preference", "auto")
+                or "auto"
+            ).upper()
+            news_mode_parts = []
+            if getattr(controller, "news_enabled", False):
+                news_mode_parts.append("feed")
+            if getattr(controller, "news_draw_on_chart", False):
+                news_mode_parts.append("chart")
+            if getattr(controller, "news_autotrade_enabled", False):
+                news_mode_parts.append("auto")
+            news_mode = " / ".join(news_mode_parts) if news_mode_parts else "OFF"
+            self._set_status_value("Trade Venue", trade_venue)
+            self._set_status_value("News Mode", news_mode)
 
             self._set_status_value("Symbols Loaded", len(symbols))
 
@@ -4925,17 +8952,30 @@ class Terminal(QMainWindow):
             if hasattr(controller, "get_market_stream_status"):
                 market_stream_status = controller.get_market_stream_status()
 
+            broker_status = dict(getattr(self, "_latest_broker_status_snapshot", {}) or {})
+            self._set_status_value("Broker API", broker_status.get("summary", "Unknown"), str(broker_status.get("detail", "")) or None)
             self._set_status_value("Websocket", market_stream_status)
 
             self._set_status_value("AITrading", "ON" if self.autotrading_enabled else "OFF")
             self._set_status_value("AI Scope", self._autotrade_scope_label())
             self._set_status_value("Watchlist", len(self.autotrade_watchlist))
+            behavior_status = {}
+            if hasattr(controller, "get_behavior_guard_status"):
+                behavior_status = controller.get_behavior_guard_status() or {}
+            self._set_status_value("Behavior Guard", behavior_status.get("summary", "Not active"))
+            self._set_status_value("Guard Reason", behavior_status.get("reason", "No active behavior restrictions"))
+            self._set_status_value("Health Check", getattr(controller, "get_health_check_summary", lambda: "Not run")())
+            self._set_status_value("Pipeline", getattr(controller, "get_pipeline_status_summary", lambda: "Idle")())
 
             self._set_status_value("Timeframe", self.current_timeframe)
+            self._update_session_badge()
+            self._update_license_badge()
+            self._update_kill_switch_button()
 
             self._update_risk_heatmap()
             self._populate_positions_table(getattr(self, "_latest_positions_snapshot", []))
             self._populate_open_orders_table(getattr(self, "_latest_open_orders_snapshot", []))
+            self._schedule_broker_status_refresh()
             self._schedule_positions_refresh()
             self._schedule_open_orders_refresh()
             self._refresh_strategy_comparison_panel()
@@ -4977,6 +9017,12 @@ class Terminal(QMainWindow):
 
         fields = [
             "Exchange",
+            "Mode",
+            "Account",
+            "License",
+            "Risk Profile",
+            "Trade Venue",
+            "News Mode",
 
             "Symbols Loaded",
             "Equity",
@@ -4986,10 +9032,15 @@ class Terminal(QMainWindow):
             "Spread %",
             "Open Positions",
             "Open Orders",
+            "Broker API",
             "Websocket",
             "AITrading",
             "AI Scope",
             "Watchlist",
+            "Behavior Guard",
+            "Guard Reason",
+            "Health Check",
+            "Pipeline",
             "Timeframe"
         ]
 
@@ -5018,6 +9069,7 @@ class Terminal(QMainWindow):
         dock = QDockWidget("AI Signal Monitor", self)
 
         self.ai_table = QTableWidget()
+        self._configure_monitor_table(self.ai_table)
         self.ai_table.setColumnCount(6)
 
         self.ai_table.setHorizontalHeaderLabels([
@@ -5047,9 +9099,31 @@ class Terminal(QMainWindow):
             "confidence": float(data.get("confidence", 0.0) or 0.0),
             "regime": str(data.get("regime", "") or ""),
             "volatility": data.get("volatility", ""),
+            "reason": str(data.get("reason", "") or ""),
             "timestamp": str(data.get("timestamp", "") or ""),
         }
         self._ai_signal_records[symbol] = record
+        self._record_recommendation(
+            symbol=symbol,
+            signal=record["signal"],
+            confidence=record["confidence"],
+            regime=record["regime"],
+            volatility=record["volatility"],
+            reason=record["reason"],
+            strategy="AI Monitor",
+            timestamp=record["timestamp"],
+        )
+
+        now = time.monotonic()
+        if (
+            self._monitor_table_is_busy(self.ai_table)
+            or (
+            self.ai_table.rowCount() > 0
+            and (now - float(getattr(self, "_last_ai_table_refresh_at", 0.0) or 0.0)) < float(self.AI_TABLE_REFRESH_MIN_SECONDS or 0.5)
+            )
+        ):
+            return
+        self._last_ai_table_refresh_at = now
 
         def _sort_key(item):
             timestamp_text = item.get("timestamp", "")
@@ -5076,6 +9150,1015 @@ class Terminal(QMainWindow):
 
         self.ai_table.resizeColumnsToContents()
         self.ai_table.horizontalHeader().setStretchLastSection(True)
+
+    def _recommendation_sort_key(self, item):
+        timestamp_text = str(item.get("timestamp", "") or "")
+        try:
+            normalized = timestamp_text.replace("Z", "+00:00")
+            timestamp = datetime.fromisoformat(normalized)
+        except Exception:
+            timestamp = datetime.min.replace(tzinfo=timezone.utc)
+        confidence = float(item.get("confidence", 0.0) or 0.0)
+        return (confidence, timestamp)
+
+    def _record_recommendation(
+        self,
+        symbol,
+        signal="",
+        confidence=0.0,
+        regime="",
+        volatility="",
+        reason="",
+        strategy="",
+        timestamp="",
+    ):
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol:
+            return
+
+        existing = dict(self._recommendation_records.get(normalized_symbol, {}))
+        record = {
+            "symbol": normalized_symbol,
+            "signal": str(signal or existing.get("signal", "")).upper(),
+            "confidence": float(confidence if confidence not in (None, "") else existing.get("confidence", 0.0) or 0.0),
+            "regime": str(regime or existing.get("regime", "") or ""),
+            "volatility": volatility if volatility not in (None, "") else existing.get("volatility", ""),
+            "reason": str(reason or existing.get("reason", "") or ""),
+            "strategy": str(strategy or existing.get("strategy", "") or ""),
+            "timestamp": str(timestamp or existing.get("timestamp", "") or datetime.now(timezone.utc).isoformat()),
+        }
+        self._recommendation_records[normalized_symbol] = record
+        self._refresh_recommendations_window()
+
+    def _recommendation_rows(self):
+        return sorted(
+            self._recommendation_records.values(),
+            key=self._recommendation_sort_key,
+            reverse=True,
+        )[: self.MAX_LOG_ROWS]
+
+    def _recommendation_summary_text(self, rows):
+        if not rows:
+            return "No recommendations yet. Start market monitoring or AI trading to collect explainable trade ideas."
+
+        buy_count = sum(1 for item in rows if str(item.get("signal", "")).upper() == "BUY")
+        sell_count = sum(1 for item in rows if str(item.get("signal", "")).upper() == "SELL")
+        avg_conf = sum(float(item.get("confidence", 0.0) or 0.0) for item in rows) / max(len(rows), 1)
+        top_symbol = rows[0].get("symbol", "-")
+        top_reason = rows[0].get("reason", "") or "Reason not supplied by strategy."
+        return (
+            f"{len(rows)} symbols tracked | BUY {buy_count} | SELL {sell_count} | "
+            f"avg confidence {avg_conf:.2f} | strongest idea: {top_symbol} - {top_reason}"
+        )
+
+    def _recommendation_details_html(self, record):
+        if not isinstance(record, dict):
+            return (
+                "<h3>Why this symbol is recommended</h3>"
+                "<p>No recommendation selected yet.</p>"
+            )
+
+        symbol = html.escape(str(record.get("symbol", "-") or "-"))
+        signal = html.escape(str(record.get("signal", "WATCH") or "WATCH"))
+        strategy = html.escape(str(record.get("strategy", "Recommendation Engine") or "Recommendation Engine"))
+        reason = html.escape(str(record.get("reason", "") or "Reason not found in runtime data."))
+        regime = html.escape(str(record.get("regime", "") or "Not available"))
+        timestamp = html.escape(str(record.get("timestamp", "") or "Not available"))
+        try:
+            confidence = float(record.get("confidence", 0.0) or 0.0)
+        except Exception:
+            confidence = 0.0
+        volatility = html.escape(str(record.get("volatility", "") or "Not available"))
+        return (
+            f"<h3>{symbol}: {signal}</h3>"
+            f"<p><b>Why it is recommended:</b> {reason}</p>"
+            f"<p><b>Confidence:</b> {confidence:.2f}<br>"
+            f"<b>Source:</b> {strategy}<br>"
+            f"<b>Market regime:</b> {regime}<br>"
+            f"<b>Volatility:</b> {volatility}<br>"
+            f"<b>Last update:</b> {timestamp}</p>"
+            "<p>This window reflects live strategy and AI runtime output. If a field is empty, that detail was not provided by the active engine yet.</p>"
+        )
+
+    def _market_chat_quick_prompts(self):
+        return [
+            "Show commands.",
+            "Give me a short account and balance summary.",
+            "Show trade history analysis.",
+            "Summarize the latest news affecting my active symbols.",
+            "Show app status.",
+            "How is my equity and profitability looking right now?",
+            "Take a screenshot of the app.",
+            "Show my broker position analysis with equity, NAV, and P/L.",
+            "Start AI trading.",
+            "Preview this trade command without executing it: trade buy EUR/USD amount 1000",
+            "Preview this cancel command without executing it: cancel order id 123456",
+            "Preview this close command without executing it: close position EUR/USD",
+            "Summarize current recommendations and why they are recommended.",
+            "Explain my behavior guard status and any risk concerns.",
+            "Show Telegram status and send a Telegram test message.",
+            "What stands out in this market and app state right now?",
+        ]
+
+    def _market_chat_confirmation_preview(self, content):
+        text = str(content or "").strip()
+        lowered = text.lower()
+        if "detected but not executed" not in lowered or "confirm" not in lowered:
+            return None
+
+        if lowered.startswith("trade command detected"):
+            title = "Trade Confirmation Required"
+            accent = "#f0a35e"
+        elif lowered.startswith("cancel-order command detected"):
+            title = "Cancel Confirmation Required"
+            accent = "#ffb86c"
+        elif lowered.startswith("close-position command detected"):
+            title = "Close Confirmation Required"
+            accent = "#ff9a76"
+        else:
+            title = "Confirmation Required"
+            accent = "#f0a35e"
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        summary = lines[0] if lines else "Action requires confirmation."
+        confirm_hint = ""
+        details = []
+        for line in lines[1:]:
+            if "add the word confirm" in line.lower():
+                confirm_hint = line
+            else:
+                details.append(line)
+
+        return {
+            "title": title,
+            "summary": summary,
+            "confirm_hint": confirm_hint or "Add the word CONFIRM to execute it.",
+            "details": details,
+            "accent": accent,
+        }
+
+    def _market_chat_pending_confirmation(self, window):
+        history = list(getattr(window, "_market_chat_history", []) or [])
+        if not history:
+            return None
+        latest = history[-1]
+        if str(latest.get("role") or "").strip().lower() != "assistant":
+            return None
+        preview = latest.get("confirmation_preview")
+        if not isinstance(preview, dict):
+            return None
+        command = str(latest.get("pending_command") or "").strip()
+        if not command:
+            return None
+        return {"preview": preview, "command": command}
+
+    def _confirm_market_chat_action(self, window=None):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window) or getattr(window, "_market_chat_busy", False):
+            return
+        pending = self._market_chat_pending_confirmation(window)
+        if not pending:
+            self._refresh_market_chat_window(window, status_message="No pending action to confirm.")
+            return
+        command = str(pending.get("command") or "").strip()
+        if not command:
+            self._refresh_market_chat_window(window, status_message="Pending action is missing its command text.")
+            return
+        if "confirm" not in command.lower().split():
+            command = f"{command} confirm"
+        self._submit_market_chat_prompt(prompt=command, window=window)
+
+    def _cancel_market_chat_action(self, window=None):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window) or getattr(window, "_market_chat_busy", False):
+            return
+        pending = self._market_chat_pending_confirmation(window)
+        if not pending:
+            self._refresh_market_chat_window(window, status_message="No pending action to cancel.")
+            return
+        history = list(getattr(window, "_market_chat_history", []) or [])
+        if history and history[-1].get("confirmation_preview"):
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": "Pending action canceled. Nothing was executed.",
+                }
+            )
+            window._market_chat_history = history
+        window._market_chat_status_message = "Pending action canceled."
+        self._refresh_market_chat_window(window)
+
+    def _render_market_chat_html(self, history):
+        rows = []
+        for entry in list(history or []):
+            role = str(entry.get("role") or "assistant").strip().lower()
+            content = html.escape(str(entry.get("content") or "").strip()).replace("\n", "<br>")
+            if not content:
+                continue
+            if role == "user":
+                rows.append(
+                    "<div style='margin: 8px 0; text-align: right;'>"
+                    "<div style='display: inline-block; max-width: 82%; background:#17304d; color:#f4f8ff; "
+                    "border:1px solid #2a4d73; border-radius:14px; padding:10px 12px;'><b>You</b><br>"
+                    f"{content}</div></div>"
+                )
+            else:
+                preview = entry.get("confirmation_preview") or self._market_chat_confirmation_preview(entry.get("content"))
+                if isinstance(preview, dict):
+                    title = html.escape(str(preview.get("title") or "Confirmation Required"))
+                    summary = html.escape(str(preview.get("summary") or "Action requires confirmation."))
+                    confirm_hint = html.escape(str(preview.get("confirm_hint") or "Add the word CONFIRM to execute it."))
+                    accent = html.escape(str(preview.get("accent") or "#f0a35e"))
+                    details_html = ""
+                    for detail in list(preview.get("details") or []):
+                        details_html += (
+                            "<div style='margin-top:6px; color:#d8e6ff;'>"
+                            f"{html.escape(str(detail))}"
+                            "</div>"
+                        )
+                    rows.append(
+                        "<div style='margin: 10px 0; text-align: left;'>"
+                        "<div style='display: inline-block; max-width: 88%; background:#16141b; color:#f8efe7; "
+                        f"border:1px solid {accent}; border-left:5px solid {accent}; border-radius:14px; padding:12px 14px;'>"
+                        "<div style='font-size:12px; letter-spacing:0.08em; text-transform:uppercase; color:#ffcf9a; margin-bottom:6px;'>"
+                        "Sopotek Pilot"
+                        "</div>"
+                        f"<div style='font-weight:700; color:#fff3e2; margin-bottom:4px;'>{title}</div>"
+                        f"<div>{summary}</div>"
+                        f"{details_html}"
+                        "<div style='margin-top:10px; padding:8px 10px; background:#241d16; border-radius:10px; color:#ffd7a8;'>"
+                        f"{confirm_hint}"
+                        "</div>"
+                        "</div></div>"
+                    )
+                else:
+                    rows.append(
+                        "<div style='margin: 8px 0; text-align: left;'>"
+                        "<div style='display: inline-block; max-width: 82%; background:#0f1727; color:#d9e6f7; "
+                        "border:1px solid #24344f; border-radius:14px; padding:10px 12px;'><b>Sopotek Pilot</b><br>"
+                        f"{content}</div></div>"
+                    )
+        if not rows:
+            return (
+                "<div style='color:#9fb0c7; padding:14px;'>"
+                "Ask about the app, the market, your balances, positions, equity, profitability, performance, recommendations, or behavior guard. Type 'show commands' for the control list."
+                "</div>"
+            )
+        return "".join(rows)
+
+    def _refresh_market_chat_window(self, window=None, status_message=None):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window):
+            return
+
+        transcript = getattr(window, "_market_chat_transcript", None)
+        status = getattr(window, "_market_chat_status", None)
+        send_btn = getattr(window, "_market_chat_send_btn", None)
+        input_box = getattr(window, "_market_chat_input", None)
+        clear_btn = getattr(window, "_market_chat_clear_btn", None)
+        listen_btn = getattr(window, "_market_chat_listen_btn", None)
+        speak_btn = getattr(window, "_market_chat_speak_btn", None)
+        auto_speak_btn = getattr(window, "_market_chat_auto_speak_btn", None)
+        provider_picker = getattr(window, "_market_chat_provider_picker", None)
+        output_picker = getattr(window, "_market_chat_output_picker", None)
+        voice_picker = getattr(window, "_market_chat_voice_picker", None)
+        refresh_voices_btn = getattr(window, "_market_chat_refresh_voices_btn", None)
+        voice_meta = getattr(window, "_market_chat_voice_meta", None)
+        confirm_panel = getattr(window, "_market_chat_confirm_panel", None)
+        confirm_label = getattr(window, "_market_chat_confirm_label", None)
+        confirm_btn = getattr(window, "_market_chat_confirm_btn", None)
+        cancel_btn = getattr(window, "_market_chat_cancel_btn", None)
+        if transcript is None or status is None:
+            return
+
+        history = list(getattr(window, "_market_chat_history", []) or [])
+        transcript.setHtml(self._render_market_chat_html(history))
+        transcript.moveCursor(QTextCursor.MoveOperation.End)
+
+        busy = bool(getattr(window, "_market_chat_busy", False))
+        voice_busy = bool(getattr(window, "_market_chat_voice_busy", False))
+        if status_message is not None:
+            window._market_chat_status_message = status_message
+        status.setText(
+            getattr(window, "_market_chat_status_message", None)
+            or (
+                "Listening to your voice prompt..." if voice_busy else
+                ("Sopotek Pilot is thinking..." if busy else "Ready. Ask about the app, market, balances, equity, or strategy behavior.")
+            )
+        )
+        if send_btn is not None:
+            has_text = bool(input_box.toPlainText().strip()) if input_box is not None else True
+            send_btn.setEnabled((not busy) and (not voice_busy) and has_text)
+            send_btn.setText("Thinking..." if busy else "Send")
+        if input_box is not None:
+            input_box.setReadOnly(busy or voice_busy)
+        if clear_btn is not None:
+            clear_btn.setEnabled((not busy) and (not voice_busy) and bool(history))
+        voice_snapshot = getattr(self.controller, "market_chat_voice_state", lambda: {})() or {}
+        voice_available = bool(voice_snapshot.get("voice_available"))
+        listen_available = bool(voice_snapshot.get("listen_available"))
+        speak_available = bool(voice_snapshot.get("speak_available"))
+        if listen_btn is not None:
+            listen_btn.setVisible(listen_available)
+            listen_btn.setEnabled(listen_available and (not busy) and (not voice_busy))
+            listen_btn.setText("Listening..." if voice_busy and getattr(window, "_market_chat_voice_mode", "") == "listen" else "Listen")
+        if speak_btn is not None:
+            speak_btn.setVisible(speak_available)
+            speak_btn.setEnabled(speak_available and (not busy) and (not voice_busy) and bool(self._latest_market_chat_reply(window)))
+            speak_btn.setText("Speaking..." if voice_busy and getattr(window, "_market_chat_voice_mode", "") == "speak" else "Speak Reply")
+        if auto_speak_btn is not None:
+            auto_speak_btn.setVisible(speak_available)
+            auto_speak_btn.setEnabled(speak_available and (not voice_busy))
+        voice_controls_enabled = voice_available and (not busy) and (not voice_busy)
+        if provider_picker is not None:
+            provider_picker.setVisible(True)
+            provider_picker.setEnabled((not busy) and (not voice_busy))
+        if output_picker is not None:
+            output_picker.setVisible(True)
+            output_picker.setEnabled((not busy) and (not voice_busy))
+        if voice_picker is not None:
+            voice_picker.setVisible(True)
+            voice_picker.setEnabled(voice_controls_enabled and not getattr(window, "_market_chat_loading_voices", False))
+        if refresh_voices_btn is not None:
+            refresh_voices_btn.setVisible(True)
+            refresh_voices_btn.setEnabled(voice_controls_enabled and not getattr(window, "_market_chat_loading_voices", False))
+            refresh_voices_btn.setText("Refreshing..." if getattr(window, "_market_chat_loading_voices", False) else "Refresh Voices")
+        if voice_meta is not None:
+            voice_meta.setVisible(True)
+            voice_meta.setText(self._market_chat_voice_state_text(window))
+        pending = self._market_chat_pending_confirmation(window)
+        if confirm_panel is not None and confirm_label is not None and confirm_btn is not None and cancel_btn is not None:
+            if pending is not None:
+                preview = pending.get("preview") or {}
+                confirm_panel.setVisible(True)
+                confirm_label.setText(
+                    f"{preview.get('title', 'Confirmation Required')}: {preview.get('confirm_hint', 'Add CONFIRM to execute.')}"
+                )
+                confirm_btn.setEnabled((not busy) and (not voice_busy))
+                cancel_btn.setEnabled((not busy) and (not voice_busy))
+            else:
+                confirm_panel.setVisible(False)
+                confirm_label.setText("")
+                confirm_btn.setEnabled(False)
+                cancel_btn.setEnabled(False)
+
+    async def _run_market_chat_request(self, window, question, conversation):
+        try:
+            answer = await self.controller.ask_openai_about_app(question, conversation=conversation)
+        except Exception as exc:
+            answer = f"Sopotek Pilot request failed: {exc}"
+
+        preview = self._market_chat_confirmation_preview(answer)
+        history = list(getattr(window, "_market_chat_history", []) or [])
+        entry = {"role": "assistant", "content": str(answer or "No response returned.")}
+        if preview is not None:
+            entry["confirmation_preview"] = preview
+            entry["pending_command"] = str(question or "").strip()
+        history.append(entry)
+        window._market_chat_history = history
+        window._market_chat_busy = False
+        window._market_chat_status_message = "Confirmation required." if preview is not None else "Response ready."
+        self._refresh_market_chat_window(window)
+        auto_speak_btn = getattr(window, "_market_chat_auto_speak_btn", None)
+        if auto_speak_btn is not None and auto_speak_btn.isChecked():
+            self._speak_market_chat_reply(window, latest_text=entry["content"], automatic=True)
+
+    def _submit_market_chat_prompt(self, prompt=None, window=None):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window):
+            return
+        if getattr(window, "_market_chat_busy", False):
+            return
+
+        input_box = getattr(window, "_market_chat_input", None)
+        if input_box is None:
+            return
+
+        question = str(prompt or input_box.toPlainText()).strip()
+        if not question:
+            self._refresh_market_chat_window(window, status_message="Type a question first.")
+            return
+
+        history = list(getattr(window, "_market_chat_history", []) or [])
+        conversation = history[-8:]
+        history.append({"role": "user", "content": question})
+        window._market_chat_history = history
+        window._market_chat_busy = True
+        window._market_chat_status_message = "Sending question to Sopotek Pilot..."
+        input_box.clear()
+        self._refresh_market_chat_window(window)
+
+        task_factory = getattr(self.controller, "_create_task", None)
+        runner = self._run_market_chat_request(window, question, conversation)
+        if callable(task_factory):
+            window._market_chat_task = task_factory(runner, "market_chat_request")
+        else:
+            window._market_chat_task = asyncio.create_task(runner)
+
+    def _clear_market_chat(self, window=None):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window):
+            return
+        if getattr(window, "_market_chat_busy", False) or getattr(window, "_market_chat_voice_busy", False):
+            return
+        window._market_chat_history = []
+        window._market_chat_status_message = "Conversation cleared."
+        self._refresh_market_chat_window(window)
+
+    def _latest_market_chat_reply(self, window=None):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window):
+            return ""
+        history = list(getattr(window, "_market_chat_history", []) or [])
+        for entry in reversed(history):
+            if str(entry.get("role") or "").strip().lower() == "assistant":
+                return str(entry.get("content") or "").strip()
+        return ""
+
+    def _market_chat_voice_state_text(self, window=None):
+        snapshot = getattr(self.controller, "market_chat_voice_state", lambda: {})() or {}
+        provider = str(snapshot.get("recognition_provider") or snapshot.get("provider") or "windows").strip().lower()
+        provider_label = "Google" if provider == "google" else "Windows"
+        output_provider = str(snapshot.get("output_provider") or "windows").strip().lower()
+        output_label = "OpenAI" if output_provider == "openai" else "Windows"
+        voice_name = str(snapshot.get("voice_name") or "").strip() or "System Default"
+        if provider == "google" and not snapshot.get("google_available"):
+            return (
+                f"Recognition: {provider_label} needs SpeechRecognition + sounddevice installed. "
+                f"Speech: {output_label} ({voice_name})."
+            )
+        if output_provider == "openai" and not snapshot.get("openai_available"):
+            return (
+                f"Recognition: {provider_label}. "
+                f"Speech: {output_label} needs an OpenAI API key in Settings -> Integrations."
+            )
+        return f"Recognition: {provider_label}. Speech: {output_label}. Voice: {voice_name}."
+
+    def _populate_market_chat_voice_controls(self, window=None):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window):
+            return
+
+        provider_picker = getattr(window, "_market_chat_provider_picker", None)
+        output_picker = getattr(window, "_market_chat_output_picker", None)
+        voice_picker = getattr(window, "_market_chat_voice_picker", None)
+        voice_meta = getattr(window, "_market_chat_voice_meta", None)
+        if provider_picker is None or output_picker is None or voice_picker is None:
+            return
+
+        controller = self.controller
+        snapshot = getattr(controller, "market_chat_voice_state", lambda: {})() or {}
+        provider = str(snapshot.get("recognition_provider") or snapshot.get("provider") or "windows").strip().lower() or "windows"
+        output_provider = str(snapshot.get("output_provider") or "windows").strip().lower() or "windows"
+        voice_name = str(snapshot.get("voice_name") or "").strip()
+        voices = list(getattr(window, "_market_chat_voice_choices", []) or [])
+
+        window._market_chat_voice_controls_updating = True
+        try:
+            provider_picker.blockSignals(True)
+            provider_picker.clear()
+            for key, label in getattr(controller, "market_chat_voice_provider_choices", lambda: [])():
+                provider_picker.addItem(str(label), str(key))
+            provider_index = provider_picker.findData(provider)
+            provider_picker.setCurrentIndex(provider_index if provider_index >= 0 else 0)
+            provider_picker.blockSignals(False)
+
+            output_picker.blockSignals(True)
+            output_picker.clear()
+            for key, label in getattr(controller, "market_chat_voice_output_provider_choices", lambda: [])():
+                output_picker.addItem(str(label), str(key))
+            output_index = output_picker.findData(output_provider)
+            output_picker.setCurrentIndex(output_index if output_index >= 0 else 0)
+            output_picker.blockSignals(False)
+
+            voice_picker.blockSignals(True)
+            voice_picker.clear()
+            if output_provider == "windows":
+                voice_picker.addItem("System Default", "")
+            for voice in voices:
+                voice_picker.addItem(str(voice), str(voice))
+            if voice_name and voice_picker.findData(voice_name) < 0:
+                voice_picker.addItem(f"{voice_name} (saved)", voice_name)
+            voice_index = voice_picker.findData(voice_name)
+            voice_picker.setCurrentIndex(voice_index if voice_index >= 0 else 0)
+            voice_picker.blockSignals(False)
+        finally:
+            window._market_chat_voice_controls_updating = False
+
+        if voice_meta is not None:
+            voice_meta.setText(self._market_chat_voice_state_text(window))
+
+    async def _refresh_market_chat_voice_choices_async(self, window, announce=False):
+        if not self._is_qt_object_alive(window):
+            return
+
+        snapshot = getattr(self.controller, "market_chat_voice_state", lambda: {})() or {}
+        output_provider = str(snapshot.get("output_provider") or "windows").strip().lower() or "windows"
+        try:
+            voices = await getattr(self.controller, "market_chat_list_voices", lambda *_args, **_kwargs: [])(output_provider)
+            provider_label = "OpenAI" if output_provider == "openai" else "Windows"
+            message = (
+                f"Loaded {len(voices)} {provider_label} voice{'s' if len(voices) != 1 else ''}."
+                if announce
+                else None
+            )
+        except Exception as exc:
+            voices = []
+            message = f"Voice list refresh failed: {exc}"
+
+        if not self._is_qt_object_alive(window):
+            return
+
+        window._market_chat_loading_voices = False
+        window._market_chat_voice_choices = list(voices or [])
+        self._populate_market_chat_voice_controls(window)
+        self._refresh_market_chat_window(window, status_message=message)
+
+    def _refresh_market_chat_voice_choices(self, window=None, announce=False):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window):
+            return
+        if getattr(window, "_market_chat_loading_voices", False):
+            return
+
+        window._market_chat_loading_voices = True
+        snapshot = getattr(self.controller, "market_chat_voice_state", lambda: {})() or {}
+        output_provider = str(snapshot.get("output_provider") or "windows").strip().lower() or "windows"
+        provider_label = "OpenAI" if output_provider == "openai" else "installed"
+        self._refresh_market_chat_window(window, status_message=f"Loading {provider_label} voices...")
+        runner = self._refresh_market_chat_voice_choices_async(window, announce=announce)
+        task_factory = getattr(self.controller, "_create_task", None)
+        if callable(task_factory):
+            window._market_chat_voice_choices_task = task_factory(runner, "market_chat_voice_choices")
+        else:
+            window._market_chat_voice_choices_task = asyncio.create_task(runner)
+
+    def _set_market_chat_voice_provider(self, window=None):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window):
+            return
+        if getattr(window, "_market_chat_voice_controls_updating", False):
+            return
+
+        provider_picker = getattr(window, "_market_chat_provider_picker", None)
+        if provider_picker is None:
+            return
+        provider = str(provider_picker.currentData() or provider_picker.currentText() or "windows").strip().lower() or "windows"
+        resolved = getattr(self.controller, "set_market_chat_voice_provider", lambda value: value)(provider)
+        self._populate_market_chat_voice_controls(window)
+        self._refresh_market_chat_window(
+            window,
+            status_message=(
+                "Google voice recognition selected."
+                if resolved == "google"
+                else "Windows voice recognition selected."
+            ),
+        )
+
+    def _set_market_chat_voice_output_provider(self, window=None):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window):
+            return
+        if getattr(window, "_market_chat_voice_controls_updating", False):
+            return
+
+        output_picker = getattr(window, "_market_chat_output_picker", None)
+        if output_picker is None:
+            return
+        provider = str(output_picker.currentData() or output_picker.currentText() or "windows").strip().lower() or "windows"
+        resolved = getattr(self.controller, "set_market_chat_voice_output_provider", lambda value: value)(provider)
+        window._market_chat_voice_choices = []
+        self._populate_market_chat_voice_controls(window)
+        self._refresh_market_chat_voice_choices(window, announce=False)
+        self._refresh_market_chat_window(
+            window,
+            status_message=(
+                "OpenAI speech selected."
+                if resolved == "openai"
+                else "Windows speech selected."
+            ),
+        )
+
+    def _set_market_chat_voice(self, window=None):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window):
+            return
+        if getattr(window, "_market_chat_voice_controls_updating", False):
+            return
+
+        voice_picker = getattr(window, "_market_chat_voice_picker", None)
+        if voice_picker is None:
+            return
+        voice_name = str(voice_picker.currentData() or "").strip()
+        snapshot = getattr(self.controller, "market_chat_voice_state", lambda: {})() or {}
+        output_provider = str(snapshot.get("output_provider") or "windows").strip().lower() or "windows"
+        getattr(self.controller, "set_market_chat_voice", lambda value, _provider=None: value)(voice_name, output_provider)
+        self._populate_market_chat_voice_controls(window)
+        self._refresh_market_chat_window(
+            window,
+            status_message=f"Voice changed to {voice_name or 'System Default'}.",
+        )
+
+    async def _listen_market_chat_async(self, window):
+        controller = self.controller
+        if not getattr(controller, "market_chat_voice_input_available", lambda: False)():
+            self._refresh_market_chat_window(window, status_message="Voice input is not available on this system.")
+            return
+
+        window._market_chat_voice_busy = True
+        window._market_chat_voice_mode = "listen"
+        window._market_chat_status_message = "Listening for your question..."
+        self._refresh_market_chat_window(window)
+        try:
+            result = await controller.market_chat_listen(timeout_seconds=8)
+        except Exception as exc:
+            result = {"ok": False, "message": f"Voice listening failed: {exc}", "text": ""}
+
+        window._market_chat_voice_busy = False
+        window._market_chat_voice_mode = ""
+        text = str(result.get("text", "") or "").strip()
+        if not result.get("ok") or not text:
+            self._refresh_market_chat_window(window, status_message=result.get("message") or "No speech was detected.")
+            return
+
+        input_box = getattr(window, "_market_chat_input", None)
+        if input_box is not None:
+            input_box.setPlainText(text)
+        self._refresh_market_chat_window(window, status_message=f"Voice captured: {text}")
+        self._submit_market_chat_prompt(text, window)
+
+    def _listen_market_chat(self, window=None):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window):
+            return
+        if getattr(window, "_market_chat_busy", False) or getattr(window, "_market_chat_voice_busy", False):
+            return
+        runner = self._listen_market_chat_async(window)
+        task_factory = getattr(self.controller, "_create_task", None)
+        if callable(task_factory):
+            window._market_chat_voice_task = task_factory(runner, "market_chat_listen")
+        else:
+            window._market_chat_voice_task = asyncio.create_task(runner)
+
+    async def _speak_market_chat_reply_async(self, window, text):
+        controller = self.controller
+        if not getattr(controller, "market_chat_voice_output_available", lambda: False)():
+            self._refresh_market_chat_window(window, status_message="Voice playback is not available on this system.")
+            return
+
+        message = str(text or "").strip()
+        if not message:
+            self._refresh_market_chat_window(window, status_message="No assistant reply is available to speak yet.")
+            return
+
+        window._market_chat_voice_busy = True
+        window._market_chat_voice_mode = "speak"
+        window._market_chat_status_message = "Speaking Sopotek Pilot reply..."
+        self._refresh_market_chat_window(window)
+        try:
+            result = await controller.market_chat_speak(message)
+        except Exception as exc:
+            result = {"ok": False, "message": f"Voice playback failed: {exc}"}
+
+        window._market_chat_voice_busy = False
+        window._market_chat_voice_mode = ""
+        self._refresh_market_chat_window(window, status_message=result.get("message") or "Voice playback finished.")
+
+    def _speak_market_chat_reply(self, window=None, latest_text=None, automatic=False):
+        window = window or self.detached_tool_windows.get("market_chatgpt")
+        if not self._is_qt_object_alive(window):
+            return
+        if getattr(window, "_market_chat_busy", False) or getattr(window, "_market_chat_voice_busy", False):
+            return
+        message = str(latest_text or self._latest_market_chat_reply(window) or "").strip()
+        if not message:
+            if not automatic:
+                self._refresh_market_chat_window(window, status_message="No assistant reply is available to speak yet.")
+            return
+        runner = self._speak_market_chat_reply_async(window, message)
+        task_factory = getattr(self.controller, "_create_task", None)
+        if callable(task_factory):
+            window._market_chat_voice_task = task_factory(runner, "market_chat_speak")
+        else:
+            window._market_chat_voice_task = asyncio.create_task(runner)
+
+    def _open_market_chat_window(self):
+        window = self._get_or_create_tool_window(
+            "market_chatgpt",
+            "Sopotek Pilot",
+            width=980,
+            height=720,
+        )
+        window.setMinimumSize(760, 620)
+
+        if getattr(window, "_market_chat_transcript", None) is None:
+            container = QWidget()
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(16, 16, 16, 16)
+            layout.setSpacing(12)
+
+            intro = QLabel(
+                "Use Sopotek Pilot to ask about the app, market context, balances, equity, profitability, performance, recommendations, behavior guard, news, Telegram management, screenshots, broker position analysis, and explicit trade commands. Type 'show commands' at any time for the control list."
+            )
+            intro.setWordWrap(True)
+            intro.setStyleSheet("color: #c9d5e8; font-weight: 600; padding: 4px 0 10px 0;")
+            layout.addWidget(intro)
+
+            status = QLabel("Ready. Ask about the app, market, balances, broker positions, screenshots, or type 'show commands' for app controls.")
+            status.setWordWrap(True)
+            status.setStyleSheet(
+                "background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; "
+                "border-radius: 10px; padding: 10px 12px; font-weight: 600;"
+            )
+            layout.addWidget(status)
+
+            prompt_scroll = QScrollArea()
+            prompt_scroll.setWidgetResizable(True)
+            prompt_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            prompt_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            prompt_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            prompt_scroll.setMaximumHeight(72)
+            prompt_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+            prompt_container = QWidget()
+            prompt_row = QHBoxLayout(prompt_container)
+            prompt_row.setContentsMargins(0, 0, 0, 0)
+            prompt_row.setSpacing(8)
+            for prompt in self._market_chat_quick_prompts():
+                btn = QPushButton(prompt)
+                btn.setStyleSheet(
+                    "QPushButton { background-color:#0f1727; color:#d7dfeb; border:1px solid #24344f; border-radius:10px; padding:8px 10px; }"
+                    "QPushButton:hover { background-color:#17304d; }"
+                )
+                btn.clicked.connect(lambda checked=False, text=prompt: self._submit_market_chat_prompt(text, window))
+                prompt_row.addWidget(btn)
+            prompt_row.addStretch(1)
+            prompt_scroll.setWidget(prompt_container)
+            layout.addWidget(prompt_scroll)
+
+            transcript = QTextBrowser()
+            transcript.setOpenExternalLinks(False)
+            transcript.setMinimumHeight(280)
+            transcript.setStyleSheet(
+                "QTextBrowser { background-color: #0b1220; color: #e6edf7; border: 1px solid #20324d; "
+                "border-radius: 10px; padding: 12px; }"
+            )
+            layout.addWidget(transcript, 1)
+
+            input_box = QTextEdit()
+            input_box.setPlaceholderText(
+                "Ask anything about the app, the market, balances, broker positions, equity, profitability, recommendations, Telegram, screenshots, or type 'show commands'. Trade example: trade buy EUR/USD amount 1000 confirm"
+            )
+            input_box.setMinimumHeight(96)
+            input_box.setMaximumHeight(110)
+            input_box.setStyleSheet(
+                "QTextEdit { background-color: #0f1727; color: #f4f8ff; border: 1px solid #24344f; border-radius: 10px; padding: 10px; }"
+            )
+            layout.addWidget(input_box)
+
+            controls = QGridLayout()
+            controls.setHorizontalSpacing(8)
+            controls.setVerticalSpacing(8)
+            listen_btn = QPushButton("Listen")
+            speak_btn = QPushButton("Speak Reply")
+            auto_speak_btn = QPushButton("Auto Speak")
+            auto_speak_btn.setCheckable(True)
+            provider_picker = QComboBox()
+            provider_picker.setMinimumWidth(130)
+            output_picker = QComboBox()
+            output_picker.setMinimumWidth(130)
+            voice_picker = QComboBox()
+            voice_picker.setMinimumWidth(230)
+            refresh_voices_btn = QPushButton("Refresh Voices")
+            send_btn = QPushButton("Send")
+            clear_btn = QPushButton("Clear Chat")
+            listen_btn.clicked.connect(lambda: self._listen_market_chat(window))
+            speak_btn.clicked.connect(lambda: self._speak_market_chat_reply(window))
+            provider_picker.currentIndexChanged.connect(lambda _index: self._set_market_chat_voice_provider(window))
+            output_picker.currentIndexChanged.connect(lambda _index: self._set_market_chat_voice_output_provider(window))
+            voice_picker.currentIndexChanged.connect(lambda _index: self._set_market_chat_voice(window))
+            refresh_voices_btn.clicked.connect(lambda: self._refresh_market_chat_voice_choices(window, announce=True))
+            send_btn.clicked.connect(lambda: self._submit_market_chat_prompt(window=window))
+            clear_btn.clicked.connect(lambda: self._clear_market_chat(window))
+            controls.addWidget(listen_btn, 0, 0)
+            controls.addWidget(speak_btn, 0, 1)
+            controls.addWidget(auto_speak_btn, 0, 2)
+            controls.addWidget(clear_btn, 0, 3)
+            controls.addWidget(send_btn, 0, 4)
+            controls.addWidget(QLabel("Recognition"), 1, 0)
+            controls.addWidget(provider_picker, 1, 1)
+            controls.addWidget(QLabel("Speech"), 1, 2)
+            controls.addWidget(output_picker, 1, 3)
+            controls.addWidget(refresh_voices_btn, 1, 4)
+            controls.addWidget(QLabel("Voice"), 2, 0)
+            controls.addWidget(voice_picker, 2, 1, 1, 4)
+            controls.setColumnStretch(1, 1)
+            controls.setColumnStretch(3, 1)
+            controls.setColumnStretch(4, 1)
+            layout.addLayout(controls)
+
+            voice_meta = QLabel("")
+            voice_meta.setWordWrap(True)
+            voice_meta.setStyleSheet("color: #8fa7c6; padding: 2px 0 8px 0;")
+            layout.addWidget(voice_meta)
+
+            confirm_panel = QFrame()
+            confirm_panel.setVisible(False)
+            confirm_panel.setStyleSheet(
+                "QFrame { background-color: #1f1712; border: 1px solid #8b5a2b; border-radius: 12px; }"
+                "QLabel { color: #ffe2bb; font-weight: 600; }"
+            )
+            confirm_layout = QHBoxLayout(confirm_panel)
+            confirm_layout.setContentsMargins(12, 10, 12, 10)
+            confirm_layout.setSpacing(10)
+            confirm_label = QLabel("")
+            confirm_label.setWordWrap(True)
+            confirm_btn = QPushButton("Confirm Action")
+            cancel_btn = QPushButton("Cancel Action")
+            confirm_btn.setStyleSheet(
+                "QPushButton { background-color:#2f6f44; color:#eafff0; border:1px solid #4ba66e; border-radius:10px; padding:8px 12px; font-weight:700; }"
+                "QPushButton:hover { background-color:#3d8957; }"
+            )
+            cancel_btn.setStyleSheet(
+                "QPushButton { background-color:#4a1c22; color:#ffe2e5; border:1px solid #b05f6b; border-radius:10px; padding:8px 12px; font-weight:700; }"
+                "QPushButton:hover { background-color:#61252d; }"
+            )
+            confirm_btn.clicked.connect(lambda: self._confirm_market_chat_action(window))
+            cancel_btn.clicked.connect(lambda: self._cancel_market_chat_action(window))
+            confirm_layout.addWidget(confirm_label, 1)
+            confirm_layout.addWidget(confirm_btn)
+            confirm_layout.addWidget(cancel_btn)
+            layout.addWidget(confirm_panel)
+
+            input_box.textChanged.connect(lambda: self._refresh_market_chat_window(window))
+
+            window.setCentralWidget(container)
+            window._market_chat_transcript = transcript
+            window._market_chat_status = status
+            window._market_chat_input = input_box
+            window._market_chat_send_btn = send_btn
+            window._market_chat_clear_btn = clear_btn
+            window._market_chat_listen_btn = listen_btn
+            window._market_chat_speak_btn = speak_btn
+            window._market_chat_auto_speak_btn = auto_speak_btn
+            window._market_chat_provider_picker = provider_picker
+            window._market_chat_output_picker = output_picker
+            window._market_chat_voice_picker = voice_picker
+            window._market_chat_refresh_voices_btn = refresh_voices_btn
+            window._market_chat_voice_meta = voice_meta
+            window._market_chat_confirm_panel = confirm_panel
+            window._market_chat_confirm_label = confirm_label
+            window._market_chat_confirm_btn = confirm_btn
+            window._market_chat_cancel_btn = cancel_btn
+            window._market_chat_history = []
+            window._market_chat_busy = False
+            window._market_chat_voice_busy = False
+            window._market_chat_voice_mode = ""
+            window._market_chat_voice_controls_updating = False
+            window._market_chat_loading_voices = False
+            window._market_chat_voice_choices = []
+            window._market_chat_status_message = (
+                "Ready. Speak or type a question about the app, market, balances, broker positions, screenshots, or type 'show commands' for app controls."
+                if getattr(self.controller, "market_chat_voice_available", lambda: False)()
+                else status.text()
+            )
+            self._populate_market_chat_voice_controls(window)
+            self._refresh_market_chat_voice_choices(window)
+
+        self._refresh_market_chat_window(window)
+        window.show()
+        window.adjustSize()
+        if window.width() < 900 or window.height() < 680:
+            window.resize(max(window.width(), 900), max(window.height(), 680))
+        window.raise_()
+        window.activateWindow()
+
+    def _refresh_recommendations_window(self):
+        window = self.detached_tool_windows.get("trade_recommendations")
+        if window is None:
+            return
+        if not self._is_qt_object_alive(window):
+            self.detached_tool_windows.pop("trade_recommendations", None)
+            return
+        self._populate_recommendations_window(window)
+
+    def _populate_recommendations_window(self, window):
+        table = getattr(window, "_recommendations_table", None)
+        summary = getattr(window, "_recommendations_summary", None)
+        details = getattr(window, "_recommendations_details", None)
+        if table is None or summary is None or details is None:
+            return
+
+        rows = self._recommendation_rows()
+        selected_symbol = str(getattr(window, "_selected_symbol", "") or "").upper()
+
+        table.setRowCount(len(rows))
+        selected_row = -1
+        for row, item in enumerate(rows):
+            reason_text = str(item.get("reason", "") or "Reason not found in runtime data.")
+            compact_reason = reason_text if len(reason_text) <= 72 else f"{reason_text[:69]}..."
+            values = [
+                item.get("symbol", ""),
+                str(item.get("signal", "") or ""),
+                f"{float(item.get('confidence', 0.0) or 0.0):.2f}",
+                str(item.get("strategy", "") or ""),
+                str(item.get("regime", "") or ""),
+                compact_reason,
+                str(item.get("timestamp", "") or ""),
+            ]
+            for col, value in enumerate(values):
+                table.setItem(row, col, QTableWidgetItem(value))
+            if str(item.get("symbol", "")).upper() == selected_symbol:
+                selected_row = row
+
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(True)
+        summary.setText(self._recommendation_summary_text(rows))
+
+        if rows:
+            if selected_row < 0:
+                selected_row = 0
+                window._selected_symbol = str(rows[0].get("symbol", "") or "")
+            table.selectRow(selected_row)
+            details.setHtml(self._recommendation_details_html(rows[selected_row]))
+        else:
+            window._selected_symbol = ""
+            details.setHtml(self._recommendation_details_html(None))
+
+    def _update_recommendation_details(self, window):
+        if window is None or not self._is_qt_object_alive(window):
+            return
+        table = getattr(window, "_recommendations_table", None)
+        details = getattr(window, "_recommendations_details", None)
+        if table is None or details is None:
+            return
+        row = table.currentRow()
+        if row < 0:
+            details.setHtml(self._recommendation_details_html(None))
+            return
+        symbol_item = table.item(row, 0)
+        symbol = str(symbol_item.text() if symbol_item is not None else "").upper()
+        window._selected_symbol = symbol
+        details.setHtml(self._recommendation_details_html(self._recommendation_records.get(symbol)))
+
+    def _open_recommendations_window(self):
+        window = self._get_or_create_tool_window(
+            "trade_recommendations",
+            "Trade Recommendations",
+            width=1080,
+            height=640,
+        )
+
+        if getattr(window, "_recommendations_table", None) is None:
+            container = QWidget()
+            layout = QVBoxLayout(container)
+
+            intro = QLabel(
+                "Review the symbols currently recommended by the strategy engine and AI monitor, with the reason behind each trade idea."
+            )
+            intro.setWordWrap(True)
+            intro.setStyleSheet("color: #c9d5e8; font-weight: 600; padding: 4px 0 10px 0;")
+            layout.addWidget(intro)
+
+            summary = QLabel()
+            summary.setWordWrap(True)
+            summary.setStyleSheet(
+                "background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; "
+                "border-radius: 10px; padding: 10px 12px; font-weight: 600;"
+            )
+            layout.addWidget(summary)
+
+            table = QTableWidget()
+            table.setAlternatingRowColors(True)
+            table.setColumnCount(7)
+            table.setHorizontalHeaderLabels(
+                ["Symbol", "Action", "Confidence", "Source", "Regime", "Why", "Time"]
+            )
+            layout.addWidget(table)
+
+            details = QTextBrowser()
+            details.setStyleSheet(
+                "QTextBrowser { background-color: #0b1220; color: #e6edf7; border: 1px solid #20324d; "
+                "border-radius: 10px; padding: 14px; }"
+            )
+            layout.addWidget(details)
+
+            window.setCentralWidget(container)
+            window._recommendations_summary = summary
+            window._recommendations_table = table
+            window._recommendations_details = details
+            window._selected_symbol = ""
+
+            table.itemSelectionChanged.connect(lambda: self._update_recommendation_details(window))
+
+            sync_timer = QTimer(window)
+            sync_timer.timeout.connect(lambda: self._populate_recommendations_window(window))
+            sync_timer.start(1200)
+            window._sync_timer = sync_timer
+
+        self._populate_recommendations_window(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
     def _create_regime_panel(self):
 
@@ -5351,15 +10434,175 @@ def candles_to_df(df):
 
 
 async def _hotfix_prepare_backtest_context(self):
+    return await _hotfix_prepare_backtest_context_with_selection(self)
+
+
+def _hotfix_backtest_symbol_candidates(self):
+    candidates = []
+
+    chart = None
+    try:
+        chart = self._current_chart_widget()
+    except Exception:
+        chart = None
+
+    for value in [
+        getattr(chart, "symbol", None),
+        getattr(self, "symbol", None),
+        getattr(getattr(self, "symbol_picker", None), "currentText", lambda: "")(),
+    ]:
+        text = str(value or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    for symbol in list(getattr(self.controller, "symbols", []) or []):
+        text = str(symbol or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    return candidates
+
+
+def _hotfix_backtest_timeframe_candidates(self):
+    candidates = []
+    for timeframe in list(getattr(self, "timeframe_buttons", {}).keys()):
+        text = str(timeframe or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+    for timeframe in ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1mn"]:
+        if timeframe not in candidates:
+            candidates.append(timeframe)
+    return candidates
+
+
+def _hotfix_refresh_backtest_selectors(self, window=None):
+    window = window or getattr(self, "detached_tool_windows", {}).get("backtesting_workspace")
+    if window is None:
+        return
+
+    symbol_picker = getattr(window, "_backtest_symbol_picker", None)
+    strategy_picker = getattr(window, "_backtest_strategy_picker", None)
+    timeframe_picker = getattr(window, "_backtest_timeframe_picker", None)
+    if symbol_picker is None or strategy_picker is None or timeframe_picker is None:
+        return
+
+    current_symbol = str(symbol_picker.currentText()).strip()
+    current_strategy = str(strategy_picker.currentText()).strip()
+    current_timeframe = str(timeframe_picker.currentText()).strip()
+    context = getattr(self, "_backtest_context", {}) or {}
+
+    symbol_candidates = _hotfix_backtest_symbol_candidates(self)
+    target_symbol = context.get("symbol") or current_symbol or (symbol_candidates[0] if symbol_candidates else "")
+    target_strategy = Strategy.normalize_strategy_name(
+        context.get("strategy_name")
+        or current_strategy
+        or getattr(self.controller, "strategy_name", None)
+        or getattr(getattr(self.controller, "config", None), "strategy", "Trend Following")
+    )
+    timeframe_candidates = _hotfix_backtest_timeframe_candidates(self)
+    target_timeframe = str(
+        context.get("timeframe")
+        or current_timeframe
+        or getattr(self, "current_timeframe", getattr(self.controller, "time_frame", "1h"))
+    ).strip()
+
+    symbol_picker.blockSignals(True)
+    symbol_picker.clear()
+    for symbol in symbol_candidates:
+        symbol_picker.addItem(symbol)
+    if target_symbol and symbol_picker.findText(target_symbol) < 0:
+        symbol_picker.addItem(target_symbol)
+    if target_symbol:
+        symbol_picker.setCurrentText(target_symbol)
+    symbol_picker.blockSignals(False)
+
+    strategy_picker.blockSignals(True)
+    strategy_picker.clear()
+    for name in list(dict.fromkeys([*Strategy.AVAILABLE_STRATEGIES, target_strategy])):
+        strategy_picker.addItem(name)
+    strategy_picker.setCurrentText(target_strategy)
+    strategy_picker.blockSignals(False)
+
+    timeframe_picker.blockSignals(True)
+    timeframe_picker.clear()
+    for name in timeframe_candidates:
+        timeframe_picker.addItem(name)
+    if target_timeframe and timeframe_picker.findText(target_timeframe) < 0:
+        timeframe_picker.addItem(target_timeframe)
+    timeframe_picker.setCurrentText(target_timeframe)
+    timeframe_picker.blockSignals(False)
+
+
+def _hotfix_backtest_selection_changed(self):
+    if getattr(self, "_backtest_running", False):
+        return
+
+    window = getattr(self, "detached_tool_windows", {}).get("backtesting_workspace")
+    if window is None:
+        return
+
+    symbol_picker = getattr(window, "_backtest_symbol_picker", None)
+    strategy_picker = getattr(window, "_backtest_strategy_picker", None)
+    timeframe_picker = getattr(window, "_backtest_timeframe_picker", None)
+    if symbol_picker is None or strategy_picker is None or timeframe_picker is None:
+        return
+
+    selected_symbol = str(symbol_picker.currentText()).strip()
+    selected_strategy = Strategy.normalize_strategy_name(strategy_picker.currentText())
+    selected_timeframe = str(timeframe_picker.currentText()).strip() or getattr(self, "current_timeframe", getattr(self.controller, "time_frame", "1h"))
+    previous = getattr(self, "_backtest_context", {}) or {}
+    timeframe = selected_timeframe
+
+    dataset = None
+    buffers = getattr(self.controller, "candle_buffers", {})
+    if hasattr(buffers, "get"):
+        dataset = (buffers.get(selected_symbol) or {}).get(timeframe)
+
+    selection_changed = (
+        selected_symbol != str(previous.get("symbol") or "").strip()
+        or selected_strategy != Strategy.normalize_strategy_name(previous.get("strategy_name"))
+        or selected_timeframe != str(previous.get("timeframe") or "").strip()
+    )
+
+    self._backtest_context = {
+        "symbol": selected_symbol,
+        "timeframe": timeframe,
+        "data": dataset.copy() if hasattr(dataset, "copy") else dataset,
+        "strategy": previous.get("strategy"),
+        "strategy_name": selected_strategy,
+    }
+
+    if selection_changed:
+        self.results = None
+        self.backtest_report = None
+
+    info = "Selection updated. Start backtest when ready."
+    if dataset is None or getattr(dataset, "empty", False):
+        info = "Selection updated. Candle data will load when backtest starts."
+    self._refresh_backtest_window(message=info)
+
+
+async def _hotfix_prepare_backtest_context_with_selection(self, symbol=None, timeframe=None, strategy_name=None):
     chart = self._current_chart_widget()
     if chart is None and hasattr(self, "_iter_chart_widgets"):
         charts = self._iter_chart_widgets()
         chart = charts[0] if charts else None
 
-    symbol = getattr(chart, "symbol", None) or getattr(self, "symbol", None)
-    timeframe = getattr(chart, "timeframe", None) or getattr(self, "current_timeframe", "1h")
+    window = getattr(self, "detached_tool_windows", {}).get("backtesting_workspace")
+    symbol_picker = getattr(window, "_backtest_symbol_picker", None) if window is not None else None
+    strategy_picker = getattr(window, "_backtest_strategy_picker", None) if window is not None else None
+
+    selected_symbol = str(symbol or "").strip() or (str(symbol_picker.currentText()).strip() if symbol_picker is not None else "")
+    selected_strategy = str(strategy_name or "").strip() or (str(strategy_picker.currentText()).strip() if strategy_picker is not None else "")
+
+    symbol = selected_symbol or getattr(chart, "symbol", None) or getattr(self, "symbol", None)
     if not symbol:
-        raise RuntimeError("Select a chart before starting a backtest")
+        candidates = _hotfix_backtest_symbol_candidates(self)
+        symbol = candidates[0] if candidates else None
+
+    timeframe = str(timeframe or "").strip() or getattr(chart, "timeframe", None) or getattr(self, "current_timeframe", "1h")
+    if not symbol:
+        raise RuntimeError("No symbol is available for backtesting")
 
     strategy_source = None
     trading_system = getattr(self.controller, "trading_system", None)
@@ -5383,7 +10626,11 @@ async def _hotfix_prepare_backtest_context(self):
     if frame is None or getattr(frame, "empty", False):
         raise RuntimeError(f"No candle history available for {symbol} {timeframe}")
 
-    strategy_name = getattr(self.controller, "strategy_name", None) or getattr(getattr(self.controller, "config", None), "strategy", None)
+    strategy_name = Strategy.normalize_strategy_name(
+        selected_strategy
+        or getattr(self.controller, "strategy_name", None)
+        or getattr(getattr(self.controller, "config", None), "strategy", None)
+    )
     return {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -5394,6 +10641,7 @@ async def _hotfix_prepare_backtest_context(self):
 
 
 async def _hotfix_run_backtest_clicked(self):
+    self._show_backtest_window()
     try:
         context = await _hotfix_prepare_backtest_context(self)
 
@@ -5414,13 +10662,13 @@ async def _hotfix_run_backtest_clicked(self):
         self._append_backtest_journal(
             f"Initialized strategy tester for {context['symbol']} {context['timeframe']} using {context.get('strategy_name') or 'Default'}."
         )
-        self._show_backtest_window()
+        _hotfix_refresh_backtest_selectors(self)
         self._refresh_backtest_window(message="Backtest engine initialized.")
 
     except Exception as e:
         self.system_console.log(f"Backtest initialization error: {e}")
         self._append_backtest_journal(f"Initialization failed: {e}", "ERROR")
-        self._show_backtest_window()
+        _hotfix_refresh_backtest_selectors(self)
         self._refresh_backtest_window(message=f"Backtest initialization error: {e}")
 
 
@@ -5468,36 +10716,53 @@ async def _hotfix_run_backtest_async(self, data, symbol, strategy_name, timefram
         self._refresh_backtest_window()
 
 
+async def _hotfix_prepare_and_run_backtest(self):
+    try:
+        context = await _hotfix_prepare_backtest_context(self)
+        self.backtest_engine = BacktestEngine(
+            strategy=context["strategy"],
+            simulator=Simulator(
+                initial_balance=getattr(self.controller, "initial_capital", 10000)
+            ),
+        )
+        self._backtest_context = context
+        self.results = None
+        self.backtest_report = None
+        self._backtest_running = True
+        self._backtest_stop_requested = False
+        self._backtest_stop_event = threading.Event()
+        _hotfix_refresh_backtest_selectors(self)
+        self._append_backtest_journal(
+            f"Prepared {context['symbol']} {context['timeframe']} using {context.get('strategy_name') or 'Default'}."
+        )
+        self._refresh_backtest_window(message="Backtest running...")
+        data = candles_to_df(context.get("data"))
+        if data is None or not hasattr(data, "__len__") or len(data) == 0:
+            raise RuntimeError("No historical data available for backtesting.")
+        await _hotfix_run_backtest_async(
+            self,
+            data,
+            context.get("symbol", "BACKTEST"),
+            context.get("strategy_name"),
+            context.get("timeframe", "-"),
+        )
+    except Exception as e:
+        self._backtest_running = False
+        self._backtest_stop_event = None
+        self._backtest_task = None
+        self.system_console.log(f"Backtest failed to start: {e}", "ERROR")
+        self._append_backtest_journal(f"Backtest failed to start: {e}", "ERROR")
+        self._refresh_backtest_window(message=f"Backtest failed to start: {e}")
+
+
 def _hotfix_start_backtest(self):
     if getattr(self, "_backtest_running", False):
         self.stop_backtest()
         return
 
     try:
-        if not hasattr(self, "backtest_engine"):
-            self.system_console.log("Backtest engine not initialized.")
-            self._append_backtest_journal("Backtest engine not initialized.", "ERROR")
-            self._refresh_backtest_window(message="Backtest engine not initialized.")
-            return
-
-        backtest_context = getattr(self, "_backtest_context", {}) or {}
-        symbol = backtest_context.get("symbol", "BACKTEST")
-        strategy_name = backtest_context.get("strategy_name")
-        timeframe = backtest_context.get("timeframe", "-")
-        data = candles_to_df(backtest_context.get("data"))
-        if data is None or not hasattr(data, "__len__") or len(data) == 0:
-            self.system_console.log("No historical data available for backtesting.")
-            self._append_backtest_journal("No historical data available for backtesting.", "ERROR")
-            self._refresh_backtest_window(message="No historical data available for backtesting.")
-            return
-
-        self.results = None
-        self.backtest_report = None
-        self._backtest_running = True
-        self._backtest_stop_requested = False
-        self._backtest_stop_event = threading.Event()
-        self._refresh_backtest_window(message="Backtest running...")
-        runner = _hotfix_run_backtest_async(self, data, symbol, strategy_name, timeframe)
+        self._show_backtest_window()
+        runner = _hotfix_prepare_and_run_backtest(self)
         create_task = getattr(self.controller, "_create_task", None)
         if callable(create_task):
             self._backtest_task = create_task(runner, "backtest_run")
@@ -5565,6 +10830,28 @@ def _hotfix_show_optimization_window(self):
         status.setStyleSheet("color: #e6edf7; font-weight: 700;")
         layout.addWidget(status)
 
+        selection_frame = QFrame()
+        selection_frame.setStyleSheet(
+            "QFrame { background-color: #0f1727; border: 1px solid #24344f; border-radius: 10px; }"
+            "QLabel { color: #d7dfeb; font-weight: 700; }"
+            "QComboBox { background-color: #0b1220; color: #f4f8ff; border: 1px solid #2a3d5c; border-radius: 6px; padding: 6px 10px; min-width: 180px; }"
+        )
+        selection_layout = QGridLayout(selection_frame)
+        selection_layout.setContentsMargins(14, 12, 14, 12)
+        selection_layout.setHorizontalSpacing(16)
+        selection_layout.setVerticalSpacing(8)
+
+        symbol_picker = QComboBox()
+        strategy_picker = QComboBox()
+        timeframe_picker = QComboBox()
+        selection_layout.addWidget(QLabel("Optimize Symbol"), 0, 0)
+        selection_layout.addWidget(symbol_picker, 0, 1)
+        selection_layout.addWidget(QLabel("Optimize Strategy"), 0, 2)
+        selection_layout.addWidget(strategy_picker, 0, 3)
+        selection_layout.addWidget(QLabel("Timeframe"), 1, 0)
+        selection_layout.addWidget(timeframe_picker, 1, 1)
+        layout.addWidget(selection_frame)
+
         controls = QHBoxLayout()
         run_btn = QPushButton("Run Optimization")
         apply_btn = QPushButton("Apply Best Params")
@@ -5603,7 +10890,14 @@ def _hotfix_show_optimization_window(self):
         window._optimization_table = table
         window._optimization_run_btn = run_btn
         window._optimization_apply_btn = apply_btn
+        window._optimization_symbol_picker = symbol_picker
+        window._optimization_strategy_picker = strategy_picker
+        window._optimization_timeframe_picker = timeframe_picker
+        symbol_picker.currentTextChanged.connect(lambda _text: _hotfix_optimization_selection_changed(self))
+        strategy_picker.currentTextChanged.connect(lambda _text: _hotfix_optimization_selection_changed(self))
+        timeframe_picker.currentTextChanged.connect(lambda _text: _hotfix_optimization_selection_changed(self))
 
+    _hotfix_refresh_optimization_selectors(self, window)
     self._refresh_optimization_window(window)
     window.show()
     window.raise_()
@@ -5621,13 +10915,19 @@ def _hotfix_refresh_optimization_window(self, window=None, message=None):
     table = getattr(window, "_optimization_table", None)
     run_btn = getattr(window, "_optimization_run_btn", None)
     apply_btn = getattr(window, "_optimization_apply_btn", None)
+    symbol_picker = getattr(window, "_optimization_symbol_picker", None)
+    strategy_picker = getattr(window, "_optimization_strategy_picker", None)
+    timeframe_picker = getattr(window, "_optimization_timeframe_picker", None)
     if status is None or summary is None or table is None:
         return
 
     context = getattr(self, "_optimization_context", {}) or {}
-    symbol = context.get("symbol", "-")
-    timeframe = context.get("timeframe", "-")
-    strategy_name = context.get("strategy_name", None) or getattr(self.controller, "strategy_name", None) or getattr(getattr(self.controller, "config", None), "strategy", "Trend Following")
+    selected_symbol = str(symbol_picker.currentText()).strip() if symbol_picker is not None else ""
+    selected_strategy = str(strategy_picker.currentText()).strip() if strategy_picker is not None else ""
+    selected_timeframe = str(timeframe_picker.currentText()).strip() if timeframe_picker is not None else ""
+    symbol = context.get("symbol", selected_symbol or "-")
+    timeframe = context.get("timeframe", selected_timeframe or "-")
+    strategy_name = context.get("strategy_name", None) or selected_strategy or getattr(self.controller, "strategy_name", None) or getattr(getattr(self.controller, "config", None), "strategy", "Trend Following")
     dataset = context.get("data")
     candle_count = len(dataset) if hasattr(dataset, "__len__") else 0
 
@@ -5643,6 +10943,12 @@ def _hotfix_refresh_optimization_window(self, window=None, message=None):
         run_btn.setText("Running..." if running else "Run Optimization")
     if apply_btn is not None:
         apply_btn.setEnabled((not running) and isinstance(getattr(self, "optimization_best", None), dict))
+    if symbol_picker is not None:
+        symbol_picker.setEnabled(not running)
+    if strategy_picker is not None:
+        strategy_picker.setEnabled(not running)
+    if timeframe_picker is not None:
+        timeframe_picker.setEnabled(not running)
 
     results = getattr(self, "optimization_results", None)
     if results is None or getattr(results, "empty", True):
@@ -5675,6 +10981,112 @@ def _hotfix_refresh_optimization_window(self, window=None, message=None):
     table.resizeColumnsToContents()
 
 
+def _hotfix_refresh_optimization_selectors(self, window=None):
+    window = window or getattr(self, "detached_tool_windows", {}).get("strategy_optimization")
+    if window is None:
+        return
+
+    symbol_picker = getattr(window, "_optimization_symbol_picker", None)
+    strategy_picker = getattr(window, "_optimization_strategy_picker", None)
+    timeframe_picker = getattr(window, "_optimization_timeframe_picker", None)
+    if symbol_picker is None or strategy_picker is None or timeframe_picker is None:
+        return
+
+    context = getattr(self, "_optimization_context", {}) or {}
+    current_symbol = str(symbol_picker.currentText()).strip()
+    current_strategy = str(strategy_picker.currentText()).strip()
+    current_timeframe = str(timeframe_picker.currentText()).strip()
+
+    symbol_candidates = _hotfix_backtest_symbol_candidates(self)
+    timeframe_candidates = _hotfix_backtest_timeframe_candidates(self)
+    target_symbol = context.get("symbol") or current_symbol or (symbol_candidates[0] if symbol_candidates else "")
+    target_strategy = Strategy.normalize_strategy_name(
+        context.get("strategy_name")
+        or current_strategy
+        or getattr(self.controller, "strategy_name", None)
+        or getattr(getattr(self.controller, "config", None), "strategy", "Trend Following")
+    )
+    target_timeframe = str(
+        context.get("timeframe")
+        or current_timeframe
+        or getattr(self, "current_timeframe", getattr(self.controller, "time_frame", "1h"))
+    ).strip()
+
+    symbol_picker.blockSignals(True)
+    symbol_picker.clear()
+    for symbol in symbol_candidates:
+        symbol_picker.addItem(symbol)
+    if target_symbol and symbol_picker.findText(target_symbol) < 0:
+        symbol_picker.addItem(target_symbol)
+    if target_symbol:
+        symbol_picker.setCurrentText(target_symbol)
+    symbol_picker.blockSignals(False)
+
+    strategy_picker.blockSignals(True)
+    strategy_picker.clear()
+    for name in list(dict.fromkeys([*Strategy.AVAILABLE_STRATEGIES, target_strategy])):
+        strategy_picker.addItem(name)
+    strategy_picker.setCurrentText(target_strategy)
+    strategy_picker.blockSignals(False)
+
+    timeframe_picker.blockSignals(True)
+    timeframe_picker.clear()
+    for timeframe in timeframe_candidates:
+        timeframe_picker.addItem(timeframe)
+    if target_timeframe and timeframe_picker.findText(target_timeframe) < 0:
+        timeframe_picker.addItem(target_timeframe)
+    timeframe_picker.setCurrentText(target_timeframe)
+    timeframe_picker.blockSignals(False)
+
+
+def _hotfix_optimization_selection_changed(self):
+    if getattr(self, "_optimization_running", False):
+        return
+
+    window = getattr(self, "detached_tool_windows", {}).get("strategy_optimization")
+    if window is None:
+        return
+
+    symbol_picker = getattr(window, "_optimization_symbol_picker", None)
+    strategy_picker = getattr(window, "_optimization_strategy_picker", None)
+    timeframe_picker = getattr(window, "_optimization_timeframe_picker", None)
+    if symbol_picker is None or strategy_picker is None or timeframe_picker is None:
+        return
+
+    selected_symbol = str(symbol_picker.currentText()).strip()
+    selected_strategy = Strategy.normalize_strategy_name(strategy_picker.currentText())
+    selected_timeframe = str(timeframe_picker.currentText()).strip() or getattr(self, "current_timeframe", getattr(self.controller, "time_frame", "1h"))
+    previous = getattr(self, "_optimization_context", {}) or {}
+
+    dataset = None
+    buffers = getattr(self.controller, "candle_buffers", {})
+    if hasattr(buffers, "get"):
+        dataset = (buffers.get(selected_symbol) or {}).get(selected_timeframe)
+
+    selection_changed = (
+        selected_symbol != str(previous.get("symbol") or "").strip()
+        or selected_strategy != Strategy.normalize_strategy_name(previous.get("strategy_name"))
+        or selected_timeframe != str(previous.get("timeframe") or "").strip()
+    )
+
+    self._optimization_context = {
+        "symbol": selected_symbol,
+        "timeframe": selected_timeframe,
+        "data": dataset.copy() if hasattr(dataset, "copy") else dataset,
+        "strategy": previous.get("strategy"),
+        "strategy_name": selected_strategy,
+    }
+
+    if selection_changed:
+        self.optimization_results = None
+        self.optimization_best = None
+
+    info = "Selection updated. Run optimization when ready."
+    if dataset is None or getattr(dataset, "empty", False):
+        info = "Selection updated. Candle data will load when optimization starts."
+    self._refresh_optimization_window(message=info)
+
+
 async def _hotfix_run_strategy_optimization(self):
     if getattr(self, "_optimization_running", False):
         self._show_optimization_window()
@@ -5684,7 +11096,13 @@ async def _hotfix_run_strategy_optimization(self):
     try:
         from backtesting.optimizer import StrategyOptimizer
 
-        context = await _hotfix_prepare_backtest_context(self)
+        self._show_optimization_window()
+        context = await _hotfix_prepare_backtest_context_with_selection(
+            self,
+            symbol=str(getattr(getattr(self.detached_tool_windows.get("strategy_optimization"), "_optimization_symbol_picker", None), "currentText", lambda: "")()).strip() or None,
+            timeframe=str(getattr(getattr(self.detached_tool_windows.get("strategy_optimization"), "_optimization_timeframe_picker", None), "currentText", lambda: "")()).strip() or None,
+            strategy_name=str(getattr(getattr(self.detached_tool_windows.get("strategy_optimization"), "_optimization_strategy_picker", None), "currentText", lambda: "")()).strip() or None,
+        )
         data = candles_to_df(context.get("data"))
         if data is None or not hasattr(data, "__len__") or len(data) == 0:
             raise RuntimeError("No historical data available for optimization")
@@ -5696,6 +11114,7 @@ async def _hotfix_run_strategy_optimization(self):
         self._optimization_running = True
         self._optimization_status_message = "Optimization running..."
         self._optimization_context = context
+        _hotfix_refresh_optimization_selectors(self)
         self._show_optimization_window()
         self._refresh_optimization_window(message="Optimization running...")
         await asyncio.sleep(0)
@@ -5779,6 +11198,575 @@ def _hotfix_optimize_strategy(self):
     asyncio.get_event_loop().create_task(self._run_strategy_optimization())
 
 
+def _hotfix_ml_model_family_options():
+    return [
+        ("Linear", "linear"),
+        ("Tree Ensemble", "tree"),
+        ("Sequence Linear", "sequence"),
+    ]
+
+
+def _hotfix_get_ml_pipeline(self):
+    pipeline = getattr(self, "_ml_research_pipeline", None)
+    if pipeline is None:
+        pipeline = MLResearchPipeline()
+        self._ml_research_pipeline = pipeline
+    return pipeline
+
+
+def _hotfix_show_ml_research_window(self):
+    window = self._get_or_create_tool_window(
+        "ml_research_lab",
+        "ML Research Lab",
+        width=1180,
+        height=760,
+    )
+
+    if getattr(window, "_ml_research_container", None) is None:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        status = QLabel("ML research workspace ready.")
+        status.setStyleSheet("color: #e6edf7; font-weight: 700;")
+        layout.addWidget(status)
+
+        selection_frame = QFrame()
+        selection_frame.setStyleSheet(
+            "QFrame { background-color: #0f1727; border: 1px solid #24344f; border-radius: 10px; }"
+            "QLabel { color: #d7dfeb; font-weight: 700; }"
+            "QComboBox, QDoubleSpinBox { background-color: #0b1220; color: #f4f8ff; border: 1px solid #2a3d5c; border-radius: 6px; padding: 6px 10px; min-width: 140px; }"
+        )
+        selection_layout = QGridLayout(selection_frame)
+        selection_layout.setContentsMargins(14, 12, 14, 12)
+        selection_layout.setHorizontalSpacing(16)
+        selection_layout.setVerticalSpacing(8)
+
+        symbol_picker = QComboBox()
+        timeframe_picker = QComboBox()
+        family_picker = QComboBox()
+        for label, value in _hotfix_ml_model_family_options():
+            family_picker.addItem(label, value)
+
+        horizon_spin = QDoubleSpinBox()
+        horizon_spin.setDecimals(0)
+        horizon_spin.setRange(1, 50)
+        horizon_spin.setValue(3)
+
+        threshold_spin = QDoubleSpinBox()
+        threshold_spin.setDecimals(4)
+        threshold_spin.setRange(0.0, 0.25)
+        threshold_spin.setSingleStep(0.0005)
+        threshold_spin.setValue(0.0015)
+
+        test_size_spin = QDoubleSpinBox()
+        test_size_spin.setDecimals(2)
+        test_size_spin.setRange(0.10, 0.50)
+        test_size_spin.setSingleStep(0.05)
+        test_size_spin.setValue(0.25)
+
+        sequence_spin = QDoubleSpinBox()
+        sequence_spin.setDecimals(0)
+        sequence_spin.setRange(2, 12)
+        sequence_spin.setValue(4)
+
+        train_window_spin = QDoubleSpinBox()
+        train_window_spin.setDecimals(0)
+        train_window_spin.setRange(20, 5000)
+        train_window_spin.setValue(80)
+
+        test_window_spin = QDoubleSpinBox()
+        test_window_spin.setDecimals(0)
+        test_window_spin.setRange(10, 1000)
+        test_window_spin.setValue(30)
+
+        selection_layout.addWidget(QLabel("Symbol"), 0, 0)
+        selection_layout.addWidget(symbol_picker, 0, 1)
+        selection_layout.addWidget(QLabel("Timeframe"), 0, 2)
+        selection_layout.addWidget(timeframe_picker, 0, 3)
+        selection_layout.addWidget(QLabel("Model Family"), 0, 4)
+        selection_layout.addWidget(family_picker, 0, 5)
+        selection_layout.addWidget(QLabel("Horizon"), 1, 0)
+        selection_layout.addWidget(horizon_spin, 1, 1)
+        selection_layout.addWidget(QLabel("Return Threshold"), 1, 2)
+        selection_layout.addWidget(threshold_spin, 1, 3)
+        selection_layout.addWidget(QLabel("Test Size"), 1, 4)
+        selection_layout.addWidget(test_size_spin, 1, 5)
+        selection_layout.addWidget(QLabel("Sequence Length"), 2, 0)
+        selection_layout.addWidget(sequence_spin, 2, 1)
+        selection_layout.addWidget(QLabel("WF Train"), 2, 2)
+        selection_layout.addWidget(train_window_spin, 2, 3)
+        selection_layout.addWidget(QLabel("WF Test"), 2, 4)
+        selection_layout.addWidget(test_window_spin, 2, 5)
+        layout.addWidget(selection_frame)
+
+        controls = QHBoxLayout()
+        train_btn = QPushButton("Train Model")
+        walk_forward_btn = QPushButton("Run Walk-Forward")
+        deploy_btn = QPushButton("Deploy Selected")
+        train_btn.clicked.connect(lambda: asyncio.get_event_loop().create_task(self._run_ml_model_training()))
+        walk_forward_btn.clicked.connect(lambda: asyncio.get_event_loop().create_task(self._run_ml_walk_forward()))
+        deploy_btn.clicked.connect(self._deploy_selected_ml_model)
+        controls.addWidget(train_btn)
+        controls.addWidget(walk_forward_btn)
+        controls.addWidget(deploy_btn)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        summary = QLabel("-")
+        summary.setWordWrap(True)
+        summary.setStyleSheet("color: #9fb0c7;")
+        layout.addWidget(summary)
+
+        tabs = QTabWidget()
+
+        experiments_table = QTableWidget()
+        experiments_table.setAlternatingRowColors(True)
+        experiments_table.setSelectionBehavior(QTableWidget.SelectRows)
+        experiments_table.setSelectionMode(QTableWidget.SingleSelection)
+        experiments_table.setColumnCount(8)
+        experiments_table.setHorizontalHeaderLabels(
+            ["Experiment", "Model", "Family", "Symbol", "TF", "Test Acc", "Precision", "Created"]
+        )
+        tabs.addTab(experiments_table, "Experiments")
+
+        walk_table = QTableWidget()
+        walk_table.setAlternatingRowColors(True)
+        walk_table.setColumnCount(7)
+        walk_table.setHorizontalHeaderLabels(
+            ["Window", "Train Rows", "Test Rows", "Accuracy", "Precision", "Recall", "Avg Conf."]
+        )
+        tabs.addTab(walk_table, "Walk-Forward")
+
+        details = QTextBrowser()
+        details.setStyleSheet(
+            "QTextBrowser { background-color: #0b1220; color: #d7dfeb; border: 1px solid #24344f; border-radius: 10px; padding: 10px; }"
+        )
+        tabs.addTab(details, "Details")
+        layout.addWidget(tabs)
+
+        window.setCentralWidget(container)
+        window._ml_research_container = container
+        window._ml_research_status = status
+        window._ml_research_summary = summary
+        window._ml_research_symbol_picker = symbol_picker
+        window._ml_research_timeframe_picker = timeframe_picker
+        window._ml_research_family_picker = family_picker
+        window._ml_research_horizon_spin = horizon_spin
+        window._ml_research_threshold_spin = threshold_spin
+        window._ml_research_test_size_spin = test_size_spin
+        window._ml_research_sequence_spin = sequence_spin
+        window._ml_research_train_window_spin = train_window_spin
+        window._ml_research_test_window_spin = test_window_spin
+        window._ml_research_train_btn = train_btn
+        window._ml_research_walk_btn = walk_forward_btn
+        window._ml_research_deploy_btn = deploy_btn
+        window._ml_research_experiments_table = experiments_table
+        window._ml_research_walk_table = walk_table
+        window._ml_research_details = details
+
+        symbol_picker.currentTextChanged.connect(lambda _text: _hotfix_ml_research_selection_changed(self))
+        timeframe_picker.currentTextChanged.connect(lambda _text: _hotfix_ml_research_selection_changed(self))
+        family_picker.currentIndexChanged.connect(lambda _idx: _hotfix_ml_research_selection_changed(self))
+        horizon_spin.valueChanged.connect(lambda _v: _hotfix_ml_research_selection_changed(self))
+        threshold_spin.valueChanged.connect(lambda _v: _hotfix_ml_research_selection_changed(self))
+        test_size_spin.valueChanged.connect(lambda _v: _hotfix_ml_research_selection_changed(self))
+        sequence_spin.valueChanged.connect(lambda _v: _hotfix_ml_research_selection_changed(self))
+        train_window_spin.valueChanged.connect(lambda _v: _hotfix_ml_research_selection_changed(self))
+        test_window_spin.valueChanged.connect(lambda _v: _hotfix_ml_research_selection_changed(self))
+        experiments_table.itemSelectionChanged.connect(lambda: self._refresh_ml_research_window())
+
+    _hotfix_refresh_ml_research_selectors(self, window)
+    self._refresh_ml_research_window(window)
+    window.show()
+    window.raise_()
+    window.activateWindow()
+    return window
+
+
+def _hotfix_refresh_ml_research_selectors(self, window=None):
+    window = window or getattr(self, "detached_tool_windows", {}).get("ml_research_lab")
+    if window is None:
+        return
+    symbol_picker = getattr(window, "_ml_research_symbol_picker", None)
+    timeframe_picker = getattr(window, "_ml_research_timeframe_picker", None)
+    family_picker = getattr(window, "_ml_research_family_picker", None)
+    if symbol_picker is None or timeframe_picker is None or family_picker is None:
+        return
+
+    context = getattr(self, "_ml_research_context", {}) or {}
+    symbol_candidates = _hotfix_backtest_symbol_candidates(self)
+    timeframe_candidates = _hotfix_backtest_timeframe_candidates(self)
+    target_symbol = str(context.get("symbol") or symbol_picker.currentText() or (symbol_candidates[0] if symbol_candidates else "")).strip()
+    target_timeframe = str(context.get("timeframe") or timeframe_picker.currentText() or getattr(self, "current_timeframe", getattr(self.controller, "time_frame", "1h"))).strip()
+    target_family = str(context.get("model_family") or family_picker.currentData() or "linear").strip()
+
+    symbol_picker.blockSignals(True)
+    symbol_picker.clear()
+    for symbol in symbol_candidates:
+        symbol_picker.addItem(symbol)
+    if target_symbol and symbol_picker.findText(target_symbol) < 0:
+        symbol_picker.addItem(target_symbol)
+    if target_symbol:
+        symbol_picker.setCurrentText(target_symbol)
+    symbol_picker.blockSignals(False)
+
+    timeframe_picker.blockSignals(True)
+    timeframe_picker.clear()
+    for timeframe in timeframe_candidates:
+        timeframe_picker.addItem(timeframe)
+    if target_timeframe and timeframe_picker.findText(target_timeframe) < 0:
+        timeframe_picker.addItem(target_timeframe)
+    timeframe_picker.setCurrentText(target_timeframe)
+    timeframe_picker.blockSignals(False)
+
+    for idx in range(family_picker.count()):
+        if str(family_picker.itemData(idx)) == target_family:
+            family_picker.blockSignals(True)
+            family_picker.setCurrentIndex(idx)
+            family_picker.blockSignals(False)
+            break
+
+
+def _hotfix_ml_research_selection_changed(self):
+    if bool(getattr(self, "_ml_research_running", False)):
+        return
+
+    window = getattr(self, "detached_tool_windows", {}).get("ml_research_lab")
+    if window is None:
+        return
+
+    symbol_picker = getattr(window, "_ml_research_symbol_picker", None)
+    timeframe_picker = getattr(window, "_ml_research_timeframe_picker", None)
+    family_picker = getattr(window, "_ml_research_family_picker", None)
+    if symbol_picker is None or timeframe_picker is None or family_picker is None:
+        return
+
+    self._ml_research_context = {
+        "symbol": str(symbol_picker.currentText() or "").strip(),
+        "timeframe": str(timeframe_picker.currentText() or "").strip(),
+        "model_family": str(family_picker.currentData() or "linear").strip(),
+        "horizon": int(getattr(window, "_ml_research_horizon_spin").value()),
+        "return_threshold": float(getattr(window, "_ml_research_threshold_spin").value()),
+        "test_size": float(getattr(window, "_ml_research_test_size_spin").value()),
+        "sequence_length": int(getattr(window, "_ml_research_sequence_spin").value()),
+        "train_window": int(getattr(window, "_ml_research_train_window_spin").value()),
+        "test_window": int(getattr(window, "_ml_research_test_window_spin").value()),
+    }
+    self._refresh_ml_research_window(message="ML research selection updated.")
+
+
+async def _hotfix_prepare_ml_research_context(self):
+    window = getattr(self, "detached_tool_windows", {}).get("ml_research_lab")
+    context = getattr(self, "_ml_research_context", {}) or {}
+    symbol = str(context.get("symbol") or "").strip() or (
+        str(getattr(getattr(window, "_ml_research_symbol_picker", None), "currentText", lambda: "")()).strip()
+    )
+    timeframe = str(context.get("timeframe") or "").strip() or (
+        str(getattr(getattr(window, "_ml_research_timeframe_picker", None), "currentText", lambda: "")()).strip()
+    )
+    backtest_context = await _hotfix_prepare_backtest_context_with_selection(self, symbol=symbol or None, timeframe=timeframe or None, strategy_name="ML Model")
+    data = backtest_context.get("data")
+    pipeline = _hotfix_get_ml_pipeline(self)
+    dataset = pipeline.build_dataset(
+        data,
+        horizon=int(context.get("horizon", 3) or 3),
+        return_threshold=float(context.get("return_threshold", 0.0015) or 0.0015),
+        symbol=backtest_context.get("symbol"),
+        timeframe=backtest_context.get("timeframe"),
+    )
+    return {
+        **backtest_context,
+        "dataset": dataset,
+        "model_family": str(context.get("model_family") or "linear"),
+        "test_size": float(context.get("test_size", 0.25) or 0.25),
+        "sequence_length": int(context.get("sequence_length", 4) or 4),
+        "train_window": int(context.get("train_window", 80) or 80),
+        "test_window": int(context.get("test_window", 30) or 30),
+    }
+
+
+def _hotfix_populate_ml_experiments_table(self, table, results_frame):
+    if table is None:
+        return
+    frame = results_frame if isinstance(results_frame, pd.DataFrame) else pd.DataFrame()
+    if frame.empty:
+        table.setRowCount(0)
+        return
+    display = frame.copy().sort_values("created_at", ascending=False).reset_index(drop=True)
+    table.setRowCount(len(display))
+    columns = [
+        ("name", "{}"),
+        ("param_model_name", "{}"),
+        ("param_model_family", "{}"),
+        ("symbol", "{}"),
+        ("timeframe", "{}"),
+        ("test_accuracy", "{:.3f}"),
+        ("test_precision", "{:.3f}"),
+        ("created_at", "{}"),
+    ]
+    for row_idx, (_, row) in enumerate(display.iterrows()):
+        for col_idx, (column, fmt) in enumerate(columns):
+            value = row.get(column, "")
+            try:
+                text = fmt.format(float(value)) if fmt != "{}" and value != "" else fmt.format(value)
+            except Exception:
+                text = str(value)
+            item = QTableWidgetItem(text)
+            if col_idx == 1:
+                item.setData(Qt.UserRole, str(row.get("param_model_name") or ""))
+            table.setItem(row_idx, col_idx, item)
+    table.resizeColumnsToContents()
+
+
+def _hotfix_populate_ml_walk_table(self, table, frame):
+    if table is None:
+        return
+    frame = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    if frame.empty:
+        table.setRowCount(0)
+        return
+    display = frame.copy().reset_index(drop=True)
+    table.setRowCount(len(display))
+    columns = [
+        ("window_index", "{:g}"),
+        ("train_rows", "{:g}"),
+        ("test_rows", "{:g}"),
+        ("accuracy", "{:.3f}"),
+        ("precision", "{:.3f}"),
+        ("recall", "{:.3f}"),
+        ("avg_confidence", "{:.3f}"),
+    ]
+    for row_idx, (_, row) in enumerate(display.iterrows()):
+        for col_idx, (column, fmt) in enumerate(columns):
+            value = row.get(column, "")
+            try:
+                text = fmt.format(float(value))
+            except Exception:
+                text = str(value)
+            table.setItem(row_idx, col_idx, QTableWidgetItem(text))
+    table.resizeColumnsToContents()
+
+
+def _hotfix_build_ml_research_details(self, context, result=None, walk_summary=None):
+    lines = ["<h3 style='margin-top:0;'>ML Research Lab</h3>"]
+    if context:
+        lines.append(
+            "<p>"
+            f"<b>Symbol:</b> {html.escape(str(context.get('symbol') or '-'))} | "
+            f"<b>Timeframe:</b> {html.escape(str(context.get('timeframe') or '-'))} | "
+            f"<b>Family:</b> {html.escape(str(context.get('model_family') or '-'))} | "
+            f"<b>Horizon:</b> {html.escape(str(context.get('horizon') or '-'))}"
+            "</p>"
+        )
+    if result is not None:
+        metrics = dict(getattr(result, "metrics", {}) or {})
+        lines.append("<h4>Training Result</h4>")
+        lines.append(
+            "<ul>"
+            f"<li>Model: <b>{html.escape(str(getattr(result, 'model_name', '-') or '-'))}</b></li>"
+            f"<li>Train accuracy: <b>{metrics.get('train_accuracy', 0.0):.3f}</b></li>"
+            f"<li>Test accuracy: <b>{metrics.get('test_accuracy', 0.0):.3f}</b></li>"
+            f"<li>Test precision: <b>{metrics.get('test_precision', 0.0):.3f}</b></li>"
+            f"<li>Test recall: <b>{metrics.get('test_recall', 0.0):.3f}</b></li>"
+            f"<li>Avg test confidence: <b>{metrics.get('avg_test_confidence', 0.0):.3f}</b></li>"
+            "</ul>"
+        )
+    if isinstance(walk_summary, pd.DataFrame) and not walk_summary.empty:
+        lines.append("<h4>Walk-Forward</h4>")
+        lines.append(
+            "<ul>"
+            f"<li>Windows: <b>{len(walk_summary)}</b></li>"
+            f"<li>Avg accuracy: <b>{walk_summary['accuracy'].mean():.3f}</b></li>"
+            f"<li>Avg precision: <b>{walk_summary['precision'].mean():.3f}</b></li>"
+            f"<li>Avg recall: <b>{walk_summary['recall'].mean():.3f}</b></li>"
+            "</ul>"
+        )
+    if result is None and (not isinstance(walk_summary, pd.DataFrame) or walk_summary.empty):
+        lines.append("<p>Train a model or run walk-forward analysis to populate this workspace.</p>")
+    return "".join(lines)
+
+
+def _hotfix_refresh_ml_research_window(self, window=None, message=None):
+    window = window or getattr(self, "detached_tool_windows", {}).get("ml_research_lab")
+    if window is None:
+        return
+
+    status = getattr(window, "_ml_research_status", None)
+    summary = getattr(window, "_ml_research_summary", None)
+    train_btn = getattr(window, "_ml_research_train_btn", None)
+    walk_btn = getattr(window, "_ml_research_walk_btn", None)
+    deploy_btn = getattr(window, "_ml_research_deploy_btn", None)
+    experiments_table = getattr(window, "_ml_research_experiments_table", None)
+    walk_table = getattr(window, "_ml_research_walk_table", None)
+    details = getattr(window, "_ml_research_details", None)
+    if status is None or summary is None or experiments_table is None or walk_table is None or details is None:
+        return
+
+    if message is not None:
+        self._ml_research_status_message = message
+
+    context = getattr(self, "_ml_research_context", {}) or {}
+    running = bool(getattr(self, "_ml_research_running", False))
+    status.setText(getattr(self, "_ml_research_status_message", None) or ("ML research running..." if running else "ML research workspace ready."))
+    summary.setText(
+        f"Symbol: {context.get('symbol', '-')} | Timeframe: {context.get('timeframe', '-')} | "
+        f"Family: {context.get('model_family', '-')} | Horizon: {context.get('horizon', '-')} | "
+        f"Test Size: {float(context.get('test_size', 0.25) or 0.25):.0%}"
+    )
+    if train_btn is not None:
+        train_btn.setEnabled(not running)
+        train_btn.setText("Training..." if running else "Train Model")
+    if walk_btn is not None:
+        walk_btn.setEnabled(not running)
+        walk_btn.setText("Running..." if running else "Run Walk-Forward")
+
+    pipeline = _hotfix_get_ml_pipeline(self)
+    experiment_frame = pipeline.experiment_tracker.to_frame()
+    _hotfix_populate_ml_experiments_table(self, experiments_table, experiment_frame)
+    _hotfix_populate_ml_walk_table(self, walk_table, getattr(self, "_ml_walk_forward_summary", None))
+
+    selected_model_name = ""
+    current_row = experiments_table.currentRow()
+    if current_row >= 0:
+        item = experiments_table.item(current_row, 1)
+        if item is not None:
+            selected_model_name = str(item.data(Qt.UserRole) or item.text() or "").strip()
+    if deploy_btn is not None:
+        deploy_btn.setEnabled((not running) and bool(selected_model_name or getattr(getattr(self, "_ml_latest_result", None), "model_name", "")))
+
+    details.setHtml(
+        _hotfix_build_ml_research_details(
+            self,
+            context,
+            result=getattr(self, "_ml_latest_result", None),
+            walk_summary=getattr(self, "_ml_walk_forward_summary", None),
+        )
+    )
+
+
+async def _hotfix_run_ml_model_training(self):
+    if bool(getattr(self, "_ml_research_running", False)):
+        self._show_ml_research_window()
+        self._refresh_ml_research_window(message="ML research is already running.")
+        return
+
+    try:
+        self._show_ml_research_window()
+        context = await _hotfix_prepare_ml_research_context(self)
+        dataset = context.get("dataset")
+        if dataset is None or dataset.empty:
+            raise RuntimeError("No ML dataset could be built from the selected history")
+
+        self._ml_research_running = True
+        self._ml_research_status_message = "Training ML model..."
+        self._ml_research_context = {**(getattr(self, "_ml_research_context", {}) or {}), **context}
+        self._refresh_ml_research_window(message="Training ML model...")
+
+        pipeline = _hotfix_get_ml_pipeline(self)
+        model_name = (
+            f"{context['symbol'].replace('/', '_')}_{context['timeframe']}_{context['model_family']}_{int(datetime.now().timestamp())}"
+        )
+        result = await asyncio.to_thread(
+            pipeline.train_classifier,
+            dataset,
+            model_name,
+            context["model_family"],
+            context["sequence_length"],
+            context["test_size"],
+            "ml_research_lab",
+            "terminal_training",
+        )
+        self._ml_latest_result = result
+        self.system_console.log(f"ML model trained: {result.model_name}", "INFO")
+        self._ml_research_status_message = "ML training completed."
+        self._refresh_ml_research_window(message="ML training completed.")
+    except Exception as e:
+        self.system_console.log(f"ML training failed: {e}", "ERROR")
+        self._ml_research_status_message = f"ML training failed: {e}"
+        self._refresh_ml_research_window(message=f"ML training failed: {e}")
+    finally:
+        self._ml_research_running = False
+        self._refresh_ml_research_window()
+
+
+async def _hotfix_run_ml_walk_forward(self):
+    if bool(getattr(self, "_ml_research_running", False)):
+        self._show_ml_research_window()
+        self._refresh_ml_research_window(message="ML research is already running.")
+        return
+
+    try:
+        self._show_ml_research_window()
+        context = await _hotfix_prepare_ml_research_context(self)
+        dataset = context.get("dataset")
+        if dataset is None or dataset.empty:
+            raise RuntimeError("No ML dataset could be built from the selected history")
+
+        self._ml_research_running = True
+        self._ml_research_status_message = "Running ML walk-forward..."
+        self._ml_research_context = {**(getattr(self, "_ml_research_context", {}) or {}), **context}
+        self._refresh_ml_research_window(message="Running ML walk-forward...")
+
+        pipeline = _hotfix_get_ml_pipeline(self)
+        summary_df, predictions_df = await asyncio.to_thread(
+            pipeline.run_walk_forward,
+            dataset,
+            context["model_family"],
+            context["sequence_length"],
+            context["train_window"],
+            context["test_window"],
+            None,
+        )
+        self._ml_walk_forward_summary = summary_df
+        self._ml_walk_forward_predictions = predictions_df
+        self.system_console.log("ML walk-forward analysis completed.", "INFO")
+        self._ml_research_status_message = "ML walk-forward completed."
+        self._refresh_ml_research_window(message="ML walk-forward completed.")
+    except Exception as e:
+        self.system_console.log(f"ML walk-forward failed: {e}", "ERROR")
+        self._ml_research_status_message = f"ML walk-forward failed: {e}"
+        self._refresh_ml_research_window(message=f"ML walk-forward failed: {e}")
+    finally:
+        self._ml_research_running = False
+        self._refresh_ml_research_window()
+
+
+def _hotfix_deploy_selected_ml_model(self):
+    try:
+        window = getattr(self, "detached_tool_windows", {}).get("ml_research_lab")
+        pipeline = _hotfix_get_ml_pipeline(self)
+        model_name = ""
+        if window is not None:
+            table = getattr(window, "_ml_research_experiments_table", None)
+            if table is not None and table.currentRow() >= 0:
+                item = table.item(table.currentRow(), 1)
+                if item is not None:
+                    model_name = str(item.data(Qt.UserRole) or item.text() or "").strip()
+        if not model_name:
+            model_name = str(getattr(getattr(self, "_ml_latest_result", None), "model_name", "") or "").strip()
+        if not model_name:
+            raise RuntimeError("Train or select an ML model before deployment")
+
+        trading_system = getattr(self.controller, "trading_system", None)
+        strategy_registry = getattr(trading_system, "strategy", None)
+        if strategy_registry is None:
+            from strategy.strategy_registry import StrategyRegistry
+
+            strategy_registry = StrategyRegistry()
+            if trading_system is not None:
+                trading_system.strategy = strategy_registry
+
+        pipeline.deploy_to_strategy_registry(strategy_registry, model_name, strategy_name="ML Model")
+        self.controller.strategy_name = "ML Model"
+        if hasattr(strategy_registry, "set_active"):
+            strategy_registry.set_active("ML Model")
+        self.system_console.log(f"Deployed ML model: {model_name}", "INFO")
+        self._refresh_ml_research_window(message=f"Deployed ML model: {model_name}")
+    except Exception as e:
+        self.system_console.log(f"ML model deployment failed: {e}", "ERROR")
+        self._refresh_ml_research_window(message=f"ML model deployment failed: {e}")
+
+
 async def _hotfix_reload_chart_data(self, symbol, timeframe):
     try:
         df = None
@@ -5845,12 +11833,170 @@ def _hotfix_settings_int(value, default):
         return default
 
 
+def _hotfix_update_database_mode_state(window):
+    if window is None:
+        return
+
+    mode_picker = getattr(window, "_settings_database_mode", None)
+    url_input = getattr(window, "_settings_database_url", None)
+    hint_label = getattr(window, "_settings_database_hint", None)
+    if mode_picker is None or url_input is None:
+        return
+
+    remote_selected = str(mode_picker.currentData() or "local").strip().lower() == "remote"
+    url_input.setEnabled(remote_selected)
+    if not remote_selected:
+        url_input.setPlaceholderText("Local SQLite is active. Switch to Remote to use a custom database URL.")
+    else:
+        url_input.setPlaceholderText("postgresql+psycopg://user:password@host:5432/dbname")
+
+    if hint_label is not None:
+        if remote_selected:
+            hint_label.setText(
+                "Use any SQLAlchemy connection URL your Python environment supports. "
+                "Example: postgresql+psycopg://user:password@host:5432/dbname"
+            )
+        else:
+            hint_label.setText("Local mode uses Sopotek's built-in SQLite database in the data folder.")
+
+
+def _hotfix_refresh_market_type_picker(window, controller):
+    picker = getattr(window, "_settings_market_type", None)
+    if picker is None:
+        return
+
+    current = str(picker.currentData() or getattr(controller, "market_trade_preference", "auto") or "auto").strip().lower()
+    if hasattr(controller, "supported_market_venues"):
+        supported = list(controller.supported_market_venues() or [])
+    else:
+        supported = ["auto", "spot"]
+    supported = [str(item).strip().lower() for item in supported if str(item).strip()]
+    if not supported:
+        supported = ["auto", "spot"]
+
+    picker.blockSignals(True)
+    picker.clear()
+    for label, value in MARKET_VENUE_CHOICES:
+        if value in supported:
+            picker.addItem(label, value)
+
+    target = current if current in supported else ("auto" if "auto" in supported else supported[0])
+    index = picker.findData(target)
+    picker.setCurrentIndex(index if index >= 0 else 0)
+    picker.blockSignals(False)
+
+
 def _hotfix_get_live_risk_engine(self):
     trading_system = getattr(self.controller, "trading_system", None)
     risk_engine = getattr(trading_system, "risk_engine", None)
     if risk_engine is not None:
         return risk_engine
     return getattr(self.controller, "risk_engine", None)
+
+
+def _hotfix_risk_profile_names():
+    return list(RISK_PROFILE_PRESETS.keys()) + ["Custom"]
+
+
+def _hotfix_normalize_risk_profile_name(name):
+    normalized = str(name or "").strip()
+    if normalized in RISK_PROFILE_PRESETS:
+        return normalized
+    if normalized.lower() == "custom":
+        return "Custom"
+    return "Balanced"
+
+
+def _hotfix_risk_profile_payload(name):
+    normalized = _hotfix_normalize_risk_profile_name(name)
+    payload = dict(RISK_PROFILE_PRESETS.get(normalized) or RISK_PROFILE_PRESETS["Balanced"])
+    payload["name"] = normalized
+    return payload
+
+
+def _hotfix_detect_risk_profile_name(values):
+    max_portfolio = float(values.get("max_portfolio_risk", 0.0) or 0.0)
+    max_trade = float(values.get("max_risk_per_trade", 0.0) or 0.0)
+    max_position = float(values.get("max_position_size_pct", 0.0) or 0.0)
+    max_gross = float(values.get("max_gross_exposure_pct", 0.0) or 0.0)
+    for name, profile in RISK_PROFILE_PRESETS.items():
+        if (
+            abs(max_portfolio - float(profile["max_portfolio_risk"])) <= 1e-9
+            and abs(max_trade - float(profile["max_risk_per_trade"])) <= 1e-9
+            and abs(max_position - float(profile["max_position_size_pct"])) <= 1e-9
+            and abs(max_gross - float(profile["max_gross_exposure_pct"])) <= 1e-9
+        ):
+            return name
+    return "Custom"
+
+
+def _hotfix_set_risk_profile_status(window, profile_name, source=""):
+    label = getattr(window, "_settings_risk_profile_description", None)
+    if label is None:
+        return
+    normalized = _hotfix_normalize_risk_profile_name(profile_name)
+    if normalized == "Custom":
+        label.setText(
+            "Custom profile: these limits no longer match one preset exactly. "
+            "You can keep them as-is or reapply a preset."
+        )
+        return
+    payload = _hotfix_risk_profile_payload(normalized)
+    prefix = f"{normalized}: {payload.get('description', '')}"
+    if source:
+        prefix = f"{source} {prefix}".strip()
+    label.setText(prefix)
+
+
+def _hotfix_apply_risk_profile_to_window(window, profile_name):
+    if window is None:
+        return
+    normalized = _hotfix_normalize_risk_profile_name(profile_name)
+    picker = getattr(window, "_settings_risk_profile", None)
+    if picker is None:
+        return
+    window._risk_profile_updating = True
+    try:
+        if normalized != "Custom":
+            payload = _hotfix_risk_profile_payload(normalized)
+            for attr_name, key in (
+                ("_settings_max_portfolio", "max_portfolio_risk"),
+                ("_settings_max_trade", "max_risk_per_trade"),
+                ("_settings_max_position", "max_position_size_pct"),
+                ("_settings_max_gross", "max_gross_exposure_pct"),
+            ):
+                widget = getattr(window, attr_name, None)
+                if widget is not None:
+                    widget.setValue(float(payload[key]))
+        profile_index = picker.findText(normalized)
+        if profile_index < 0:
+            profile_index = picker.findText("Custom")
+        picker.setCurrentIndex(profile_index if profile_index >= 0 else 0)
+    finally:
+        window._risk_profile_updating = False
+    _hotfix_set_risk_profile_status(window, normalized)
+
+
+def _hotfix_sync_risk_profile_from_window(window):
+    if window is None or bool(getattr(window, "_risk_profile_updating", False)):
+        return
+    profile_name = _hotfix_detect_risk_profile_name(
+        {
+            "max_portfolio_risk": getattr(getattr(window, "_settings_max_portfolio", None), "value", lambda: 0.0)(),
+            "max_risk_per_trade": getattr(getattr(window, "_settings_max_trade", None), "value", lambda: 0.0)(),
+            "max_position_size_pct": getattr(getattr(window, "_settings_max_position", None), "value", lambda: 0.0)(),
+            "max_gross_exposure_pct": getattr(getattr(window, "_settings_max_gross", None), "value", lambda: 0.0)(),
+        }
+    )
+    picker = getattr(window, "_settings_risk_profile", None)
+    if picker is not None:
+        window._risk_profile_updating = True
+        try:
+            profile_index = picker.findText(profile_name)
+            picker.setCurrentIndex(profile_index if profile_index >= 0 else picker.findText("Custom"))
+        finally:
+            window._risk_profile_updating = False
+    _hotfix_set_risk_profile_status(window, profile_name)
 
 
 def _hotfix_build_strategy_params(values, controller):
@@ -5922,6 +12068,9 @@ def _hotfix_collect_settings_values(self, window=None):
     return {
         "timeframe": window._settings_timeframe.currentText(),
         "order_type": window._settings_order_type.currentText(),
+        "market_trade_preference": window._settings_market_type.currentData(),
+        "database_mode": window._settings_database_mode.currentData(),
+        "database_url": window._settings_database_url.text().strip(),
         "history_limit": int(window._settings_history_limit.value()),
         "initial_capital": float(window._settings_initial_capital.value()),
         "refresh_interval_ms": int(window._settings_refresh_ms.value()),
@@ -5929,6 +12078,14 @@ def _hotfix_collect_settings_values(self, window=None):
         "show_bid_ask_lines": window._settings_bid_ask_mode.currentData(),
         "candle_up_color": getattr(window, "_settings_up_color", self.candle_up_color),
         "candle_down_color": getattr(window, "_settings_down_color", self.candle_down_color),
+        "risk_profile_name": _hotfix_detect_risk_profile_name(
+            {
+                "max_portfolio_risk": float(window._settings_max_portfolio.value()),
+                "max_risk_per_trade": float(window._settings_max_trade.value()),
+                "max_position_size_pct": float(window._settings_max_position.value()),
+                "max_gross_exposure_pct": float(window._settings_max_gross.value()),
+            }
+        ),
         "max_portfolio_risk": float(window._settings_max_portfolio.value()),
         "max_risk_per_trade": float(window._settings_max_trade.value()),
         "max_position_size_pct": float(window._settings_max_position.value()),
@@ -5948,7 +12105,54 @@ def _hotfix_collect_settings_values(self, window=None):
         "telegram_chat_id": window._settings_telegram_chat_id.text().strip(),
         "openai_api_key": window._settings_openai_api_key.text().strip(),
         "openai_model": window._settings_openai_model.text().strip(),
+        "news_enabled": window._settings_news_enabled.currentData(),
+        "news_autotrade_enabled": window._settings_news_autotrade.currentData(),
+        "news_draw_on_chart": window._settings_news_chart.currentData(),
+        "news_feed_url": window._settings_news_feed_url.text().strip(),
     }
+
+
+async def _hotfix_test_openai_from_settings_async(self, window):
+    try:
+        api_key = window._settings_openai_api_key.text().strip()
+        model = window._settings_openai_model.text().strip() or "gpt-5-mini"
+        result = await self.controller.test_openai_connection(api_key=api_key, model=model)
+    except Exception as exc:
+        result = {"ok": False, "message": f"OpenAI test failed: {exc}"}
+
+    ok = bool(result.get("ok"))
+    message = str(result.get("message") or ("OpenAI connection OK." if ok else "OpenAI test failed."))
+    label = getattr(window, "_settings_openai_test_status", None)
+    button = getattr(window, "_settings_openai_test_button", None)
+    if label is not None:
+        tone = "#32d296" if ok else "#ff6b6b"
+        label.setStyleSheet(f"color: {tone}; padding-top: 4px;")
+        label.setText(message)
+    if button is not None:
+        button.setEnabled(True)
+        button.setText("Test OpenAI")
+
+
+def _hotfix_test_openai_from_settings(self, window=None):
+    window = window or self.detached_tool_windows.get("application_settings")
+    if window is None:
+        return
+
+    label = getattr(window, "_settings_openai_test_status", None)
+    button = getattr(window, "_settings_openai_test_button", None)
+    if label is not None:
+        label.setStyleSheet("color: #9fb0c7; padding-top: 4px;")
+        label.setText("Testing OpenAI connection...")
+    if button is not None:
+        button.setEnabled(False)
+        button.setText("Testing...")
+
+    runner = _hotfix_test_openai_from_settings_async(self, window)
+    task_factory = getattr(self.controller, "_create_task", None)
+    if callable(task_factory):
+        window._settings_openai_test_task = task_factory(runner, "settings_openai_test")
+    else:
+        window._settings_openai_test_task = asyncio.create_task(runner)
 
 
 def _hotfix_apply_settings_values(self, values, persist=True, reload_chart=False):
@@ -5957,10 +12161,16 @@ def _hotfix_apply_settings_values(self, values, persist=True, reload_chart=False
 
     timeframe = values.get("timeframe", getattr(self, "current_timeframe", "1h"))
     order_type = values.get("order_type", getattr(self, "order_type", "limit"))
+    market_trade_preference = str(
+        values.get("market_trade_preference", getattr(self.controller, "market_trade_preference", "auto"))
+        or "auto"
+    ).strip().lower()
     history_limit = max(100, int(values.get("history_limit", getattr(self.controller, "limit", 50000))))
     initial_capital = max(0.0, float(values.get("initial_capital", getattr(self.controller, "initial_capital", 10000))))
     refresh_interval_ms = max(250, int(values.get("refresh_interval_ms", 1000)))
     orderbook_interval_ms = max(250, int(values.get("orderbook_interval_ms", 1500)))
+    database_mode = str(values.get("database_mode", getattr(self.controller, "database_mode", "local")) or "local").strip().lower()
+    database_url = str(values.get("database_url", getattr(self.controller, "database_url", "")) or "").strip()
     show_bid_ask_lines = bool(values.get("show_bid_ask_lines", getattr(self, "show_bid_ask_lines", True)))
     candle_up_color = values.get("candle_up_color", getattr(self, "candle_up_color", "#26a69a"))
     candle_down_color = values.get("candle_down_color", getattr(self, "candle_down_color", "#ef5350"))
@@ -5973,8 +12183,34 @@ def _hotfix_apply_settings_values(self, values, persist=True, reload_chart=False
     self.order_type = order_type
     self.controller.time_frame = timeframe
     self.controller.order_type = order_type
+    if hasattr(self.controller, "set_market_trade_preference"):
+        self.controller.set_market_trade_preference(market_trade_preference)
+    market_trade_preference = str(
+        getattr(self.controller, "market_trade_preference", market_trade_preference) or market_trade_preference
+    ).strip().lower()
+    if hasattr(self.controller, "configure_storage_database"):
+        self.controller.configure_storage_database(
+            database_mode=database_mode,
+            database_url=database_url,
+            persist=persist,
+            raise_on_error=bool(persist),
+        )
     self.controller.limit = history_limit
     self.controller.initial_capital = initial_capital
+    self.controller.risk_profile_name = str(
+        values.get(
+            "risk_profile_name",
+            _hotfix_detect_risk_profile_name(
+                {
+                    "max_portfolio_risk": values.get("max_portfolio_risk", getattr(self.controller, "max_portfolio_risk", 0.2)),
+                    "max_risk_per_trade": values.get("max_risk_per_trade", getattr(self.controller, "max_risk_per_trade", 0.02)),
+                    "max_position_size_pct": values.get("max_position_size_pct", getattr(self.controller, "max_position_size_pct", 0.05)),
+                    "max_gross_exposure_pct": values.get("max_gross_exposure_pct", getattr(self.controller, "max_gross_exposure_pct", 1.0)),
+                }
+            ),
+        )
+        or "Balanced"
+    )
     self.controller.max_portfolio_risk = float(values.get("max_portfolio_risk", getattr(self.controller, "max_portfolio_risk", 0.2)))
     self.controller.max_risk_per_trade = float(values.get("max_risk_per_trade", getattr(self.controller, "max_risk_per_trade", 0.02)))
     self.controller.max_position_size_pct = float(values.get("max_position_size_pct", getattr(self.controller, "max_position_size_pct", 0.05)))
@@ -5988,11 +12224,22 @@ def _hotfix_apply_settings_values(self, values, persist=True, reload_chart=False
             telegram_chat_id=values.get("telegram_chat_id", getattr(self.controller, "telegram_chat_id", "")),
             openai_api_key=values.get("openai_api_key", getattr(self.controller, "openai_api_key", "")),
             openai_model=values.get("openai_model", getattr(self.controller, "openai_model", "gpt-5-mini")),
+            news_enabled=bool(values.get("news_enabled", getattr(self.controller, "news_enabled", True))),
+            news_autotrade_enabled=bool(values.get("news_autotrade_enabled", getattr(self.controller, "news_autotrade_enabled", False))),
+            news_draw_on_chart=bool(values.get("news_draw_on_chart", getattr(self.controller, "news_draw_on_chart", True))),
+            news_feed_url=values.get("news_feed_url", getattr(self.controller, "news_feed_url", "")),
         )
 
     self.candle_up_color = candle_up_color
     self.candle_down_color = candle_down_color
     self.show_bid_ask_lines = show_bid_ask_lines
+    if getattr(self.controller, "news_draw_on_chart", False):
+        for chart in self._iter_chart_widgets():
+            if hasattr(self.controller, "request_news"):
+                asyncio.get_event_loop().create_task(self.controller.request_news(chart.symbol, force=True))
+    else:
+        for chart in self._iter_chart_widgets():
+            chart.clear_news_events()
 
     config = getattr(self.controller, "config", None)
     if config is not None and hasattr(config, "strategy"):
@@ -6069,13 +12316,17 @@ def _hotfix_apply_settings_values(self, values, persist=True, reload_chart=False
         self.settings.setValue("windowState", self.saveState())
         self.settings.setValue("chart/candle_up_color", candle_up_color)
         self.settings.setValue("chart/candle_down_color", candle_down_color)
+        self.settings.setValue("storage/database_mode", getattr(self.controller, "database_mode", database_mode))
+        self.settings.setValue("storage/database_url", getattr(self.controller, "database_url", database_url))
         self.settings.setValue("terminal/current_timeframe", timeframe)
         self.settings.setValue("terminal/order_type", order_type)
+        self.settings.setValue("trading/market_type", market_trade_preference)
         self.settings.setValue("terminal/history_limit", history_limit)
         self.settings.setValue("terminal/initial_capital", initial_capital)
         self.settings.setValue("terminal/refresh_interval_ms", refresh_interval_ms)
         self.settings.setValue("terminal/orderbook_interval_ms", orderbook_interval_ms)
         self.settings.setValue("terminal/show_bid_ask_lines", show_bid_ask_lines)
+        self.settings.setValue("risk/profile_name", getattr(self.controller, "risk_profile_name", "Balanced"))
         self.settings.setValue("risk/max_portfolio_risk", self.controller.max_portfolio_risk)
         self.settings.setValue("risk/max_risk_per_trade", self.controller.max_risk_per_trade)
         self.settings.setValue("risk/max_position_size_pct", self.controller.max_position_size_pct)
@@ -6095,6 +12346,10 @@ def _hotfix_apply_settings_values(self, values, persist=True, reload_chart=False
         self.settings.setValue("integrations/telegram_chat_id", values.get("telegram_chat_id", getattr(self.controller, "telegram_chat_id", "")))
         self.settings.setValue("integrations/openai_api_key", values.get("openai_api_key", getattr(self.controller, "openai_api_key", "")))
         self.settings.setValue("integrations/openai_model", values.get("openai_model", getattr(self.controller, "openai_model", "gpt-5-mini")))
+        self.settings.setValue("integrations/news_enabled", bool(values.get("news_enabled", getattr(self.controller, "news_enabled", True))))
+        self.settings.setValue("integrations/news_autotrade_enabled", bool(values.get("news_autotrade_enabled", getattr(self.controller, "news_autotrade_enabled", False))))
+        self.settings.setValue("integrations/news_draw_on_chart", bool(values.get("news_draw_on_chart", getattr(self.controller, "news_draw_on_chart", True))))
+        self.settings.setValue("integrations/news_feed_url", values.get("news_feed_url", getattr(self.controller, "news_feed_url", "")))
         self._save_detached_chart_layouts()
 
 
@@ -6124,7 +12379,10 @@ def _hotfix_show_settings_window(self):
         timeframe = QComboBox()
         timeframe.addItems(["1m", "5m", "15m", "1h", "4h", "1d"])
         order_type = QComboBox()
-        order_type.addItems(["market", "limit"])
+        order_type.addItems(["market", "limit", "stop_limit"])
+        market_type = QComboBox()
+        for label, value in MARKET_VENUE_CHOICES:
+            market_type.addItem(label, value)
 
         history_limit = QDoubleSpinBox()
         history_limit.setDecimals(0)
@@ -6150,11 +12408,29 @@ def _hotfix_show_settings_window(self):
 
         general_form.addRow("Default timeframe", timeframe)
         general_form.addRow("Default order type", order_type)
+        general_form.addRow("Trading venue", market_type)
         general_form.addRow("History limit (candles)", history_limit)
         general_form.addRow("Initial capital", initial_capital)
         general_form.addRow("Terminal refresh (ms)", refresh_ms)
         general_form.addRow("Orderbook refresh (ms)", orderbook_ms)
         tabs.addTab(general_tab, "General")
+
+        storage_tab = QWidget()
+        storage_form = QFormLayout(storage_tab)
+
+        database_mode = QComboBox()
+        database_mode.addItem("Local SQLite", "local")
+        database_mode.addItem("Remote URL", "remote")
+
+        database_url = QLineEdit()
+        database_hint = QLabel()
+        database_hint.setWordWrap(True)
+        database_hint.setStyleSheet("color: #8fa7c6; padding-top: 2px;")
+
+        storage_form.addRow("Database backend", database_mode)
+        storage_form.addRow("Remote database URL", database_url)
+        storage_form.addRow("", database_hint)
+        tabs.addTab(storage_tab, "Storage")
 
         display_tab = QWidget()
         display_form = QFormLayout(display_tab)
@@ -6190,6 +12466,14 @@ def _hotfix_show_settings_window(self):
         risk_tab = QWidget()
         risk_form = QFormLayout(risk_tab)
 
+        risk_profile = QComboBox()
+        for name in _hotfix_risk_profile_names():
+            risk_profile.addItem(name)
+
+        risk_profile_description = QLabel()
+        risk_profile_description.setWordWrap(True)
+        risk_profile_description.setStyleSheet("color: #8fa7c6; padding-top: 2px;")
+
         max_portfolio = QDoubleSpinBox()
         max_portfolio.setDecimals(4)
         max_portfolio.setRange(0, 100000)
@@ -6210,6 +12494,8 @@ def _hotfix_show_settings_window(self):
         max_gross.setRange(0, 100000)
         max_gross.setSingleStep(0.01)
 
+        risk_form.addRow("Risk profile", risk_profile)
+        risk_form.addRow("", risk_profile_description)
         risk_form.addRow("Max portfolio risk", max_portfolio)
         risk_form.addRow("Max risk per trade", max_trade)
         risk_form.addRow("Max position size", max_position)
@@ -6220,7 +12506,7 @@ def _hotfix_show_settings_window(self):
         strategy_form = QFormLayout(strategy_tab)
 
         strategy_name = QComboBox()
-        strategy_name.addItems(["Trend Following", "Mean Reversion", "Breakout", "AI Hybrid"])
+        strategy_name.addItems(list(Strategy.AVAILABLE_STRATEGIES))
 
         strategy_rsi_period = QDoubleSpinBox()
         strategy_rsi_period.setDecimals(0)
@@ -6299,11 +12585,43 @@ def _hotfix_show_settings_window(self):
         openai_model = QLineEdit()
         openai_model.setPlaceholderText("gpt-5-mini")
 
+        openai_test_button = QPushButton("Test OpenAI")
+        openai_test_button.setStyleSheet(self._action_button_style())
+        openai_test_status = QLabel("Use this to verify the typed OpenAI key and model before saving.")
+        openai_test_status.setWordWrap(True)
+        openai_test_status.setStyleSheet("color: #9fb0c7; padding-top: 4px;")
+        openai_test_row = QWidget()
+        openai_test_layout = QVBoxLayout(openai_test_row)
+        openai_test_layout.setContentsMargins(0, 0, 0, 0)
+        openai_test_layout.setSpacing(6)
+        openai_test_layout.addWidget(openai_test_button)
+        openai_test_layout.addWidget(openai_test_status)
+
+        news_enabled = QComboBox()
+        news_enabled.addItem("Disabled", False)
+        news_enabled.addItem("Enabled", True)
+
+        news_autotrade = QComboBox()
+        news_autotrade.addItem("Off", False)
+        news_autotrade.addItem("On", True)
+
+        news_chart = QComboBox()
+        news_chart.addItem("Hide", False)
+        news_chart.addItem("Draw on charts", True)
+
+        news_feed_url = QLineEdit()
+        news_feed_url.setPlaceholderText(NewsService.DEFAULT_FEED_URL)
+
         integrations_form.addRow("Telegram notifications", telegram_enabled)
         integrations_form.addRow("Telegram bot token", telegram_bot_token)
         integrations_form.addRow("Telegram chat ID", telegram_chat_id)
         integrations_form.addRow("OpenAI API key", openai_api_key)
         integrations_form.addRow("OpenAI model", openai_model)
+        integrations_form.addRow("OpenAI test", openai_test_row)
+        integrations_form.addRow("News feed", news_enabled)
+        integrations_form.addRow("Trade from news bias", news_autotrade)
+        integrations_form.addRow("Draw news on chart", news_chart)
+        integrations_form.addRow("News feed URL", news_feed_url)
         tabs.addTab(integrations_tab, "Integrations")
 
         summary = QLabel("-")
@@ -6330,6 +12648,10 @@ def _hotfix_show_settings_window(self):
         window._settings_tabs = tabs
         window._settings_timeframe = timeframe
         window._settings_order_type = order_type
+        window._settings_market_type = market_type
+        window._settings_database_mode = database_mode
+        window._settings_database_url = database_url
+        window._settings_database_hint = database_hint
         window._settings_history_limit = history_limit
         window._settings_initial_capital = initial_capital
         window._settings_refresh_ms = refresh_ms
@@ -6337,10 +12659,13 @@ def _hotfix_show_settings_window(self):
         window._settings_bid_ask_mode = bid_ask_mode
         window._settings_up_button = up_color_btn
         window._settings_down_button = down_color_btn
+        window._settings_risk_profile = risk_profile
+        window._settings_risk_profile_description = risk_profile_description
         window._settings_max_portfolio = max_portfolio
         window._settings_max_trade = max_trade
         window._settings_max_position = max_position
         window._settings_max_gross = max_gross
+        window._risk_profile_updating = False
         window._settings_strategy_name = strategy_name
         window._settings_strategy_rsi_period = strategy_rsi_period
         window._settings_strategy_ema_fast = strategy_ema_fast
@@ -6356,7 +12681,20 @@ def _hotfix_show_settings_window(self):
         window._settings_telegram_chat_id = telegram_chat_id
         window._settings_openai_api_key = openai_api_key
         window._settings_openai_model = openai_model
+        window._settings_openai_test_button = openai_test_button
+        window._settings_openai_test_status = openai_test_status
+        window._settings_news_enabled = news_enabled
+        window._settings_news_autotrade = news_autotrade
+        window._settings_news_chart = news_chart
+        window._settings_news_feed_url = news_feed_url
         window._settings_summary = summary
+        openai_test_button.clicked.connect(lambda: _hotfix_test_openai_from_settings(self, window))
+        database_mode.currentIndexChanged.connect(lambda *_: _hotfix_update_database_mode_state(window))
+        risk_profile.currentTextChanged.connect(lambda value: _hotfix_apply_risk_profile_to_window(window, value))
+        max_portfolio.valueChanged.connect(lambda *_: _hotfix_sync_risk_profile_from_window(window))
+        max_trade.valueChanged.connect(lambda *_: _hotfix_sync_risk_profile_from_window(window))
+        max_position.valueChanged.connect(lambda *_: _hotfix_sync_risk_profile_from_window(window))
+        max_gross.valueChanged.connect(lambda *_: _hotfix_sync_risk_profile_from_window(window))
 
     risk_engine = _hotfix_get_live_risk_engine(self)
     refresh_interval = 1000
@@ -6366,8 +12704,15 @@ def _hotfix_show_settings_window(self):
     if hasattr(self, "orderbook_timer") and self.orderbook_timer is not None:
         orderbook_interval = max(250, self.orderbook_timer.interval())
 
+    _hotfix_refresh_market_type_picker(window, self.controller)
     window._settings_timeframe.setCurrentText(getattr(self, "current_timeframe", getattr(self.controller, "time_frame", "1h")))
     window._settings_order_type.setCurrentText(getattr(self, "order_type", getattr(self.controller, "order_type", "limit")))
+    market_index = window._settings_market_type.findData(getattr(self.controller, "market_trade_preference", "auto"))
+    window._settings_market_type.setCurrentIndex(market_index if market_index >= 0 else 0)
+    database_mode_index = window._settings_database_mode.findData(getattr(self.controller, "database_mode", "local"))
+    window._settings_database_mode.setCurrentIndex(database_mode_index if database_mode_index >= 0 else 0)
+    window._settings_database_url.setText(str(getattr(self.controller, "database_url", "") or ""))
+    _hotfix_update_database_mode_state(window)
     window._settings_history_limit.setValue(float(getattr(self.controller, "limit", 50000)))
     window._settings_initial_capital.setValue(float(getattr(self.controller, "initial_capital", 10000)))
     window._settings_refresh_ms.setValue(float(refresh_interval))
@@ -6383,6 +12728,20 @@ def _hotfix_show_settings_window(self):
     window._settings_max_trade.setValue(float(getattr(risk_engine, "max_risk_per_trade", getattr(self.controller, "max_risk_per_trade", 0.02))))
     window._settings_max_position.setValue(float(getattr(risk_engine, "max_position_size_pct", getattr(self.controller, "max_position_size_pct", 0.05))))
     window._settings_max_gross.setValue(float(getattr(risk_engine, "max_gross_exposure_pct", getattr(self.controller, "max_gross_exposure_pct", 1.0))))
+    configured_profile = str(
+        getattr(self.controller, "risk_profile_name", "")
+        or self.settings.value("risk/profile_name", "")
+        or ""
+    ).strip()
+    detected_profile = _hotfix_detect_risk_profile_name(
+        {
+            "max_portfolio_risk": window._settings_max_portfolio.value(),
+            "max_risk_per_trade": window._settings_max_trade.value(),
+            "max_position_size_pct": window._settings_max_position.value(),
+            "max_gross_exposure_pct": window._settings_max_gross.value(),
+        }
+    )
+    _hotfix_apply_risk_profile_to_window(window, configured_profile or detected_profile)
     strategy_params = dict(getattr(self.controller, "strategy_params", {}) or {})
     current_strategy_name = Strategy.normalize_strategy_name(
         getattr(self.controller, "strategy_name", None) or getattr(getattr(self.controller, "config", None), "strategy", "Trend Following")
@@ -6402,15 +12761,27 @@ def _hotfix_show_settings_window(self):
     window._settings_telegram_chat_id.setText(str(getattr(self.controller, "telegram_chat_id", "") or ""))
     window._settings_openai_api_key.setText(str(getattr(self.controller, "openai_api_key", "") or ""))
     window._settings_openai_model.setText(str(getattr(self.controller, "openai_model", "gpt-5-mini") or "gpt-5-mini"))
+    window._settings_openai_test_status.setStyleSheet("color: #9fb0c7; padding-top: 4px;")
+    window._settings_openai_test_status.setText("Use this to verify the typed OpenAI key and model before saving.")
+    window._settings_openai_test_button.setEnabled(True)
+    window._settings_openai_test_button.setText("Test OpenAI")
+    window._settings_news_enabled.setCurrentIndex(1 if getattr(self.controller, "news_enabled", True) else 0)
+    window._settings_news_autotrade.setCurrentIndex(1 if getattr(self.controller, "news_autotrade_enabled", False) else 0)
+    window._settings_news_chart.setCurrentIndex(1 if getattr(self.controller, "news_draw_on_chart", True) else 0)
+    window._settings_news_feed_url.setText(str(getattr(self.controller, "news_feed_url", NewsService.DEFAULT_FEED_URL) or NewsService.DEFAULT_FEED_URL))
 
     window._settings_summary.setText(
         "Current defaults: "
         f"{window._settings_timeframe.currentText()} | "
         f"{window._settings_order_type.currentText()} orders | "
+        f"{window._settings_market_type.currentText()} venue | "
+        f"{window._settings_database_mode.currentText()} storage | "
+        f"{window._settings_risk_profile.currentText()} risk | "
         f"{window._settings_strategy_name.currentText()} | "
         f"history {int(window._settings_history_limit.value())} candles | "
         f"capital {window._settings_initial_capital.value():.2f} | "
         f"Telegram {'on' if window._settings_telegram_enabled.currentData() else 'off'} | "
+        f"News {'on' if window._settings_news_enabled.currentData() else 'off'} | "
         f"OpenAI {'set' if window._settings_openai_api_key.text().strip() else 'not set'}"
     )
 
@@ -6433,11 +12804,15 @@ def _hotfix_apply_settings_window(self, window=None):
         if summary is not None:
             summary.setText(
                 "Saved settings. "
+                f"Storage: {getattr(self.controller, 'current_database_label', lambda: values.get('database_mode', 'local'))()} | "
+                f"Risk profile: {values.get('risk_profile_name', 'Custom')} | "
                 f"Strategy: {values['strategy_name']} | "
                 f"Timeframe: {values['timeframe']} | "
                 f"Order type: {values['order_type']} | "
+                f"Venue: {values['market_trade_preference']} | "
                 f"History: {values['history_limit']} | "
                 f"Bid/ask lines: {'shown' if values['show_bid_ask_lines'] else 'hidden'} | "
+                f"News auto: {'enabled' if values['news_autotrade_enabled'] else 'disabled'} | "
                 f"Telegram: {'enabled' if values['telegram_enabled'] else 'disabled'} | "
                 f"OpenAI model: {values.get('openai_model') or 'gpt-5-mini'}"
             )
@@ -6445,6 +12820,10 @@ def _hotfix_apply_settings_window(self, window=None):
         self.system_console.log("Application settings updated successfully.", "INFO")
 
     except Exception as e:
+        active_window = window or self.detached_tool_windows.get("application_settings")
+        summary = getattr(active_window, "_settings_summary", None)
+        if summary is not None:
+            summary.setText(f"Unable to save settings: {e}")
         self.logger.error(f"Settings error: {e}")
 
 
@@ -6466,6 +12845,9 @@ def _hotfix_restore_settings(self):
     values = {
         "timeframe": self.settings.value("terminal/current_timeframe", getattr(self.controller, "time_frame", getattr(self, "current_timeframe", "1h"))),
         "order_type": self.settings.value("terminal/order_type", getattr(self.controller, "order_type", getattr(self, "order_type", "limit"))),
+        "market_trade_preference": self.settings.value("trading/market_type", getattr(self.controller, "market_trade_preference", "auto")),
+        "database_mode": self.settings.value("storage/database_mode", getattr(self.controller, "database_mode", "local")),
+        "database_url": self.settings.value("storage/database_url", getattr(self.controller, "database_url", "")),
         "history_limit": _hotfix_settings_int(self.settings.value("terminal/history_limit", getattr(self.controller, "limit", 50000)), getattr(self.controller, "limit", 50000)),
         "initial_capital": _hotfix_settings_float(self.settings.value("terminal/initial_capital", getattr(self.controller, "initial_capital", 10000)), getattr(self.controller, "initial_capital", 10000)),
         "refresh_interval_ms": _hotfix_settings_int(self.settings.value("terminal/refresh_interval_ms", 1000), 1000),
@@ -6473,6 +12855,7 @@ def _hotfix_restore_settings(self):
         "show_bid_ask_lines": _hotfix_settings_bool(self.settings.value("terminal/show_bid_ask_lines", getattr(self, "show_bid_ask_lines", True)), getattr(self, "show_bid_ask_lines", True)),
         "candle_up_color": self.settings.value("chart/candle_up_color", getattr(self, "candle_up_color", "#26a69a")),
         "candle_down_color": self.settings.value("chart/candle_down_color", getattr(self, "candle_down_color", "#ef5350")),
+        "risk_profile_name": self.settings.value("risk/profile_name", getattr(self.controller, "risk_profile_name", "Balanced")),
         "max_portfolio_risk": _hotfix_settings_float(self.settings.value("risk/max_portfolio_risk", getattr(self.controller, "max_portfolio_risk", 0.2)), getattr(self.controller, "max_portfolio_risk", 0.2)),
         "max_risk_per_trade": _hotfix_settings_float(self.settings.value("risk/max_risk_per_trade", getattr(self.controller, "max_risk_per_trade", 0.02)), getattr(self.controller, "max_risk_per_trade", 0.02)),
         "max_position_size_pct": _hotfix_settings_float(self.settings.value("risk/max_position_size_pct", getattr(self.controller, "max_position_size_pct", 0.05)), getattr(self.controller, "max_position_size_pct", 0.05)),
@@ -6487,6 +12870,15 @@ def _hotfix_restore_settings(self):
         "strategy_breakout_lookback": _hotfix_settings_int(self.settings.value("strategy/breakout_lookback", strategy_params.get("breakout_lookback", 20)), 20),
         "strategy_min_confidence": _hotfix_settings_float(self.settings.value("strategy/min_confidence", strategy_params.get("min_confidence", 0.55)), 0.55),
         "strategy_signal_amount": _hotfix_settings_float(self.settings.value("strategy/signal_amount", strategy_params.get("signal_amount", 1.0)), 1.0),
+        "telegram_enabled": _hotfix_settings_bool(self.settings.value("integrations/telegram_enabled", getattr(self.controller, "telegram_enabled", False)), getattr(self.controller, "telegram_enabled", False)),
+        "telegram_bot_token": self.settings.value("integrations/telegram_bot_token", getattr(self.controller, "telegram_bot_token", "")),
+        "telegram_chat_id": self.settings.value("integrations/telegram_chat_id", getattr(self.controller, "telegram_chat_id", "")),
+        "openai_api_key": self.settings.value("integrations/openai_api_key", getattr(self.controller, "openai_api_key", "")),
+        "openai_model": self.settings.value("integrations/openai_model", getattr(self.controller, "openai_model", "gpt-5-mini")),
+        "news_enabled": _hotfix_settings_bool(self.settings.value("integrations/news_enabled", getattr(self.controller, "news_enabled", True)), getattr(self.controller, "news_enabled", True)),
+        "news_autotrade_enabled": _hotfix_settings_bool(self.settings.value("integrations/news_autotrade_enabled", getattr(self.controller, "news_autotrade_enabled", False)), getattr(self.controller, "news_autotrade_enabled", False)),
+        "news_draw_on_chart": _hotfix_settings_bool(self.settings.value("integrations/news_draw_on_chart", getattr(self.controller, "news_draw_on_chart", True)), getattr(self.controller, "news_draw_on_chart", True)),
+        "news_feed_url": self.settings.value("integrations/news_feed_url", getattr(self.controller, "news_feed_url", NewsService.DEFAULT_FEED_URL)),
     }
 
     _hotfix_apply_settings_values(self, values, persist=False, reload_chart=False)
@@ -6507,12 +12899,17 @@ def _hotfix_close_event(self, event):
             task = getattr(self, task_name, None)
             if task is not None and not task.done():
                 task.cancel()
+        if hasattr(self, "_disconnect_controller_signals"):
+            self._disconnect_controller_signals()
+        if hasattr(self, "_safe_disconnect") and hasattr(self, "ai_signal"):
+            self._safe_disconnect(self.ai_signal, self._update_ai_signal)
     except Exception:
         pass
 
     values = {
         "timeframe": getattr(self, "current_timeframe", getattr(self.controller, "time_frame", "1h")),
         "order_type": getattr(self, "order_type", getattr(self.controller, "order_type", "limit")),
+        "market_trade_preference": getattr(self.controller, "market_trade_preference", "auto"),
         "history_limit": getattr(self.controller, "limit", 50000),
         "initial_capital": getattr(self.controller, "initial_capital", 10000),
         "refresh_interval_ms": self.refresh_timer.interval() if hasattr(self, "refresh_timer") and self.refresh_timer is not None else 1000,
@@ -6520,6 +12917,7 @@ def _hotfix_close_event(self, event):
         "show_bid_ask_lines": getattr(self, "show_bid_ask_lines", True),
         "candle_up_color": getattr(self, "candle_up_color", "#26a69a"),
         "candle_down_color": getattr(self, "candle_down_color", "#ef5350"),
+        "risk_profile_name": getattr(self.controller, "risk_profile_name", "Balanced"),
         "max_portfolio_risk": getattr(self.controller, "max_portfolio_risk", 0.2),
         "max_risk_per_trade": getattr(self.controller, "max_risk_per_trade", 0.02),
         "max_position_size_pct": getattr(self.controller, "max_position_size_pct", 0.05),
@@ -6534,6 +12932,15 @@ def _hotfix_close_event(self, event):
         "strategy_breakout_lookback": getattr(getattr(self.controller, "strategy_params", {}), "get", lambda *_: 20)("breakout_lookback", 20),
         "strategy_min_confidence": getattr(getattr(self.controller, "strategy_params", {}), "get", lambda *_: 0.55)("min_confidence", 0.55),
         "strategy_signal_amount": getattr(getattr(self.controller, "strategy_params", {}), "get", lambda *_: 1.0)("signal_amount", 1.0),
+        "telegram_enabled": getattr(self.controller, "telegram_enabled", False),
+        "telegram_bot_token": getattr(self.controller, "telegram_bot_token", ""),
+        "telegram_chat_id": getattr(self.controller, "telegram_chat_id", ""),
+        "openai_api_key": getattr(self.controller, "openai_api_key", ""),
+        "openai_model": getattr(self.controller, "openai_model", "gpt-5-mini"),
+        "news_enabled": getattr(self.controller, "news_enabled", True),
+        "news_autotrade_enabled": getattr(self.controller, "news_autotrade_enabled", False),
+        "news_draw_on_chart": getattr(self.controller, "news_draw_on_chart", True),
+        "news_feed_url": getattr(self.controller, "news_feed_url", NewsService.DEFAULT_FEED_URL),
     }
     _hotfix_apply_settings_values(self, values, persist=True, reload_chart=False)
     super(Terminal, self).closeEvent(event)
@@ -6638,6 +13045,8 @@ def _hotfix_refresh_active_orderbook(self):
             if not hasattr(self.controller, "request_orderbook"):
                 raise RuntimeError("Orderbook refresh is not supported by this controller")
             await self.controller.request_orderbook(symbol=symbol, limit=20)
+            if hasattr(self.controller, "request_recent_trades"):
+                await self.controller.request_recent_trades(symbol=symbol, limit=40)
             self.system_console.log(f"Orderbook refreshed for {symbol}.", "INFO")
         except Exception as e:
             self.system_console.log(f"Orderbook refresh failed: {e}", "ERROR")
@@ -6682,6 +13091,12 @@ Terminal._refresh_optimization_window = _hotfix_refresh_optimization_window
 Terminal._run_strategy_optimization = _hotfix_run_strategy_optimization
 Terminal._apply_best_optimization_params = _hotfix_apply_best_optimization_params
 Terminal._optimize_strategy = _hotfix_optimize_strategy
+Terminal._open_ml_research_window = _hotfix_show_ml_research_window
+Terminal._show_ml_research_window = _hotfix_show_ml_research_window
+Terminal._refresh_ml_research_window = _hotfix_refresh_ml_research_window
+Terminal._run_ml_model_training = _hotfix_run_ml_model_training
+Terminal._run_ml_walk_forward = _hotfix_run_ml_walk_forward
+Terminal._deploy_selected_ml_model = _hotfix_deploy_selected_ml_model
 Terminal._reload_chart_data = _hotfix_reload_chart_data
 Terminal._refresh_markets = _hotfix_refresh_markets
 Terminal._reload_balance = _hotfix_reload_balance

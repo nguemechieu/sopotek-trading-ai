@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -22,7 +23,9 @@ from PySide6.QtWidgets import (
 
 from config.config import AppConfig, BrokerConfig, RiskConfig, SystemConfig
 from config.credential_manager import CredentialManager
+from broker.market_venues import MARKET_VENUE_CHOICES, supported_market_venues_for_profile
 from frontend.ui.i18n import iter_supported_languages
+from strategy.strategy import Strategy
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -31,12 +34,11 @@ ASSETS_DIR = ROOT_DIR / "assets"
 LOGO_PATH = ASSETS_DIR / "logo.png"
 SPINNER_PATH = ASSETS_DIR / "spinner.gif"
 
-EXCHANGE_MAP = {
-    "crypto": [
+CRYPTO_EXCHANGE_MAP = {
+    "us": [
         "binanceus",
         "coinbase",
         "stellar",
-        "binance",
         "kraken",
         "kucoin",
         "bybit",
@@ -44,10 +46,30 @@ EXCHANGE_MAP = {
         "gateio",
         "bitget",
     ],
+    "global": [
+        "binance",
+        "coinbase",
+        "stellar",
+        "kraken",
+        "kucoin",
+        "bybit",
+        "okx",
+        "gateio",
+        "bitget",
+    ],
+}
+
+EXCHANGE_MAP = {
+    "crypto": [],
     "forex": ["oanda"],
     "stocks": ["alpaca"],
     "paper": ["paper"],
 }
+
+CUSTOMER_REGION_OPTIONS = [
+    ("US", "us"),
+    ("Outside US", "global"),
+]
 
 BROKER_COPY = {
     "crypto": "Multi-venue crypto routing with stronger session clarity before execution starts.",
@@ -57,10 +79,16 @@ BROKER_COPY = {
 }
 
 STRATEGY_COPY = {
-    "LSTM": "AI-first momentum scanning for traders who want a model-led market read.",
-    "EMA_CROSS": "Trend following with a familiar, lower-friction signal structure.",
-    "RSI_MEAN_REVERSION": "Best for calmer reversions and oversold bounce setups.",
-    "MACD_TREND": "Balanced directional bias for swing-style continuation entries.",
+    "AI Hybrid": "Model-led decision support with classical fallback logic when AI confidence is not ready.",
+    "Trend Following": "Directional bias with momentum filters for cleaner trend participation.",
+    "Mean Reversion": "Best for calmer reversions and oversold bounce setups.",
+    "Breakout": "Range escape logic for expansion moves out of consolidation.",
+    "EMA Cross": "A familiar crossover structure with simple trend confirmation.",
+    "Momentum Continuation": "Chases strong participation when trend and momentum align together.",
+    "Pullback Trend": "Waits for a controlled retracement before rejoining the dominant move.",
+    "Volatility Breakout": "Looks for expansion in both range and participation before entry.",
+    "MACD Trend": "Balanced directional bias for swing-style continuation entries.",
+    "Range Fade": "Designed for quieter ranges where price is likely to rotate back inward.",
 
 }
 
@@ -339,6 +367,14 @@ class Dashboard(QWidget):
             return None
         return self.language_box.currentData()
 
+    def _selected_customer_region(self):
+        if not hasattr(self, "customer_region_box") or self.customer_region_box is None:
+            return "us"
+        return str(self.customer_region_box.currentData() or "us").strip().lower()
+
+    def _crypto_exchange_options_for_region(self):
+        return list(CRYPTO_EXCHANGE_MAP.get(self._selected_customer_region(), CRYPTO_EXCHANGE_MAP["us"]))
+
     def _credential_field_schema(self):
         broker_type = self.exchange_type_box.currentText() if hasattr(self, "exchange_type_box") else ""
         exchange = self.exchange_box.currentText() if hasattr(self, "exchange_box") else ""
@@ -360,6 +396,16 @@ class Dashboard(QWidget):
                     "api_placeholder": "Stellar public key",
                     "secret_label": "Private Key",
                     "secret_placeholder": "Stellar private key",
+                    "secret_echo": QLineEdit.Password,
+                }
+            )
+        elif exchange == "coinbase":
+            schema.update(
+                {
+                    "api_label": "API Key Name",
+                    "api_placeholder": "organizations/.../apiKeys/...",
+                    "secret_label": "Private Key",
+                    "secret_placeholder": "Paste the Coinbase privateKey value",
                     "secret_echo": QLineEdit.Password,
                 }
             )
@@ -492,6 +538,7 @@ class Dashboard(QWidget):
         pills_row.addWidget(self._create_stat_pill("Session", "Paper", value_attr="session_pill_value"))
         pills_row.addWidget(self._create_stat_pill("Readiness", "58%", value_attr="readiness_pill_value"))
         pills_row.addWidget(self._create_stat_pill("Market Reach", "Multi-Asset", value_attr="market_pill_value"))
+        pills_row.addWidget(self._create_stat_pill("License", "Trial", value_attr="license_pill_value"))
         panel_layout.addLayout(pills_row)
 
         market_card = QFrame()
@@ -511,8 +558,8 @@ class Dashboard(QWidget):
         self.market_body_label.setWordWrap(True)
         market_layout.addWidget(self.market_body_label)
 
-        self.market_primary = self._create_market_strip("Primary Venue", "Binance US selected with paper rehearsal guardrails.")
-        self.market_secondary = self._create_market_strip("Strategy Lens", "LSTM with moderate risk budget and cleaner onboarding copy.")
+        self.market_primary = self._create_market_strip("Primary Venue", "Venue routing stays aligned with customer region and launch mode.")
+        self.market_secondary = self._create_market_strip("Strategy Lens", "AI Hybrid with moderate risk budget and cleaner onboarding copy.")
         self.market_tertiary = self._create_market_strip("Operator Signal", "Saved profile support keeps repeat sessions faster and safer.")
         market_layout.addWidget(self.market_primary)
         market_layout.addWidget(self.market_secondary)
@@ -640,13 +687,29 @@ class Dashboard(QWidget):
         market_row.addWidget(self._wrap_field("Exchange", self.exchange_box), 1)
         panel_layout.addLayout(market_row)
 
+        jurisdiction_row = QHBoxLayout()
+        jurisdiction_row.setSpacing(10)
+        self.customer_region_box = QComboBox()
+        for label, value in CUSTOMER_REGION_OPTIONS:
+            self.customer_region_box.addItem(label, value)
+        saved_region = str(self.settings.value("dashboard/customer_region", "us") or "us").strip().lower()
+        region_index = self.customer_region_box.findData(saved_region)
+        self.customer_region_box.setCurrentIndex(region_index if region_index >= 0 else 0)
+        jurisdiction_row.addWidget(self._wrap_field("Customer Region", self.customer_region_box, block_name="customer_region"), 1)
+        jurisdiction_row.addStretch(1)
+        panel_layout.addLayout(jurisdiction_row)
+
         strategy_row = QHBoxLayout()
         strategy_row.setSpacing(10)
         self.mode_box = QComboBox()
         self.mode_box.addItems(["live", "paper"])
+        self.market_type_box = QComboBox()
+        for label, value in MARKET_VENUE_CHOICES:
+            self.market_type_box.addItem(label, value)
         self.strategy_box = QComboBox()
-        self.strategy_box.addItems(["LSTM", "EMA_CROSS", "RSI_MEAN_REVERSION", "MACD_TREND"])
+        self.strategy_box.addItems(list(Strategy.AVAILABLE_STRATEGIES))
         strategy_row.addWidget(self._wrap_field("Mode", self.mode_box), 1)
+        strategy_row.addWidget(self._wrap_field("Venue", self.market_type_box), 1)
         strategy_row.addWidget(self._wrap_field("Strategy", self.strategy_box), 1)
         panel_layout.addLayout(strategy_row)
 
@@ -712,10 +775,24 @@ class Dashboard(QWidget):
         self.summary_body.setWordWrap(True)
         summary_layout.addWidget(self.summary_body)
 
-        self.summary_meta = QLabel("Risk 2%  |  Strategy LSTM  |  Profile not saved yet")
+        self.summary_meta = QLabel("Risk 2%  |  Strategy AI Hybrid  |  Profile not saved yet")
         self.summary_meta.setObjectName("summaryMeta")
         self.summary_meta.setWordWrap(True)
         summary_layout.addWidget(self.summary_meta)
+
+        self.live_guard_checkbox = QCheckBox("I understand this session can place live orders.")
+        self.live_guard_checkbox.setVisible(False)
+        summary_layout.addWidget(self.live_guard_checkbox)
+
+        license_row = QHBoxLayout()
+        license_row.setSpacing(8)
+        self.license_status_label = QLabel("License: Trial active")
+        self.license_status_label.setObjectName("hintLabel")
+        self.license_status_label.setWordWrap(True)
+        license_row.addWidget(self.license_status_label, 1)
+        self.manage_license_button = QPushButton("Manage License")
+        license_row.addWidget(self.manage_license_button)
+        summary_layout.addLayout(license_row)
 
         panel_layout.addWidget(summary_card)
 
@@ -835,11 +912,13 @@ class Dashboard(QWidget):
         self.exchange_type_box.currentTextChanged.connect(self._update_optional_fields)
         self.exchange_type_box.currentTextChanged.connect(self._update_broker_hint)
         self.exchange_type_box.currentTextChanged.connect(self._update_session_preview)
+        self.customer_region_box.currentIndexChanged.connect(self._handle_customer_region_changed)
         self.exchange_box.currentTextChanged.connect(self._update_optional_fields)
         self.exchange_box.currentTextChanged.connect(self._update_broker_hint)
         self.exchange_box.currentTextChanged.connect(self._update_session_preview)
         self.mode_box.currentTextChanged.connect(self._update_broker_hint)
         self.mode_box.currentTextChanged.connect(self._update_session_preview)
+        self.market_type_box.currentIndexChanged.connect(self._update_session_preview)
         self.strategy_box.currentTextChanged.connect(self._update_session_preview)
         self.risk_input.valueChanged.connect(self._update_session_preview)
         self.api_input.textChanged.connect(self._update_session_preview)
@@ -847,6 +926,7 @@ class Dashboard(QWidget):
         self.password_input.textChanged.connect(self._update_session_preview)
         self.account_id_input.textChanged.connect(self._update_session_preview)
         self.remember_checkbox.toggled.connect(self._update_session_preview)
+        self.live_guard_checkbox.toggled.connect(self._update_session_preview)
         self.saved_account_box.currentTextChanged.connect(self._load_selected_account)
         self.refresh_accounts_button.clicked.connect(self._load_accounts_index)
         self.language_box.currentIndexChanged.connect(self._on_language_changed)
@@ -854,6 +934,11 @@ class Dashboard(QWidget):
         self.crypto_preset_button.clicked.connect(lambda: self._apply_preset("crypto"))
         self.fx_preset_button.clicked.connect(lambda: self._apply_preset("forex"))
         self.connect_button.clicked.connect(self._on_connect)
+        self.manage_license_button.clicked.connect(
+            lambda: getattr(self.controller, "show_license_dialog", lambda *_: None)(self)
+        )
+        if hasattr(self.controller, "license_changed"):
+            self.controller.license_changed.connect(lambda _status: self._update_session_preview())
 
     def _on_language_changed(self, _index):
         language_code = self._language_box_current_code()
@@ -906,6 +991,7 @@ class Dashboard(QWidget):
 
         field_labels = {
             "language": "dashboard.language",
+            "customer_region": None,
             "api": "dashboard.api_key",
             "secret": "dashboard.secret",
             "password": "dashboard.passphrase",
@@ -914,7 +1000,7 @@ class Dashboard(QWidget):
         for block_name, key in field_labels.items():
             block = self._field_blocks.get(block_name)
             if block is not None:
-                block.label_widget.setText(self._tr(key))
+                block.label_widget.setText(self._tr(key) if key else "Customer Region")
 
         self.password_input.setPlaceholderText("Exchange passphrase when required")
         self._apply_credential_field_schema()
@@ -951,6 +1037,10 @@ class Dashboard(QWidget):
         if mode_block is not None and hasattr(mode_block, "label_widget"):
             mode_block.label_widget.setText(self._tr("dashboard.mode"))
 
+        market_type_block = self.market_type_box.parentWidget()
+        if market_type_block is not None and hasattr(market_type_block, "label_widget"):
+            market_type_block.label_widget.setText("Venue")
+
         strategy_block = self.strategy_box.parentWidget()
         if strategy_block is not None and hasattr(strategy_block, "label_widget"):
             strategy_block.label_widget.setText(self._tr("dashboard.strategy"))
@@ -986,8 +1076,18 @@ class Dashboard(QWidget):
 
         broker = creds.get("broker", {})
         self.exchange_type_box.setCurrentText(broker.get("type", "crypto"))
+        exchange_value = str(broker.get("exchange", "") or "").strip().lower()
+        default_region = "global" if exchange_value == "binance" else "us"
+        region_value = str(
+            broker.get("customer_region")
+            or (broker.get("options", {}) or {}).get("customer_region")
+            or default_region
+        ).strip().lower()
+        region_index = self.customer_region_box.findData(region_value)
+        self.customer_region_box.setCurrentIndex(region_index if region_index >= 0 else 0)
         self._update_exchange_list(broker.get("type", "crypto"))
         self.exchange_box.setCurrentText(broker.get("exchange", ""))
+        self._refresh_market_type_options()
         if broker.get("exchange") == "oanda" or broker.get("type") == "forex":
             self.api_input.setText(broker.get("account_id", ""))
             self.secret_input.setText(broker.get("api_key", ""))
@@ -998,8 +1098,10 @@ class Dashboard(QWidget):
             self.account_id_input.setText(broker.get("account_id", ""))
         self.password_input.setText(broker.get("password") or broker.get("passphrase", ""))
         self.mode_box.setCurrentText(broker.get("mode", "paper"))
+        market_type_index = self.market_type_box.findData((broker.get("options", {}) or {}).get("market_type", "auto"))
+        self.market_type_box.setCurrentIndex(market_type_index if market_type_index >= 0 else 0)
         self.risk_input.setValue(int(creds.get("risk", {}).get("risk_percent", 2) or 2))
-        self.strategy_box.setCurrentText(creds.get("strategy", "EMA_CROSS"))
+        self.strategy_box.setCurrentText(Strategy.normalize_strategy_name(creds.get("strategy", "Trend Following")))
 
         self._update_optional_fields()
         self._update_broker_hint()
@@ -1020,38 +1122,82 @@ class Dashboard(QWidget):
             self._update_exchange_list("paper")
             self.exchange_box.setCurrentText("paper")
             self.mode_box.setCurrentText("paper")
-            self.strategy_box.setCurrentText("LSTM")
+            self._refresh_market_type_options()
+            auto_index = self.market_type_box.findData("auto")
+            self.market_type_box.setCurrentIndex(auto_index if auto_index >= 0 else 0)
+            self.strategy_box.setCurrentText("AI Hybrid")
             self.risk_input.setValue(2)
         elif preset_name == "crypto":
             self.exchange_type_box.setCurrentText("crypto")
+            region_index = self.customer_region_box.findData("us")
+            if region_index >= 0:
+                self.customer_region_box.setCurrentIndex(region_index)
             self._update_exchange_list("crypto")
             if self.exchange_box.findText("binanceus") >= 0:
                 self.exchange_box.setCurrentText("binanceus")
             self.mode_box.setCurrentText("live")
-            self.strategy_box.setCurrentText("EMA_CROSS")
+            self._refresh_market_type_options()
+            spot_index = self.market_type_box.findData("spot")
+            self.market_type_box.setCurrentIndex(spot_index if spot_index >= 0 else 0)
+            self.strategy_box.setCurrentText("Trend Following")
             self.risk_input.setValue(2)
         elif preset_name == "forex":
             self.exchange_type_box.setCurrentText("forex")
             self._update_exchange_list("forex")
             self.exchange_box.setCurrentText("oanda")
             self.mode_box.setCurrentText("live")
-            self.strategy_box.setCurrentText("MACD_TREND")
+            self._refresh_market_type_options()
+            otc_index = self.market_type_box.findData("otc")
+            self.market_type_box.setCurrentIndex(otc_index if otc_index >= 0 else 0)
+            self.strategy_box.setCurrentText("MACD Trend")
             self.risk_input.setValue(1)
 
         self._update_optional_fields()
         self._update_broker_hint()
         self._update_session_preview()
 
+    def _handle_customer_region_changed(self):
+        region = self._selected_customer_region()
+        self.settings.setValue("dashboard/customer_region", region)
+        if self.exchange_type_box.currentText() == "crypto":
+            self._update_exchange_list("crypto")
+        self._update_optional_fields()
+        self._update_broker_hint()
+        self._update_session_preview()
+
     def _update_exchange_list(self, exchange_type):
         current = self.exchange_box.currentText()
-        exchanges = EXCHANGE_MAP.get(exchange_type, [])
+        if exchange_type == "crypto":
+            exchanges = self._crypto_exchange_options_for_region()
+        else:
+            exchanges = EXCHANGE_MAP.get(exchange_type, [])
 
         self.exchange_box.blockSignals(True)
         self.exchange_box.clear()
         self.exchange_box.addItems(exchanges)
         if current in exchanges:
             self.exchange_box.setCurrentText(current)
+        elif exchanges:
+            self.exchange_box.setCurrentIndex(0)
         self.exchange_box.blockSignals(False)
+
+    def _refresh_market_type_options(self):
+        current = str(self.market_type_box.currentData() or "auto").strip().lower() or "auto"
+        supported = supported_market_venues_for_profile(
+            self.exchange_type_box.currentText(),
+            self.exchange_box.currentText(),
+        )
+
+        self.market_type_box.blockSignals(True)
+        self.market_type_box.clear()
+        for label, value in MARKET_VENUE_CHOICES:
+            if value in supported:
+                self.market_type_box.addItem(label, value)
+
+        target = current if current in supported else ("auto" if "auto" in supported else supported[0])
+        index = self.market_type_box.findData(target)
+        self.market_type_box.setCurrentIndex(index if index >= 0 else 0)
+        self.market_type_box.blockSignals(False)
 
     def _update_optional_fields(self):
         broker_type = self.exchange_type_box.currentText()
@@ -1059,12 +1205,14 @@ class Dashboard(QWidget):
         is_paper = broker_type == "paper" or exchange == "paper"
         uses_mapped_account_field = broker_type == "forex" or exchange == "oanda"
         needs_account_id = uses_mapped_account_field
-        needs_password = exchange in {"coinbase", "okx", "kucoin"}
+        needs_password = exchange in {"okx", "kucoin"}
+        self._refresh_market_type_options()
 
         self._field_blocks["api"].setVisible(not is_paper)
         self._field_blocks["secret"].setVisible(not is_paper)
         self._field_blocks["account_id"].setVisible(needs_account_id and not uses_mapped_account_field)
         self._field_blocks["password"].setVisible((not is_paper) and needs_password)
+        self._field_blocks["customer_region"].setVisible(broker_type == "crypto" and not is_paper)
 
         if uses_mapped_account_field:
             self.account_id_input.clear()
@@ -1077,16 +1225,38 @@ class Dashboard(QWidget):
         else:
             self.mode_box.setEnabled(True)
 
+        venue_enabled = self.market_type_box.count() > 1
+        self.market_type_box.setEnabled(venue_enabled)
+        if not venue_enabled:
+            self.market_type_box.blockSignals(True)
+            self.market_type_box.setCurrentIndex(0)
+            self.market_type_box.blockSignals(False)
+
         self._apply_credential_field_schema()
 
     def _update_broker_hint(self):
         broker_type = self.exchange_type_box.currentText()
         exchange = self.exchange_box.currentText()
         mode = self.mode_box.currentText()
+        market_type = self.market_type_box.currentData()
+        customer_region = self._selected_customer_region()
 
         copy = BROKER_COPY.get(broker_type, "Configure a broker session and launch the terminal.")
         if exchange:
             copy = f"{exchange.upper()} in {mode.upper()} mode. {copy}"
+        if exchange and exchange != "paper":
+            copy += f" Trading venue preference: {str(market_type or 'auto').upper()}."
+        if broker_type == "crypto" and exchange and exchange != "paper":
+            if exchange == "binanceus":
+                copy += " Binance US is reserved for US customers."
+            elif exchange == "binance":
+                copy += " Binance.com is for customers outside the US."
+            elif exchange == "coinbase":
+                copy += (
+                    " For Coinbase Advanced Trade, paste the API key name in the first field "
+                    "and the privateKey value in the second field."
+                )
+            copy += f" Customer region: {customer_region.upper()}."
         if exchange == "stellar":
             copy += (
                 " Use your Stellar public key in the first field. "
@@ -1105,14 +1275,16 @@ class Dashboard(QWidget):
     def _update_session_preview(self):
         broker_type = self.exchange_type_box.currentText()
         exchange = self.exchange_box.currentText() or "paper"
+        customer_region = self._selected_customer_region()
         mode = self.mode_box.currentText()
+        market_type = str(self.market_type_box.currentData() or "auto").upper()
         strategy = self.strategy_box.currentText()
         risk_value = self.risk_input.value()
 
         is_paper = broker_type == "paper" or exchange == "paper" or mode == "paper"
         needs_credentials = exchange != "paper" and broker_type != "paper"
         needs_account_id = broker_type == "forex" or exchange == "oanda"
-        needs_password = exchange in {"coinbase", "okx", "kucoin"} and not is_paper
+        needs_password = exchange in {"okx", "kucoin"} and not is_paper
 
         resolved = self._resolved_broker_inputs()
         has_api = bool(resolved.get("api_key"))
@@ -1145,17 +1317,27 @@ class Dashboard(QWidget):
         self.session_pill_value.setText(session_label)
         self.readiness_pill_value.setText(f"{readiness}%")
         self.market_pill_value.setText(market_reach)
+        license_status = {}
+        if hasattr(self.controller, "get_license_status"):
+            try:
+                license_status = self.controller.get_license_status()
+            except Exception:
+                license_status = {}
+        self.license_pill_value.setText(str(license_status.get("badge", "FREE") or "FREE"))
+        license_plan = str(license_status.get("plan_name", "License") or "License")
+        license_summary = str(license_status.get("summary", "Status unavailable") or "Status unavailable")
+        self.license_status_label.setText(f"{license_plan}: {license_summary}")
 
         venue_label = exchange.upper() if exchange else "PAPER"
         strategy_copy = STRATEGY_COPY.get(strategy, "The selected strategy is ready for a cleaner launch flow.")
         mode_copy = "paper rehearsal" if is_paper else "live execution"
 
         self.market_primary.body_label.setText(
-            f"{venue_label} selected with {mode_copy} framing and a more readable broker handoff."
+            f"{venue_label} selected with {mode_copy} framing and {customer_region.upper()} customer routing."
         )
         self.market_secondary.body_label.setText(f"{strategy} selected. {strategy_copy}")
         self.market_tertiary.body_label.setText(
-            f"Risk budget is {risk_value}%. Profiles are {'saved' if self.remember_checkbox.isChecked() else 'temporary'} for this session."
+            f"Risk budget is {risk_value}%. Venue {market_type}. Profiles are {'saved' if self.remember_checkbox.isChecked() else 'temporary'} for this session."
         )
 
         broker_ready = bool(exchange)
@@ -1173,16 +1355,49 @@ class Dashboard(QWidget):
                 "This setup is optimized for a safer rehearsal. You can validate the broker shape, charts, and strategy flow before taking live risk."
             )
             self.connect_button.setText("Open Paper Terminal")
+            self.live_guard_checkbox.setVisible(False)
+            self.live_guard_checkbox.setChecked(False)
         else:
             self.summary_title.setText(f"{venue_label} live launch")
             self.summary_body.setText(
                 "This session is configured for live execution. Review credentials, account details, and the selected strategy before entering the terminal."
             )
-            self.connect_button.setText("Launch Live Trading Terminal")
+            if hasattr(self.controller, "license_allows") and not self.controller.license_allows("live_trading"):
+                self.connect_button.setText("Activate License For Live Trading")
+            else:
+                self.connect_button.setText("Launch Live Trading Terminal")
+            self.live_guard_checkbox.setVisible(True)
+            self.live_guard_checkbox.setText(
+                f"I understand {venue_label} can place live orders on this account."
+            )
 
         profile_state = self.saved_account_box.currentText()
         profile_copy = profile_state if profile_state and profile_state != "Recent profiles" else "Profile not saved yet"
         self.summary_meta.setText(f"Risk {risk_value}%  |  Strategy {strategy}  |  {profile_copy}")
+
+    def _confirm_live_launch(self, exchange, account_id):
+        confirmation = QMessageBox.question(
+            self,
+            "Confirm Live Trading",
+            (
+                f"You are about to open a LIVE trading session for {str(exchange or '').upper() or 'the selected broker'}.\n\n"
+                f"Account: {account_id or 'Not set'}\n"
+                "Mode: LIVE\n\n"
+                "Use paper mode whenever you are testing a new strategy or broker path.\n"
+                "Continue only if you intend to allow real orders."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirmation != QMessageBox.StandardButton.Yes:
+            return False
+
+        typed, ok = QInputDialog.getText(
+            self,
+            "Type LIVE To Continue",
+            "Type LIVE to confirm this real-money session:",
+        )
+        return bool(ok and str(typed).strip().upper() == "LIVE")
 
     def _sync_shell_layout(self):
         is_compact = self.width() < 1220
@@ -1207,6 +1422,7 @@ class Dashboard(QWidget):
     def _on_connect(self):
         exchange = self.exchange_box.currentText()
         broker_type = self.exchange_type_box.currentText()
+        customer_region = self._selected_customer_region()
         resolved = self._resolved_broker_inputs()
         api_key = resolved.get("api_key")
         secret = resolved.get("secret")
@@ -1216,19 +1432,84 @@ class Dashboard(QWidget):
         if exchange != "paper" and broker_type != "paper" and not api_key:
             QMessageBox.warning(self, "Missing Credentials", "API credentials are required for this broker.")
             return
+        if exchange != "paper" and broker_type != "paper" and exchange != "oanda" and not secret:
+            QMessageBox.warning(
+                self,
+                "Missing Secret",
+                "A secret key is required for this broker session.",
+            )
+            return
         if broker_type == "forex" and not account_id:
             QMessageBox.warning(self, "Missing Account ID",
                                 "Account ID is required for Oanda sessions.")
             return
+        if exchange in {"binance", "binanceus"} and api_key and any(ch.isspace() for ch in api_key):
+            QMessageBox.warning(
+                self,
+                "Invalid API Key",
+                "The Binance API key contains spaces or line breaks. Paste the key exactly as issued by the exchange.",
+            )
+            return
+        if exchange in {"binance", "binanceus"} and secret and any(ch.isspace() for ch in secret):
+            QMessageBox.warning(
+                self,
+                "Invalid Secret",
+                "The Binance secret contains spaces or line breaks. Paste the secret exactly as issued by the exchange.",
+            )
+            return
+        if broker_type == "crypto" and exchange == "binance" and customer_region == "us":
+            QMessageBox.warning(
+                self,
+                "Binance Jurisdiction",
+                "Binance.com is not available for US customers. Switch the customer region to Outside US or use Binance US.",
+            )
+            return
+        if broker_type == "crypto" and exchange == "binanceus" and customer_region != "us":
+            QMessageBox.warning(
+                self,
+                "Binance US Jurisdiction",
+                "Binance US is only available for US customers. Switch the customer region to US or choose Binance for non-US customers.",
+            )
+            return
+        if self.mode_box.currentText() == "live" and exchange != "paper" and broker_type != "paper":
+            if hasattr(self.controller, "license_allows") and not self.controller.license_allows("live_trading"):
+                QMessageBox.information(
+                    self,
+                    "License Required",
+                    "Live trading requires an active Trial, Subscription, or Full License. The license window will open now.",
+                )
+                if hasattr(self.controller, "show_license_dialog"):
+                    self.controller.show_license_dialog(self)
+                return
+        if self.mode_box.currentText() == "live" and exchange != "paper" and broker_type != "paper":
+            if not self.live_guard_checkbox.isChecked():
+                QMessageBox.warning(
+                    self,
+                    "Live Safety Check",
+                    "Tick the live-order acknowledgement before launching a live session.",
+                )
+                return
+            if not self._confirm_live_launch(exchange, account_id):
+                QMessageBox.information(
+                    self,
+                    "Live Session Canceled",
+                    "Live launch canceled. The terminal was not opened.",
+                )
+                return
 
         broker_config = BrokerConfig(
             type=broker_type,
             exchange=exchange,
+            customer_region=customer_region,
             mode=self.mode_box.currentText(),
             api_key=api_key,
             secret=secret,
             password=password or None,
             account_id=account_id or None,
+            options={
+                "market_type": str(self.market_type_box.currentData() or "auto"),
+                "customer_region": customer_region,
+            },
         )
 
         config = AppConfig(

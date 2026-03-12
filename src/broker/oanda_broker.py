@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import socket
 
 import aiohttp
 
@@ -43,6 +45,9 @@ class OandaBroker(BaseBroker):
         if not self.account_id:
             raise ValueError("Oanda account_id is required")
 
+    def supported_market_venues(self):
+        return ["auto", "otc"]
+
     # ===============================
     # INTERNALS
     # ===============================
@@ -59,50 +64,60 @@ class OandaBroker(BaseBroker):
         await self._ensure_connected()
 
         url = f"{self.base_url}{path}"
-        async with self.session.request(
-            method,
-            url,
-            headers=self._headers,
-            params=params,
-            json=payload,
-        ) as response:
-            try:
-                response.raise_for_status()
-            except aiohttp.ClientResponseError as exc:
-                detail = ""
-                payload_json = {}
+        try:
+            async with self.session.request(
+                method,
+                url,
+                headers=self._headers,
+                params=params,
+                json=payload,
+            ) as response:
                 try:
-                    payload_text = await response.text()
-                    detail = payload_text.strip()
-                    if detail:
-                        payload_json = json.loads(detail)
-                except Exception:
+                    response.raise_for_status()
+                except aiohttp.ClientResponseError as exc:
                     detail = ""
                     payload_json = {}
+                    try:
+                        payload_text = await response.text()
+                        detail = payload_text.strip()
+                        if detail:
+                            payload_json = json.loads(detail)
+                    except Exception:
+                        detail = ""
+                        payload_json = {}
 
-                if isinstance(payload_json, dict):
-                    detail_parts = []
-                    error_message = payload_json.get("errorMessage") or payload_json.get("message")
-                    reject_transaction = payload_json.get("orderRejectTransaction") or {}
-                    reject_reason = ""
-                    if isinstance(reject_transaction, dict):
-                        reject_reason = (
-                            reject_transaction.get("rejectReason")
-                            or reject_transaction.get("reason")
-                            or ""
-                        )
-                    if error_message:
-                        detail_parts.append(str(error_message).strip())
-                    if reject_reason:
-                        detail_parts.append(str(reject_reason).strip())
-                    if detail_parts:
-                        detail = " | ".join(part for part in detail_parts if part)
+                    if isinstance(payload_json, dict):
+                        detail_parts = []
+                        error_message = payload_json.get("errorMessage") or payload_json.get("message")
+                        reject_transaction = payload_json.get("orderRejectTransaction") or {}
+                        reject_reason = ""
+                        if isinstance(reject_transaction, dict):
+                            reject_reason = (
+                                reject_transaction.get("rejectReason")
+                                or reject_transaction.get("reason")
+                                or ""
+                            )
+                        if error_message:
+                            detail_parts.append(str(error_message).strip())
+                        if reject_reason:
+                            detail_parts.append(str(reject_reason).strip())
+                        if detail_parts:
+                            detail = " | ".join(part for part in detail_parts if part)
 
-                message = f"{exc.status} {exc.message}"
-                if detail:
-                    message = f"{message}: {detail}"
-                raise RuntimeError(message) from exc
-            return await response.json()
+                    message = f"{exc.status} {exc.message}"
+                    if detail:
+                        message = f"{message}: {detail}"
+                    raise RuntimeError(message) from exc
+                return await response.json()
+        except aiohttp.ClientConnectorDNSError as exc:
+            raise RuntimeError(
+                "Network DNS lookup failed while connecting to Oanda. "
+                "Check your internet connection, DNS settings, VPN, proxy, or firewall."
+            ) from exc
+        except (aiohttp.ClientConnectorError, asyncio.TimeoutError) as exc:
+            raise RuntimeError(
+                f"Network connection failed while connecting to Oanda: {exc}"
+            ) from exc
 
     def _normalize_symbol(self, symbol):
         if not symbol:
@@ -151,6 +166,17 @@ class OandaBroker(BaseBroker):
         precision = max(0, int(precision or 5))
         return f"{float(price):.{precision}f}"
 
+    def _float(self, value, default=0.0):
+        try:
+            return float(value)
+        except Exception:
+            if default is None:
+                return None
+            try:
+                return float(default)
+            except Exception:
+                return None
+
     def _normalize_order_status(self, status):
         normalized = str(status or "").upper()
         mapping = {
@@ -164,7 +190,16 @@ class OandaBroker(BaseBroker):
         }
         return mapping.get(normalized, normalized.lower() if normalized else "unknown")
 
-    def _normalize_order_payload(self, payload, fallback_symbol=None, fallback_side=None, fallback_type=None, fallback_amount=None, fallback_price=None):
+    def _normalize_order_payload(
+        self,
+        payload,
+        fallback_symbol=None,
+        fallback_side=None,
+        fallback_type=None,
+        fallback_amount=None,
+        fallback_price=None,
+        fallback_stop_price=None,
+    ):
         if not isinstance(payload, dict):
             return payload
 
@@ -195,6 +230,8 @@ class OandaBroker(BaseBroker):
             side = "buy" if units_float >= 0 else "sell"
 
         order_type = str(order.get("type") or fallback_type or "").lower() or None
+        if str(fallback_type or "").strip().lower() == "stop_limit":
+            order_type = "stop_limit"
         status = self._normalize_order_status(
             order.get("state")
             or fill.get("reason")
@@ -204,6 +241,7 @@ class OandaBroker(BaseBroker):
 
         price_value = (
             order.get("price")
+            or order.get("priceBound")
             or fill.get("price")
             or fill.get("fullVWAP")
             or fallback_price
@@ -232,6 +270,7 @@ class OandaBroker(BaseBroker):
             "amount": abs(units_float),
             "filled": filled_float,
             "price": price_float,
+            "stop_price": self._float(order.get("triggerPrice") or order.get("price"), fallback_stop_price),
             "raw": payload,
         }
 
@@ -243,7 +282,14 @@ class OandaBroker(BaseBroker):
         if self._connected:
             return True
 
-        self.session = aiohttp.ClientSession()
+        resolver = aiohttp.ThreadedResolver()
+        connector = aiohttp.TCPConnector(
+            resolver=resolver,
+            family=socket.AF_INET,
+            ttl_dns_cache=300,
+        )
+        timeout = aiohttp.ClientTimeout(total=45)
+        self.session = aiohttp.ClientSession(connector=connector, timeout=timeout)
         self._connected = True
         return True
 
@@ -414,15 +460,37 @@ class OandaBroker(BaseBroker):
             instrument = position.get("instrument")
             if targets and instrument not in targets:
                 continue
-            long_units = float(position.get("long", {}).get("units", 0) or 0)
-            short_units = float(position.get("short", {}).get("units", 0) or 0)
+            long_leg = position.get("long", {}) or {}
+            short_leg = position.get("short", {}) or {}
+            long_units = float(long_leg.get("units", 0) or 0)
+            short_units = float(short_leg.get("units", 0) or 0)
             units = long_units if long_units else -short_units
+            realized_pl = float(position.get("pl", 0) or 0)
+            unrealized_pl = float(position.get("unrealizedPL", 0) or 0)
+            resettable_pl = float(position.get("resettablePL", 0) or 0)
+            financing = float(position.get("financing", 0) or 0)
+            dividend_adjustment = float(position.get("dividendAdjustment", 0) or 0)
+            margin_used = float(position.get("marginUsed", 0) or 0)
+            value = float(position.get("positionValue", 0) or 0)
             normalized.append(
                 {
                     "symbol": instrument,
                     "amount": abs(units),
                     "side": "long" if units >= 0 else "short",
-                    "entry_price": float(position.get("long", {}).get("averagePrice", 0) or position.get("short", {}).get("averagePrice", 0) or 0),
+                    "entry_price": float(long_leg.get("averagePrice", 0) or short_leg.get("averagePrice", 0) or 0),
+                    "units": units,
+                    "value": value,
+                    "pnl": unrealized_pl,
+                    "unrealized_pnl": unrealized_pl,
+                    "unrealized_pl": unrealized_pl,
+                    "realized_pnl": realized_pl,
+                    "realized_pl": realized_pl,
+                    "resettable_pl": resettable_pl,
+                    "financing": financing,
+                    "dividend_adjustment": dividend_adjustment,
+                    "margin_used": margin_used,
+                    "long_units": long_units,
+                    "short_units": short_units,
                     "raw": position,
                 }
             )
@@ -455,9 +523,21 @@ class OandaBroker(BaseBroker):
             return normalized
         return normalized if normalized.get("symbol") == self._normalize_symbol(symbol) else None
 
-    async def create_order(self, symbol, side, amount, type="market", price=None, params=None, stop_loss=None, take_profit=None):
+    async def create_order(
+        self,
+        symbol,
+        side,
+        amount,
+        type="market",
+        price=None,
+        stop_price=None,
+        params=None,
+        stop_loss=None,
+        take_profit=None,
+    ):
         instrument = self._normalize_symbol(symbol)
-        order_type = str(type).upper()
+        normalized_type = str(type or "market").strip().lower() or "market"
+        order_type = "STOP" if normalized_type == "stop_limit" else normalized_type.upper()
         meta = await self._get_instrument_meta(symbol)
         units = float(amount)
         if str(side).lower() == "sell":
@@ -485,7 +565,14 @@ class OandaBroker(BaseBroker):
             if price is None or float(price) <= 0:
                 raise ValueError("Limit orders require a positive price")
             display_precision = int(meta.get("displayPrecision", 5) or 5)
-            order["price"] = self._format_price(price, display_precision)
+            if normalized_type == "stop_limit":
+                trigger_price = extra.pop("stop_price", stop_price)
+                if trigger_price is None or float(trigger_price) <= 0:
+                    raise ValueError("stop_limit orders require a positive stop_price trigger")
+                order["price"] = self._format_price(trigger_price, display_precision)
+                order["priceBound"] = self._format_price(price, display_precision)
+            else:
+                order["price"] = self._format_price(price, display_precision)
 
         stop_loss = extra.pop("stop_loss", stop_loss)
         take_profit = extra.pop("take_profit", take_profit)
@@ -504,9 +591,10 @@ class OandaBroker(BaseBroker):
             payload,
             fallback_symbol=symbol,
             fallback_side=side,
-            fallback_type=type,
+            fallback_type=normalized_type,
             fallback_amount=amount,
             fallback_price=price,
+            fallback_stop_price=stop_price,
         )
 
     async def cancel_order(self, order_id, symbol=None):

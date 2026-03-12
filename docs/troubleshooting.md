@@ -21,6 +21,21 @@ Check these items:
 - wait for the orderbook refresh timer
 - verify that bids and asks are actually being returned
 
+## Recent Trades Tab Stays Empty
+
+Check these items:
+- confirm the active broker supports public `fetch_trades(symbol)` for that market
+- switch to another symbol to rule out a symbol-specific broker limitation
+- wait for the normal order book refresh cycle, because recent trades refresh alongside it
+- confirm the connected session still has live ticker data, since the app can only synthesize a fallback feed when quote data is available
+
+## Depth Chart Or Market Info Looks Blank
+
+Check these items:
+- confirm the chart has received candles, because market info uses visible candle context
+- confirm the order book has populated first, because depth depends on bid and ask levels
+- switch chart tabs and symbols once if you recently detached or reattached the chart window
+
 ## No AI Signals Or AI Trading Looks Idle
 
 Check these items:
