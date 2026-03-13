@@ -148,6 +148,165 @@ class SopotekTrading:
             for symbol, payload in (self._pipeline_status or {}).items()
         }
 
+    def _symbols_match(self, left, right):
+        normalize = lambda value: str(value or "").strip().upper().replace("-", "/").replace("_", "/")
+        left_text = normalize(left)
+        right_text = normalize(right)
+        return bool(left_text and right_text and left_text == right_text)
+
+    def _position_side(self, position):
+        if hasattr(self.broker, "_position_side"):
+            try:
+                side = self.broker._position_side(position)
+                if side:
+                    return str(side).strip().lower()
+            except Exception:
+                pass
+        if isinstance(position, dict):
+            side = position.get("side")
+            if side is not None:
+                return str(side).strip().lower()
+            for key in ("amount", "qty", "quantity", "size", "contracts"):
+                value = position.get(key)
+                try:
+                    numeric = float(value)
+                except Exception:
+                    continue
+                if numeric < 0:
+                    return "short"
+                if numeric > 0:
+                    return "long"
+        return ""
+
+    def _position_amount(self, position):
+        if hasattr(self.broker, "_position_amount"):
+            try:
+                return float(self.broker._position_amount(position) or 0.0)
+            except Exception:
+                pass
+        if isinstance(position, dict):
+            for key in ("amount", "qty", "quantity", "size", "contracts"):
+                value = position.get(key)
+                try:
+                    return abs(float(value))
+                except Exception:
+                    continue
+        return 0.0
+
+    def _is_exit_like_signal(self, signal_side, position_side, signal):
+        normalized_signal = str(signal_side or "").strip().lower()
+        normalized_position = str(position_side or "").strip().lower()
+        if not normalized_signal or not normalized_position:
+            return False
+
+        if normalized_position in {"long", "buy"} and normalized_signal == "sell":
+            return True
+        if normalized_position in {"short", "sell"} and normalized_signal == "buy":
+            return True
+
+        reason = str((signal or {}).get("reason") or "").strip().lower()
+        return any(token in reason for token in ("exit", "close", "flatten", "reduce"))
+
+    async def _fetch_symbol_positions(self, symbol):
+        if not hasattr(self.broker, "fetch_positions"):
+            return []
+        try:
+            positions = await self.broker.fetch_positions(symbols=[symbol])
+        except TypeError:
+            positions = await self.broker.fetch_positions()
+        except Exception:
+            return []
+        return [
+            position
+            for position in (positions or [])
+            if isinstance(position, dict)
+            and self._symbols_match(position.get("symbol"), symbol)
+            and self._position_amount(position) > 0
+        ]
+
+    async def _fetch_symbol_open_orders(self, symbol, limit=100):
+        if not hasattr(self.broker, "fetch_open_orders"):
+            return []
+        snapshot = getattr(self.broker, "fetch_open_orders_snapshot", None)
+        try:
+            if callable(snapshot):
+                orders = await snapshot(symbols=[symbol], limit=limit)
+            else:
+                orders = await self.broker.fetch_open_orders(symbol=symbol, limit=limit)
+        except TypeError:
+            try:
+                orders = await self.broker.fetch_open_orders(symbol)
+            except Exception:
+                return []
+        except Exception:
+            return []
+
+        active_statuses = {"open", "pending", "submitted", "accepted", "new", "partially_filled", "partially-filled"}
+        filtered = []
+        for order in orders or []:
+            if not isinstance(order, dict):
+                continue
+            if not self._symbols_match(order.get("symbol"), symbol):
+                continue
+            status = str(order.get("status") or "open").strip().lower()
+            if status and status not in active_statuses:
+                continue
+            filtered.append(order)
+        return filtered
+
+    async def _cancel_stale_exit_orders(self, symbol, side, signal):
+        positions = await self._fetch_symbol_positions(symbol)
+        if not positions:
+            return 0, "No live broker position to clean up."
+
+        has_exit_like_position = any(
+            self._is_exit_like_signal(side, self._position_side(position), signal)
+            for position in positions
+        )
+        if not has_exit_like_position:
+            return 0, "Signal does not oppose a live broker position."
+
+        open_orders = await self._fetch_symbol_open_orders(symbol)
+        if not open_orders:
+            return 0, "No stale open orders were found for the symbol."
+
+        canceled = 0
+        if hasattr(self.broker, "cancel_all_orders"):
+            try:
+                await self.broker.cancel_all_orders(symbol=symbol)
+                return len(open_orders), f"Canceled {len(open_orders)} stale open order(s) before exit handling."
+            except TypeError:
+                try:
+                    await self.broker.cancel_all_orders(symbol)
+                    return len(open_orders), f"Canceled {len(open_orders)} stale open order(s) before exit handling."
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        if not hasattr(self.broker, "cancel_order"):
+            return 0, "Broker does not support cancel_order for exit cleanup."
+
+        for order in open_orders:
+            order_id = str(order.get("id") or order.get("order_id") or order.get("clientOrderId") or "").strip()
+            if not order_id:
+                continue
+            try:
+                await self.broker.cancel_order(order_id, symbol=symbol)
+                canceled += 1
+            except TypeError:
+                try:
+                    await self.broker.cancel_order(order_id)
+                    canceled += 1
+                except Exception:
+                    continue
+            except Exception:
+                continue
+
+        if canceled:
+            return canceled, f"Canceled {canceled} stale open order(s) before exit handling."
+        return 0, "Unable to cancel stale open orders before exit handling."
+
     async def process_symbol(self, symbol, timeframe=None, limit=None, publish_debug=True):
         normalized_symbol = str(symbol or "").strip().upper()
         if not normalized_symbol:
@@ -365,6 +524,11 @@ class SopotekTrading:
             self.logger.warning("Trade rejected because no executable reference price was available for %s", symbol)
             return
 
+        canceled_orders, cleanup_reason = await self._cancel_stale_exit_orders(symbol, side, signal)
+        if canceled_orders:
+            self.logger.info("%s", cleanup_reason)
+            self._record_pipeline_status(symbol, "order_cleanup", "approved", cleanup_reason, signal=signal)
+
         basic_reason = "Approved"
         if hasattr(self.risk_engine, "adjust_trade"):
             allowed, adjusted_amount, basic_reason = self.risk_engine.adjust_trade(float(price), float(amount))
@@ -445,6 +609,26 @@ class SopotekTrading:
 
         if self.portfolio_allocator is not None:
             self.portfolio_allocator.register_strategy_symbol(symbol, strategy_name)
+
+        margin_closeout_snapshot = {}
+        margin_guard = getattr(self.controller, "margin_closeout_snapshot", None) if self.controller is not None else None
+        if callable(margin_guard):
+            try:
+                margin_closeout_snapshot = dict(margin_guard() or {})
+            except Exception:
+                margin_closeout_snapshot = {}
+        if self.controller is not None and margin_closeout_snapshot:
+            merged_risk_snapshot = dict(getattr(self.controller, "quant_risk_snapshot", {}) or {})
+            merged_risk_snapshot["margin_closeout_guard"] = margin_closeout_snapshot
+            self.controller.quant_risk_snapshot = merged_risk_snapshot
+        if margin_closeout_snapshot.get("blocked"):
+            reason = str(
+                margin_closeout_snapshot.get("reason")
+                or "Margin closeout guard blocked the trade."
+            ).strip()
+            self.logger.warning("Trade rejected by margin closeout guard: %s", reason)
+            self._record_pipeline_status(symbol, "margin_closeout_guard", "rejected", reason, signal=signal)
+            return
 
         execution_strategy = self._resolve_execution_strategy(symbol, side, amount, price, signal)
 

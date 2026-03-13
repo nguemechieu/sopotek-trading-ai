@@ -59,6 +59,20 @@ class BacktestEngine:
                 return self.strategy.generate_signal(candles)
         return None
 
+    def _precompute_feature_frame(self, df, strategy_name=None):
+        strategy = self._resolve_strategy(strategy_name)
+        compute_features = getattr(strategy, "compute_features", None)
+        generate_from_features = getattr(strategy, "generate_signal_from_features", None)
+        if not callable(compute_features) or not callable(generate_from_features):
+            return None, None
+        try:
+            feature_frame = compute_features(df)
+        except Exception:
+            return None, None
+        if feature_frame is None or getattr(feature_frame, "empty", False):
+            return feature_frame, generate_from_features
+        return feature_frame, generate_from_features
+
     def run(self, data, symbol="BACKTEST", strategy_name=None, stop_event=None, metadata=None):
         df = self._normalize_frame(data)
         self.results = []
@@ -73,6 +87,10 @@ class BacktestEngine:
         warmup = self._min_history(strategy_name)
         last_row = None
         stopped_early = False
+        feature_frame, generate_from_features = self._precompute_feature_frame(df, strategy_name=strategy_name)
+        feature_cursor = 0
+        feature_count = len(feature_frame) if feature_frame is not None else 0
+        feature_indices = list(feature_frame.index) if feature_frame is not None else []
 
         for end_index in range(1, len(df) + 1):
             if stop_event is not None and stop_event.is_set():
@@ -84,7 +102,16 @@ class BacktestEngine:
             last_row = row
             signal = None
 
-            if len(window) >= warmup:
+            if generate_from_features is not None and feature_count:
+                raw_index = end_index - 1
+                while feature_cursor < feature_count and feature_indices[feature_cursor] <= raw_index:
+                    feature_cursor += 1
+                if feature_cursor > 0:
+                    signal = generate_from_features(
+                        feature_frame.iloc[:feature_cursor],
+                        strategy_name=strategy_name,
+                    )
+            elif len(window) >= warmup:
                 candles = self._window_to_candles(window)
                 signal = self._generate_signal(candles, strategy_name=strategy_name)
 

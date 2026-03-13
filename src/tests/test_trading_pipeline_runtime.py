@@ -24,6 +24,23 @@ class DummyBroker:
         return {"status": "filled"}
 
 
+class CleanupBroker(DummyBroker):
+    def __init__(self, positions=None, orders=None):
+        self.positions = list(positions or [])
+        self.orders = list(orders or [])
+        self.canceled = []
+
+    async def fetch_positions(self, symbols=None):
+        return list(self.positions)
+
+    async def fetch_open_orders(self, symbol=None, limit=None):
+        return list(self.orders)
+
+    async def cancel_order(self, order_id, symbol=None):
+        self.canceled.append({"order_id": order_id, "symbol": symbol})
+        return {"id": order_id, "status": "canceled", "symbol": symbol}
+
+
 class ExplodingStrategy:
     def generate_signal(self, candles):
         raise AssertionError("fallback strategy path should not be used")
@@ -219,3 +236,171 @@ def test_sopotek_trading_scales_basic_risk_rejections_into_smaller_orders():
     assert captured["amount"] == 10.0
     assert trading.pipeline_status_snapshot()["BTC/USDT"]["stage"] == "risk_engine"
     assert trading.pipeline_status_snapshot()["BTC/USDT"]["status"] == "approved"
+
+
+def test_sopotek_trading_cancels_stale_orders_before_exit_like_signal():
+    controller = SimpleNamespace(
+        broker=CleanupBroker(
+            positions=[{"symbol": "BTC/USDT", "contracts": 0.25, "side": "long"}],
+            orders=[
+                {"id": "open-1", "symbol": "BTC/USDT", "status": "open"},
+                {"id": "open-2", "symbol": "BTC/USDT", "status": "new"},
+            ],
+        ),
+        symbols=["BTC/USDT"],
+        time_frame="1h",
+        limit=200,
+        strategy_name="Trend Following",
+        strategy_params={},
+        max_portfolio_risk=0.10,
+        max_risk_per_trade=0.02,
+        max_position_size_pct=0.10,
+        max_gross_exposure_pct=2.0,
+        balances={"total": {"USDT": 10000}},
+        initial_capital=10000,
+        market_data_repository=None,
+        trade_repository=None,
+        handle_trade_execution=lambda trade: None,
+    )
+
+    trading = SopotekTrading(controller=controller)
+    trading.risk_engine = RiskEngine(account_equity=10000, max_position_size_pct=0.10)
+    trading.portfolio_allocator = None
+    trading.portfolio_risk_engine = None
+
+    executed = {}
+
+    async def fake_execute(**kwargs):
+        executed.update(kwargs)
+        return {"status": "filled", "amount": kwargs["amount"], "reason": "submitted"}
+
+    trading.execution_manager.execute = fake_execute
+
+    result = asyncio.run(
+        trading.process_signal(
+            "BTC/USDT",
+            {
+                "symbol": "BTC/USDT",
+                "side": "sell",
+                "amount": 1.0,
+                "price": 100.0,
+                "confidence": 0.80,
+                "reason": "exit long on reversal",
+                "strategy_name": "Trend Following",
+            },
+            dataset=FakeDataset(_sample_frame()),
+        )
+    )
+
+    assert result["status"] == "filled"
+    assert [row["order_id"] for row in controller.broker.canceled] == ["open-1", "open-2"]
+    assert executed["side"] == "sell"
+
+
+def test_sopotek_trading_does_not_cancel_orders_for_same_direction_signal():
+    controller = SimpleNamespace(
+        broker=CleanupBroker(
+            positions=[{"symbol": "BTC/USDT", "contracts": 0.25, "side": "long"}],
+            orders=[{"id": "open-1", "symbol": "BTC/USDT", "status": "open"}],
+        ),
+        symbols=["BTC/USDT"],
+        time_frame="1h",
+        limit=200,
+        strategy_name="Trend Following",
+        strategy_params={},
+        max_portfolio_risk=0.10,
+        max_risk_per_trade=0.02,
+        max_position_size_pct=0.10,
+        max_gross_exposure_pct=2.0,
+        balances={"total": {"USDT": 10000}},
+        initial_capital=10000,
+        market_data_repository=None,
+        trade_repository=None,
+        handle_trade_execution=lambda trade: None,
+    )
+
+    trading = SopotekTrading(controller=controller)
+    trading.risk_engine = RiskEngine(account_equity=10000, max_position_size_pct=0.10)
+    trading.portfolio_allocator = None
+    trading.portfolio_risk_engine = None
+
+    async def fake_execute(**kwargs):
+        return {"status": "filled", "amount": kwargs["amount"], "reason": "submitted"}
+
+    trading.execution_manager.execute = fake_execute
+
+    asyncio.run(
+        trading.process_signal(
+            "BTC/USDT",
+            {
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "amount": 1.0,
+                "price": 100.0,
+                "confidence": 0.80,
+                "reason": "trend continuation",
+                "strategy_name": "Trend Following",
+            },
+            dataset=FakeDataset(_sample_frame()),
+        )
+    )
+
+    assert controller.broker.canceled == []
+
+
+def test_sopotek_trading_blocks_trade_when_margin_closeout_guard_is_triggered():
+    controller = SimpleNamespace(
+        broker=DummyBroker(),
+        symbols=["BTC/USDT"],
+        time_frame="1h",
+        limit=200,
+        strategy_name="Trend Following",
+        strategy_params={},
+        max_portfolio_risk=0.10,
+        max_risk_per_trade=0.02,
+        max_position_size_pct=0.10,
+        max_gross_exposure_pct=2.0,
+        balances={"equity": 10000.0, "raw": {"marginCloseoutPercent": 0.72}},
+        initial_capital=10000,
+        market_data_repository=None,
+        trade_repository=None,
+        handle_trade_execution=lambda trade: None,
+        margin_closeout_snapshot=lambda balances=None: {
+            "enabled": True,
+            "available": True,
+            "ratio": 0.72,
+            "threshold": 0.50,
+            "blocked": True,
+            "reason": "Margin closeout risk is 72.00%, above the configured limit of 50.00%. New trades are blocked.",
+        },
+    )
+
+    trading = SopotekTrading(controller=controller)
+    trading.risk_engine = RiskEngine(account_equity=10000, max_position_size_pct=0.10)
+    trading.portfolio_allocator = None
+    trading.portfolio_risk_engine = None
+
+    async def fake_execute(**kwargs):
+        raise AssertionError("execution manager should not run when margin closeout guard blocks the trade")
+
+    trading.execution_manager.execute = fake_execute
+
+    result = asyncio.run(
+        trading.process_signal(
+            "BTC/USDT",
+            {
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "amount": 1.0,
+                "price": 100.0,
+                "confidence": 0.80,
+                "reason": "breakout signal",
+                "strategy_name": "Trend Following",
+            },
+            dataset=FakeDataset(_sample_frame()),
+        )
+    )
+
+    assert result is None
+    assert trading.pipeline_status_snapshot()["BTC/USDT"]["stage"] == "margin_closeout_guard"
+    assert trading.pipeline_status_snapshot()["BTC/USDT"]["status"] == "rejected"

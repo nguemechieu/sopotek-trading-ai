@@ -88,6 +88,59 @@ def test_chart_widget_accepts_utc_timestamp_series():
     assert widget._last_x[1] > widget._last_x[0]
 
 
+def test_chart_widget_accepts_strategy_signal_timestamp_strings():
+    _app()
+    widget = ChartWidget("EUR/USD", "4h", DummyController())
+
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-03-13T00:00:00+00:00",
+                    "2026-03-13T02:00:00+00:00",
+                    "2026-03-13T04:00:00+00:00",
+                ],
+                utc=True,
+            ),
+            "open": [1.10, 1.11, 1.12],
+            "high": [1.12, 1.13, 1.14],
+            "low": [1.09, 1.10, 1.11],
+            "close": [1.11, 1.12, 1.13],
+            "volume": [1000, 1100, 900],
+        }
+    )
+
+    widget.update_candles(df)
+    widget.add_strategy_signal("2026-03-13T02:00:00.000000000Z", 1.12, "BUY")
+
+    points = widget.signal_markers.points()
+    assert len(points) == 1
+    assert points[0].pos().x() == widget._last_x[1]
+
+
+def test_chart_widget_maps_strategy_signal_row_index_to_chart_time_axis():
+    _app()
+    widget = ChartWidget("BTC/USDT", "1h", DummyController())
+
+    df = pd.DataFrame(
+        {
+            "timestamp": [1700000000 + i * 60 for i in range(4)],
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [100.5, 101.5, 102.5, 103.5],
+            "volume": [10, 12, 14, 16],
+        }
+    )
+
+    widget.update_candles(df)
+    widget.add_strategy_signal(2, 102.5, "SELL")
+
+    points = widget.signal_markers.points()
+    assert len(points) == 1
+    assert points[0].pos().x() == widget._last_x[2]
+
+
 def test_chart_widget_exposes_depth_and_market_info_tabs():
     _app()
     widget = ChartWidget("BTC/USDT", "1h", DummyController())
@@ -149,3 +202,49 @@ def test_orderbook_panel_shows_recent_market_trades():
     assert panel.tabs.tabText(1) == "Recent Trades"
     assert panel.recent_trades_table.item(0, 1).text() == "BUY"
     assert panel.recent_trades_table.item(1, 1).text() == "SELL"
+
+
+def test_chart_widget_resolves_hovered_news_event_details():
+    _app()
+    widget = ChartWidget("BTC/USDT", "1h", DummyController())
+
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-03-12T10:00:00+00:00",
+                    "2026-03-12T11:00:00+00:00",
+                    "2026-03-12T12:00:00+00:00",
+                    "2026-03-12T13:00:00+00:00",
+                ],
+                utc=True,
+            ),
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.5, 104.0],
+            "low": [99.5, 100.4, 101.4, 102.2],
+            "close": [100.8, 101.7, 103.1, 103.7],
+            "volume": [10, 14, 12, 16],
+        }
+    )
+    widget.update_candles(df)
+    widget.set_news_events(
+        [
+            {
+                "timestamp": "2026-03-12T12:00:00+00:00",
+                "title": "CPI surprise cools risk sentiment",
+                "source": "Macro Wire",
+                "summary": "Inflation data came in below expectations and traders quickly repriced rate-cut odds.",
+                "impact": "high",
+                "sentiment_score": 0.35,
+            }
+        ]
+    )
+
+    assert widget._visible_news_events
+    event = widget._visible_news_events[0]
+    hovered = widget._nearest_news_event(event["x"], event["y"])
+
+    assert hovered is not None
+    assert hovered["headline"] == "CPI surprise cools risk sentiment"
+    assert "Macro Wire" in widget._news_hover_html(hovered)
+    assert widget._nearest_news_event(event["x"] + 10_000_000.0, event["y"]) is None

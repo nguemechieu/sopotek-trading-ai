@@ -67,7 +67,7 @@ class RiskConfig(BaseModel):
 class SystemConfig(BaseModel):
 
     limit: int = Field(
-        default=1000,
+        default=50000,
         description="Max candles stored in memory"
     )
 
@@ -116,7 +116,7 @@ config = AppConfig(
     ),
 
     system=SystemConfig(
-        limit=1000,
+        limit=50000,
         rate_limit=30
     ),
 

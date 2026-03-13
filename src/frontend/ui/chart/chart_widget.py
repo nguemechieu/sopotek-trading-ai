@@ -1,3 +1,4 @@
+import html
 from datetime import datetime, timezone
 
 import numpy as np
@@ -93,6 +94,7 @@ class ChartWidget(QWidget):
         self._last_price_change = None
         self._news_events = []
         self._news_items = []
+        self._visible_news_events = []
         self._trade_overlay_updating = False
         self._trade_overlay_state = {"side": "buy", "entry": None, "stop_loss": None, "take_profit": None}
         self._last_orderbook_bids = []
@@ -353,6 +355,16 @@ class ChartWidget(QWidget):
             fill=pg.mkBrush(8, 17, 34, 225),
         )
         self.price_plot.addItem(self.text_item)
+
+        self.news_hover_item = TextItem(
+            html="",
+            anchor=(0.0, 1.0),
+            border=mkPen((244, 162, 97, 180), width=1),
+            fill=pg.mkBrush(11, 18, 32, 240),
+        )
+        self.news_hover_item.setZValue(20)
+        self.news_hover_item.setVisible(False)
+        self.price_plot.addItem(self.news_hover_item)
 
         self.watermark_item = TextItem(
             html="",
@@ -653,6 +665,7 @@ class ChartWidget(QWidget):
     def _mouse_moved(self, evt):
         pos = evt[0]
         if not self.price_plot.sceneBoundingRect().contains(pos):
+            self.news_hover_item.setVisible(False)
             return
 
         mouse_point = self.price_plot.getPlotItem().vb.mapSceneToView(pos)
@@ -664,6 +677,68 @@ class ChartWidget(QWidget):
         self.text_item.setHtml(f"<span style='color:#e3f2fd'>Price: {y:.6f}</span>")
         self.text_item.setPos(x, y)
         self._update_ohlcv_for_x(x)
+        self._update_news_hover(x, y)
+
+    def _update_news_hover(self, x_value, y_value):
+        event = self._nearest_news_event(x_value, y_value)
+        if event is None:
+            self.news_hover_item.setVisible(False)
+            return
+
+        self.news_hover_item.setHtml(self._news_hover_html(event))
+        self.news_hover_item.setPos(float(event["x"]), float(event["y"]))
+        self.news_hover_item.setVisible(True)
+
+    def _nearest_news_event(self, x_value, y_value):
+        events = list(self._visible_news_events or [])
+        if not events:
+            return None
+
+        try:
+            x_range, y_range = self.price_plot.viewRange()
+        except Exception:
+            return None
+
+        x_span = abs(float(x_range[1]) - float(x_range[0])) if len(x_range) >= 2 else 0.0
+        y_span = abs(float(y_range[1]) - float(y_range[0])) if len(y_range) >= 2 else 0.0
+        x_threshold = max(x_span * 0.02, 60.0)
+        y_threshold = max(y_span * 0.06, 1e-6)
+
+        closest = None
+        closest_score = None
+        for event in events:
+            dx = abs(float(event.get("x", 0.0)) - float(x_value))
+            dy = abs(float(event.get("y", 0.0)) - float(y_value))
+            if dx > x_threshold or dy > y_threshold:
+                continue
+            score = dx + (dy * 0.5)
+            if closest is None or score < closest_score:
+                closest = event
+                closest_score = score
+        return closest
+
+    def _news_hover_html(self, event):
+        headline = str(event.get("headline") or "News event")
+        source = str(event.get("source") or "News Feed")
+        summary = str(event.get("summary") or "").strip()
+        impact = str(event.get("impact") or "-")
+        sentiment = str(event.get("sentiment") or "-")
+        time_text = str(event.get("time") or "")
+        summary_html = ""
+        if summary:
+            trimmed = summary[:180] + ("..." if len(summary) > 180 else "")
+            summary_html = (
+                f"<div style='color: #d7e8ff; font-size: 10px; margin-top: 3px;'>"
+                f"{html.escape(trimmed)}</div>"
+            )
+        return (
+            "<div style='padding: 6px 8px;'>"
+            f"<div style='color: #ffd166; font-size: 10px; font-weight: 700;'>{html.escape(source)} | {html.escape(time_text)}</div>"
+            f"<div style='color: #f8fbff; font-size: 11px; font-weight: 700; margin-top: 2px;'>{html.escape(headline)}</div>"
+            f"{summary_html}"
+            f"<div style='color: #9ec1ff; font-size: 10px; margin-top: 3px;'>Impact {html.escape(impact)} | Sentiment {html.escape(sentiment)}</div>"
+            "</div>"
+        )
 
     def _mouse_clicked(self, event):
         if event.button() == QtCore.Qt.MouseButton.RightButton:
@@ -1080,6 +1155,33 @@ class ChartWidget(QWidget):
         step = float(np.median(np.abs(diffs)))
         return max(min(step * 0.64, step * 0.8), 1e-6)
 
+    def _resolve_signal_x(self, index):
+        try:
+            numeric = float(index)
+        except Exception:
+            numeric = None
+
+        if numeric is not None and np.isfinite(numeric):
+            if self._last_x is not None and len(self._last_x) > 0:
+                rounded = int(round(numeric))
+                if abs(numeric - rounded) <= 1e-6 and 0 <= rounded < len(self._last_x):
+                    return float(self._last_x[rounded])
+            return numeric
+
+        timestamp_text = str(index or "").strip()
+        if not timestamp_text:
+            return None
+
+        try:
+            import pandas as pd
+
+            parsed = pd.to_datetime(timestamp_text, errors="coerce", utc=True)
+            if pd.isna(parsed):
+                return None
+            return float(parsed.timestamp())
+        except Exception:
+            return None
+
     def update_orderbook_heatmap(self, bids, asks):
         self._last_orderbook_bids = list(bids or [])
         self._last_orderbook_asks = list(asks or [])
@@ -1189,14 +1291,26 @@ class ChartWidget(QWidget):
         self.heatmap_plot.setYRange(grid_min, grid_max, padding=0.02)
 
     def add_strategy_signal(self, index, price, signal):
-        if signal == "BUY":
-            self.signal_markers.addPoints(x=[index], y=[price], symbol="t1", brush="#26a69a", size=12)
-        elif signal == "SELL":
-            self.signal_markers.addPoints(x=[index], y=[price], symbol="t", brush="#ef5350", size=12)
+        x_value = self._resolve_signal_x(index)
+        try:
+            y_value = float(price)
+        except Exception:
+            return
+
+        if x_value is None or not np.isfinite(y_value):
+            return
+
+        normalized_signal = str(signal or "").strip().upper()
+        if normalized_signal == "BUY":
+            self.signal_markers.addPoints(x=[x_value], y=[y_value], symbol="t1", brush="#26a69a", size=12)
+        elif normalized_signal == "SELL":
+            self.signal_markers.addPoints(x=[x_value], y=[y_value], symbol="t", brush="#ef5350", size=12)
 
     def clear_news_events(self):
         self._news_events = []
+        self._visible_news_events = []
         self.news_markers.setData([], [])
+        self.news_hover_item.setVisible(False)
         for item in list(self._news_items):
             try:
                 self.price_plot.removeItem(item)
@@ -1210,6 +1324,8 @@ class ChartWidget(QWidget):
 
     def _render_news_events(self):
         self.news_markers.setData([], [])
+        self.news_hover_item.setVisible(False)
+        self._visible_news_events = []
         for item in list(self._news_items):
             try:
                 self.price_plot.removeItem(item)
@@ -1265,9 +1381,11 @@ class ChartWidget(QWidget):
             visible_events.append(
                 {
                     "x": x_value,
+                    "y": marker_y,
                     "headline": headline,
                     "source": source,
                     "time": timestamp_label,
+                    "summary": summary,
                     "impact": impact,
                     "sentiment": sentiment,
                 }
@@ -1285,6 +1403,7 @@ class ChartWidget(QWidget):
             pen=mkPen("#f4a261", width=1.1),
             data=tooltips,
         )
+        self._visible_news_events = visible_events
 
         for event in visible_events[:5]:
             x_value = float(event["x"])

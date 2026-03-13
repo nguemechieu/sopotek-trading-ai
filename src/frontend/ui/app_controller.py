@@ -62,6 +62,8 @@ except Exception:  # pragma: no cover - non-Windows fallback
 
 
 class AppController(QMainWindow):
+    MAX_HISTORY_LIMIT = 50000
+    FOREX_STANDARD_LOT_UNITS = 100000.0
     OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
     OPENAI_TTS_VOICES = [
         "alloy",
@@ -105,6 +107,11 @@ class AppController(QMainWindow):
         "DOT", "LINK", "LTC", "ATOM", "AAVE", "NEAR", "UNI", "MKR",
     ]
     QUOTE_PRIORITY = {"USDT": 0, "USD": 1, "USDC": 2, "BUSD": 3, "BTC": 4, "ETH": 5}
+    FOREX_SYMBOL_QUOTES = {
+        "AED", "AUD", "CAD", "CHF", "CNH", "CZK", "DKK", "EUR", "GBP", "HKD",
+        "HUF", "JPY", "MXN", "NOK", "NZD", "PLN", "SEK", "SGD", "THB", "TRY",
+        "USD", "ZAR",
+    }
 
     def __init__(self):
         super().__init__()
@@ -153,6 +160,13 @@ class AppController(QMainWindow):
         self.max_risk_per_trade = float(self.settings.value("risk/max_risk_per_trade", 0.02) or 0.02)
         self.max_position_size_pct = float(self.settings.value("risk/max_position_size_pct", 0.10) or 0.10)
         self.max_gross_exposure_pct = float(self.settings.value("risk/max_gross_exposure_pct", 2.0) or 2.0)
+        self.margin_closeout_guard_enabled = str(
+            self.settings.value("risk/margin_closeout_guard_enabled", "true")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self.max_margin_closeout_pct = max(
+            0.01,
+            min(1.0, float(self.settings.value("risk/max_margin_closeout_pct", 0.50) or 0.50)),
+        )
         self.confidence = 0
         self.volatility = 0
         self.order_type = "limit"
@@ -238,7 +252,7 @@ class AppController(QMainWindow):
         self._news_cache = {}
         self._news_inflight = {}
 
-        self.limit = 50000
+        self.limit = self.MAX_HISTORY_LIMIT
         self.initial_capital = 10000
 
         self.candle_buffer = CandleBuffer(max_length=self.limit)
@@ -1103,11 +1117,68 @@ class AppController(QMainWindow):
         )
         return bool(await service.send_message(message))
 
+    def trade_quantity_context(self, symbol):
+        normalized_symbol = str(symbol or "").strip().upper()
+        broker = getattr(self, "broker", None)
+        exchange_name = str(getattr(broker, "exchange_name", "") or "").strip().lower()
+        compact = normalized_symbol.replace("_", "/").replace("-", "/")
+        parts = compact.split("/", 1) if "/" in compact else []
+        supports_lots = False
+        if exchange_name == "oanda" and len(parts) == 2:
+            base, quote = parts
+            supports_lots = (
+                len(base) == 3
+                and len(quote) == 3
+                and base.isalpha()
+                and quote.isalpha()
+                and base in self.FOREX_SYMBOL_QUOTES
+                and quote in self.FOREX_SYMBOL_QUOTES
+            )
+        return {
+            "symbol": normalized_symbol,
+            "supports_lots": supports_lots,
+            "default_mode": "lots" if supports_lots else "units",
+            "lot_units": self.FOREX_STANDARD_LOT_UNITS,
+        }
+
+    def normalize_trade_quantity(self, symbol, amount, quantity_mode=None):
+        try:
+            numeric_amount = abs(float(amount))
+        except Exception as exc:
+            raise ValueError("Trade amount must be numeric.") from exc
+        if numeric_amount <= 0:
+            raise ValueError("Trade amount must be positive.")
+
+        context = self.trade_quantity_context(symbol)
+        requested_mode = str(quantity_mode or context.get("default_mode") or "units").strip().lower()
+        if requested_mode.endswith("s"):
+            requested_mode = requested_mode[:-1]
+        if requested_mode not in {"unit", "lot"}:
+            raise ValueError("Trade quantity mode must be 'units' or 'lots'.")
+        if requested_mode == "lot" and not context.get("supports_lots"):
+            raise ValueError(f"Lot sizing is only available for supported forex symbols. Use units for {symbol}.")
+
+        normalized_units = (
+            numeric_amount * float(context.get("lot_units", self.FOREX_STANDARD_LOT_UNITS))
+            if requested_mode == "lot"
+            else numeric_amount
+        )
+        result = dict(context)
+        result.update(
+            {
+                "requested_amount": numeric_amount,
+                "requested_mode": "lots" if requested_mode == "lot" else "units",
+                "amount_units": float(normalized_units),
+            }
+        )
+        return result
+
     async def submit_market_chat_trade(
         self,
         symbol,
         side,
         amount,
+        quantity_mode=None,
         order_type="market",
         price=None,
         stop_loss=None,
@@ -1117,13 +1188,16 @@ class AppController(QMainWindow):
         if broker is None:
             raise RuntimeError("Connect a broker before placing a trade from Sopotek Pilot.")
 
+        quantity = self.normalize_trade_quantity(symbol, amount, quantity_mode=quantity_mode)
+        amount_units = float(quantity["amount_units"])
+
         trading_system = getattr(self, "trading_system", None)
         execution_manager = getattr(trading_system, "execution_manager", None)
         if execution_manager is not None:
             order = await execution_manager.execute(
                 symbol=symbol,
                 side=side,
-                amount=amount,
+                amount=amount_units,
                 type=order_type,
                 price=price,
                 stop_loss=stop_loss,
@@ -1137,7 +1211,7 @@ class AppController(QMainWindow):
             order = await broker.create_order(
                 symbol=symbol,
                 side=side,
-                amount=amount,
+                amount=amount_units,
                 type=order_type,
                 price=price,
                 stop_loss=stop_loss,
@@ -1147,6 +1221,10 @@ class AppController(QMainWindow):
                 order.setdefault("source", "chatgpt")
                 order.setdefault("strategy_name", "Sopotek Pilot")
                 order.setdefault("reason", "Sopotek Pilot trade command")
+        if isinstance(order, dict):
+            order.setdefault("requested_amount", float(quantity["requested_amount"]))
+            order.setdefault("requested_quantity_mode", quantity["requested_mode"])
+            order.setdefault("amount_units", amount_units)
 
         if not order:
             raise RuntimeError("The order was skipped by broker or safety checks.")
@@ -1193,6 +1271,7 @@ class AppController(QMainWindow):
         long_count = sum(1 for item in positions if str(item.get("side", "")).lower() == "long")
         short_count = sum(1 for item in positions if str(item.get("side", "")).lower() == "short")
         closeout = payload.get("margin_closeout_percent")
+        closeout_guard = self.margin_closeout_snapshot(payload.get("balances"))
 
         lines = [
             "Position Analysis window opened.",
@@ -1218,6 +1297,11 @@ class AppController(QMainWindow):
         ]
         if closeout is not None:
             lines.append(f"Margin closeout percent: {closeout}")
+        if closeout_guard.get("enabled"):
+            lines.append(
+                f"Margin closeout guard: {'BLOCKING' if closeout_guard.get('blocked') else 'monitoring'} "
+                f"at {float(closeout_guard.get('threshold', 0.0) or 0.0):.2%}."
+            )
         lines.append("Use Tools -> Position Analysis for the detailed table.")
         return "\n".join(lines)
 
@@ -1389,20 +1473,244 @@ class AppController(QMainWindow):
             "- send telegram test message\n"
             "\n"
             "Trading Commands\n"
-            "- trade buy EUR/USD amount 1000 confirm\n"
+            "- trade buy EUR/USD amount 0.01 lots confirm\n"
             "- trade sell GBP/USD amount 2000 type limit price 1.2710 sl 1.2750 tp 1.2620 confirm\n"
             "- cancel order id 123456 confirm\n"
             "- cancel orders for EUR/USD confirm\n"
             "- close position EUR/USD confirm\n"
-            "- close position EUR/USD amount 1000 confirm\n"
+            "- close position EUR/USD amount 0.01 lots confirm\n"
             "\n"
             "Analysis\n"
+            "- show bug summary\n"
+            "- show error log\n"
             "- show quant pm summary\n"
             "- show my broker position analysis with equity, NAV, and P/L\n"
             "- show trade history analysis\n"
             "- summarize current recommendations and why\n"
             "- summarize the latest news affecting my active symbols"
         )
+
+    def _market_chat_log_file_paths(self):
+        root_dir = Path(__file__).resolve().parents[2]
+        candidates = []
+        seen = set()
+
+        for directory in (
+            Path("logs"),
+            Path("src") / "logs",
+            root_dir / "logs",
+        ):
+            try:
+                resolved = directory.resolve()
+            except Exception:
+                resolved = directory
+            if not resolved.exists() or not resolved.is_dir():
+                continue
+            for name in ("native_crash.log", "errors.log", "system.log", "app.log"):
+                path = resolved / name
+                if not path.exists():
+                    continue
+                key = str(path).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(path)
+
+        return candidates
+
+    def _tail_log_lines(self, path, max_lines=240):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return []
+        lines = [line.rstrip() for line in text.splitlines()]
+        lines = [line for line in lines if line.strip()]
+        if max_lines <= 0:
+            return lines
+        return lines[-max_lines:]
+
+    def _format_log_timestamp(self, path):
+        try:
+            return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return "unknown time"
+
+    def _market_chat_native_crash_summary(self, path):
+        lines = self._tail_log_lines(path, max_lines=320)
+        if not lines:
+            return None
+
+        frame_pattern = re.compile(r'File "([^"]+)", line (\d+) in ([^\s]+)')
+        frames = []
+        capture = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("Current thread "):
+                capture = True
+                continue
+            if not capture:
+                continue
+            if stripped.startswith("Current thread's C stack"):
+                break
+            match = frame_pattern.search(stripped)
+            if match:
+                filename = Path(match.group(1)).name
+                frames.append(f"{filename}:{match.group(2)} in {match.group(3)}")
+
+        if frames:
+            summary = (
+                f"{path.name} updated {self._format_log_timestamp(path)}: native crash trace captured. "
+                f"Top frame {frames[0]}."
+            )
+            if len(frames) > 1:
+                summary += f" Next frame {frames[1]}."
+            return summary
+
+        last_line = self._plain_text(lines[-1])
+        if not last_line:
+            return None
+        return f"{path.name} updated {self._format_log_timestamp(path)}: {last_line}"
+
+    def _market_chat_regular_log_summary(self, path, max_entries=2):
+        lines = self._tail_log_lines(path, max_lines=320)
+        if not lines:
+            return None
+
+        include_tokens = (
+            "uncaught exception",
+            "traceback",
+            "error calling python override",
+            "exception",
+            "critical",
+            "fatal",
+            "cleanup error",
+            "task ",
+            "native crash",
+        )
+        ignore_tokens = (
+            "trade rejected by portfolio allocator",
+            "trade rejected by institutional risk engine",
+            "trade rejected by risk engine",
+            "skipping ",
+            "using polling market data",
+            "broker ready",
+            "initializing broker",
+        )
+
+        matches = []
+        seen = set()
+        for line in reversed(lines):
+            lowered = line.lower()
+            if not any(token in lowered for token in include_tokens):
+                continue
+            if any(token in lowered for token in ignore_tokens):
+                continue
+            cleaned = self._plain_text(line)
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append(cleaned)
+            if len(matches) >= max_entries:
+                break
+
+        if not matches:
+            return None
+
+        matches.reverse()
+        return (
+            f"{path.name} updated {self._format_log_timestamp(path)}: "
+            + " | ".join(matches)
+        )
+
+    def market_chat_error_log_summary(self, open_window=True, max_entries=4):
+        if open_window:
+            try:
+                self.market_chat_open_window("logs")
+            except Exception:
+                pass
+
+        paths = self._market_chat_log_file_paths()
+        if not paths:
+            return "I could not find any local log files yet."
+
+        findings = []
+        quiet_files = []
+        for path in paths:
+            if path.name == "native_crash.log":
+                summary = self._market_chat_native_crash_summary(path)
+            else:
+                summary = self._market_chat_regular_log_summary(path)
+            if summary:
+                findings.append(summary)
+            else:
+                quiet_files.append(path.name)
+
+        if not findings:
+            quiet_text = ", ".join(quiet_files) if quiet_files else "available logs"
+            return (
+                "I checked the local logs and did not find recent crash or exception signatures. "
+                f"Quiet logs: {quiet_text}."
+            )
+
+        lines = ["Bug summary from local logs:"]
+        for item in findings[: max(1, int(max_entries or 4))]:
+            lines.append(f"- {item}")
+        if quiet_files:
+            lines.append(f"No recent bug signatures in: {', '.join(quiet_files[:4])}.")
+        lines.append("Use Tools -> Logs for the full log view.")
+        return "\n".join(lines)
+
+    def market_chat_set_ai_trading(self, enabled):
+        terminal = getattr(self, "terminal", None)
+        if terminal is None:
+            return False, "Open the trading terminal first."
+
+        setter = getattr(terminal, "_set_autotrading_enabled", None)
+        if not callable(setter):
+            return False, "AI trading controls are not available in this terminal session."
+
+        target = bool(enabled)
+        is_active = bool(getattr(terminal, "autotrading_enabled", False))
+        scope_label = getattr(terminal, "_autotrade_scope_label", lambda: "All Symbols")()
+        scope_value = str(getattr(terminal, "autotrade_scope_value", "all") or "all").lower()
+
+        if target and is_active:
+            return True, f"AI trading is already ON. Scope: {scope_label}."
+        if (not target) and (not is_active):
+            return True, "AI trading is already OFF."
+
+        if target and bool(getattr(self, "is_emergency_stop_active", lambda: False)()):
+            return False, "Emergency lock is active. Clear the kill switch before enabling AI trading."
+
+        if target and not getattr(self, "trading_system", None):
+            return False, "AI trading cannot start because the trading system is not initialized yet."
+
+        if target:
+            active_symbols = []
+            resolver = getattr(self, "get_active_autotrade_symbols", None)
+            if callable(resolver):
+                try:
+                    active_symbols = list(resolver() or [])
+                except Exception:
+                    active_symbols = []
+            if not active_symbols:
+                if scope_value == "watchlist":
+                    return False, "AI trading cannot start because the watchlist scope has no checked symbols."
+                if scope_value == "selected":
+                    return False, "AI trading cannot start because there is no active selected symbol yet."
+                return False, "AI trading cannot start because no symbols are available for the chosen AI scope."
+
+        setter(target)
+        is_active = bool(getattr(terminal, "autotrading_enabled", False))
+        if target and is_active:
+            return True, f"AI trading is ON. Scope: {scope_label}."
+        if (not target) and (not is_active):
+            return True, "AI trading is OFF."
+
+        return False, "AI trading state did not change. Check the terminal for more details."
 
     async def market_chat_app_status_summary(self, show_panel=True):
         terminal = getattr(self, "terminal", None)
@@ -1530,7 +1838,7 @@ class AppController(QMainWindow):
             terminal._schedule_open_orders_refresh()
         return results
 
-    async def close_market_chat_position(self, symbol, amount=None):
+    async def close_market_chat_position(self, symbol, amount=None, quantity_mode=None):
         broker = getattr(self, "broker", None)
         if broker is None:
             raise RuntimeError("Connect a broker before closing positions from Sopotek Pilot.")
@@ -1550,9 +1858,11 @@ class AppController(QMainWindow):
 
         resolved_amount = None
         if amount is not None:
-            resolved_amount = abs(float(amount))
-            if resolved_amount <= 0:
-                raise RuntimeError("Close amount must be positive.")
+            try:
+                quantity = self.normalize_trade_quantity(normalized_symbol, amount, quantity_mode=quantity_mode)
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            resolved_amount = float(quantity["amount_units"])
 
         result = None
         if hasattr(broker, "close_position"):
@@ -1900,6 +2210,24 @@ class AppController(QMainWindow):
         ):
             return await self.market_chat_app_status_summary(show_panel=True)
 
+        if any(
+            token in lowered
+            for token in (
+                "show bug summary",
+                "bug summary",
+                "show bugs",
+                "recent bugs",
+                "any bugs",
+                "what bugs",
+                "show error log",
+                "error log",
+                "show crash log",
+                "crash log",
+                "recent errors",
+            )
+        ):
+            return self.market_chat_error_log_summary(open_window=True)
+
         window_targets = [
             ("open settings", "settings"),
             ("open preferences", "settings"),
@@ -1957,15 +2285,35 @@ class AppController(QMainWindow):
                     terminal._apply_autotrade_scope(scope)
                     return f"AI scope set to {getattr(terminal, '_autotrade_scope_label', lambda: scope.title())()}."
 
-            if any(token in lowered for token in ("start ai trading", "enable ai trading", "turn on ai trading", "start auto trading", "enable auto trading")):
-                if hasattr(terminal, "_set_autotrading_enabled"):
-                    terminal._set_autotrading_enabled(True)
-                    return f"AI trading requested ON. Scope: {getattr(terminal, '_autotrade_scope_label', lambda: 'All Symbols')()}."
+            if any(
+                token in lowered
+                for token in (
+                    "start ai trading",
+                    "enable ai trading",
+                    "turn on ai trading",
+                    "start auto trading",
+                    "enable auto trading",
+                    "turn on auto trading",
+                    "start the ai trading",
+                )
+            ):
+                _ok, message = self.market_chat_set_ai_trading(True)
+                return message
 
-            if any(token in lowered for token in ("stop ai trading", "disable ai trading", "turn off ai trading", "stop auto trading", "disable auto trading")):
-                if hasattr(terminal, "_set_autotrading_enabled"):
-                    terminal._set_autotrading_enabled(False)
-                    return "AI trading turned OFF."
+            if any(
+                token in lowered
+                for token in (
+                    "stop ai trading",
+                    "disable ai trading",
+                    "turn off ai trading",
+                    "stop auto trading",
+                    "disable auto trading",
+                    "turn off auto trading",
+                    "pause ai trading",
+                )
+            ):
+                _ok, message = self.market_chat_set_ai_trading(False)
+                return message
 
             if any(token in lowered for token in ("activate kill switch", "engage kill switch", "emergency stop", "trigger kill switch")):
                 if hasattr(terminal, "_activate_emergency_stop_async"):
@@ -2038,28 +2386,30 @@ class AppController(QMainWindow):
             return f"Canceled order {order_id}." if count else f"No cancellation was performed for order {order_id}."
 
         close_match = re.search(
-            r"(?:close)\s+position\s+([A-Za-z0-9_:/.-]+)(?:\s+(?:amount|size|units)\s+([-+]?\d*\.?\d+))?",
+            r"(?:close)\s+position\s+([A-Za-z0-9_:/.-]+)(?:\s+(?:amount|size|units)\s+([-+]?\d*\.?\d+)(?:\s+(lots?|units?))?)?",
             lowered,
         )
         if close_match:
-            symbol, amount_text = close_match.groups()
+            symbol, amount_text, quantity_mode = close_match.groups()
             if "confirm" not in lowered:
+                mode_text = f" {quantity_mode}" if quantity_mode else ""
                 return (
                     "Close-position command detected but not executed.\n"
                     "Add the word CONFIRM to execute it.\n"
-                    f"Parsed target: symbol={symbol.upper()} amount={amount_text or 'full position'}"
+                    f"Parsed target: symbol={symbol.upper()} amount={amount_text or 'full position'}{mode_text}"
                 )
             amount = float(amount_text) if amount_text else None
             try:
-                result = await self.close_market_chat_position(symbol.upper(), amount=amount)
+                result = await self.close_market_chat_position(symbol.upper(), amount=amount, quantity_mode=quantity_mode)
             except Exception as exc:
                 return f"Close-position command failed: {exc}"
             status = str(result.get("status") or "submitted").replace("_", " ").upper() if isinstance(result, dict) else "SUBMITTED"
             order_id = str(result.get("order_id") or result.get("id") or "-") if isinstance(result, dict) else "-"
+            amount_label = f"{amount} {quantity_mode}" if amount is not None and quantity_mode else amount if amount is not None else "FULL POSITION"
             return (
                 f"Close-position command executed.\n"
                 f"Symbol: {symbol.upper()}\n"
-                f"Amount: {amount if amount is not None else 'FULL POSITION'}\n"
+                f"Amount: {amount_label}\n"
                 f"Status: {status}\n"
                 f"Order ID: {order_id}"
             )
@@ -2109,21 +2459,22 @@ class AppController(QMainWindow):
             return "Unable to capture a screenshot right now."
 
         trade_match = re.search(
-            r"(?:^|\b)trade\s+(buy|sell)\s+([A-Za-z0-9_:/.-]+)(?:\s+(?:amount|size|units)\s+([-+]?\d*\.?\d+))?(?:\s+(?:type)\s+(market|limit))?(?:\s+(?:price|at)\s+([-+]?\d*\.?\d+))?(?:\s+(?:sl|stop|stop_loss)\s+([-+]?\d*\.?\d+))?(?:\s+(?:tp|take_profit|takeprofit)\s+([-+]?\d*\.?\d+))?",
+            r"(?:^|\b)trade\s+(buy|sell)\s+([A-Za-z0-9_:/.-]+)(?:\s+(?:amount|size|units)\s+([-+]?\d*\.?\d+)(?:\s+(lots?|units?))?)?(?:\s+(?:type)\s+(market|limit))?(?:\s+(?:price|at)\s+([-+]?\d*\.?\d+))?(?:\s+(?:sl|stop|stop_loss)\s+([-+]?\d*\.?\d+))?(?:\s+(?:tp|take_profit|takeprofit)\s+([-+]?\d*\.?\d+))?",
             lowered,
         )
         if trade_match:
-            side, symbol, amount_text, order_type, price_text, sl_text, tp_text = trade_match.groups()
+            side, symbol, amount_text, quantity_mode, order_type, price_text, sl_text, tp_text = trade_match.groups()
             if "confirm" not in lowered:
+                mode_text = f" {quantity_mode}" if quantity_mode else ""
                 return (
                     "Trade command detected but not executed.\n"
                     "Add the word CONFIRM to place it.\n"
-                    f"Parsed command: side={side.upper()} symbol={symbol.upper()} amount={amount_text or '?'} "
+                    f"Parsed command: side={side.upper()} symbol={symbol.upper()} amount={amount_text or '?'}{mode_text} "
                     f"type={(order_type or 'market').upper()} price={price_text or '-'} sl={sl_text or '-'} tp={tp_text or '-'}"
                 )
 
             if not amount_text:
-                return "Trade command needs an amount. Example: trade buy EUR/USD amount 1000 confirm"
+                return "Trade command needs an amount. Example: trade buy EUR/USD amount 0.01 lots confirm"
 
             amount = float(amount_text)
             if amount <= 0:
@@ -2141,6 +2492,7 @@ class AppController(QMainWindow):
                     symbol=symbol.upper(),
                     side=side,
                     amount=amount,
+                    quantity_mode=quantity_mode,
                     order_type=resolved_type,
                     price=price,
                     stop_loss=stop_loss,
@@ -2156,7 +2508,7 @@ class AppController(QMainWindow):
                 f"Status: {status}\n"
                 f"Symbol: {symbol.upper()}\n"
                 f"Side: {side.upper()}\n"
-                f"Amount: {amount}\n"
+                f"Amount: {amount} {quantity_mode or 'units'}\n"
                 f"Type: {resolved_type.upper()}\n"
                 f"Order ID: {order_id}"
             )
@@ -2639,16 +2991,13 @@ class AppController(QMainWindow):
         return normalized
 
     def _resolve_history_limit(self, limit=None):
-        value = limit if limit is not None else getattr(self, "limit", 1000)
+        value = limit if limit is not None else getattr(self, "limit", self.MAX_HISTORY_LIMIT)
         try:
             resolved = max(100, int(value))
         except Exception:
-            resolved = 1000
+            resolved = self.MAX_HISTORY_LIMIT
 
-        exchange = self._active_exchange_code()
-        if exchange == "oanda":
-            return min(resolved, 5000)
-        return min(resolved, 10000)
+        return min(resolved, self.MAX_HISTORY_LIMIT)
 
     def handle_trade_execution(self, trade):
         if not isinstance(trade, dict):
@@ -2704,6 +3053,120 @@ class AppController(QMainWindow):
                 except Exception:
                     return None
         return None
+
+    def _safe_balance_metric(self, value):
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            for currency in ("USDT", "USD", "USDC", "BUSD"):
+                if currency in value:
+                    numeric = self._safe_balance_metric(value.get(currency))
+                    if numeric is not None:
+                        return numeric
+            for nested in value.values():
+                numeric = self._safe_balance_metric(nested)
+                if numeric is not None:
+                    return numeric
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _balance_metric_value(self, balances, *keys):
+        if not isinstance(balances, dict):
+            return None
+        account = dict(balances.get("raw") or {})
+        candidates = []
+        for key in keys:
+            if key is None:
+                continue
+            key_text = str(key).strip()
+            if not key_text:
+                continue
+            variants = {
+                key_text,
+                key_text.lower(),
+                key_text.upper(),
+                key_text.replace("_", ""),
+                key_text.replace("_", "").lower(),
+                key_text.replace("_", "").upper(),
+                key_text.replace("_", "-"),
+                key_text.replace("_", " "),
+                "".join(part.capitalize() for part in key_text.split("_")),
+            }
+            for variant in variants:
+                if variant not in candidates:
+                    candidates.append(variant)
+
+        for source in (account, balances):
+            if not isinstance(source, dict):
+                continue
+            for candidate in candidates:
+                if candidate in source:
+                    numeric = self._safe_balance_metric(source.get(candidate))
+                    if numeric is not None:
+                        return numeric
+        return None
+
+    def margin_closeout_snapshot(self, balances=None):
+        balances = balances if isinstance(balances, dict) else getattr(self, "balances", {}) or {}
+        threshold = max(0.01, min(1.0, float(getattr(self, "max_margin_closeout_pct", 0.50) or 0.50)))
+        enabled = bool(getattr(self, "margin_closeout_guard_enabled", True))
+        ratio = self._balance_metric_value(
+            balances,
+            "margin_closeout_percent",
+            "margin_closeout_pct",
+            "margin_closeout",
+            "margin_ratio",
+        )
+        source = "reported"
+        if ratio is not None and ratio > 1.0 and ratio <= 100.0:
+            ratio = ratio / 100.0
+        if ratio is None:
+            margin_used = self._balance_metric_value(balances, "margin_used", "used_margin", "used")
+            equity = self._balance_metric_value(
+                balances,
+                "nav",
+                "equity",
+                "net_liquidation",
+                "account_value",
+                "total_account_value",
+                "balance",
+            )
+            if margin_used is not None and equity is not None and equity > 0:
+                ratio = max(0.0, float(margin_used) / float(equity))
+                source = "derived"
+
+        warning_threshold = max(0.0, min(threshold, threshold * 0.8))
+        blocked = bool(enabled and ratio is not None and ratio >= threshold)
+        warning = bool(enabled and ratio is not None and ratio >= warning_threshold)
+        if ratio is None:
+            reason = "Margin closeout risk metric is not available from the current broker balance payload."
+        elif blocked:
+            reason = (
+                f"Margin closeout risk is {ratio:.2%}, above the configured limit of {threshold:.2%}. "
+                "New trades are blocked."
+            )
+        elif warning:
+            reason = (
+                f"Margin closeout risk is {ratio:.2%}. Guard threshold is {threshold:.2%}."
+            )
+        else:
+            reason = (
+                f"Margin closeout risk is {ratio:.2%}. Guard threshold is {threshold:.2%}."
+            )
+        return {
+            "enabled": enabled,
+            "available": ratio is not None,
+            "ratio": ratio,
+            "threshold": threshold,
+            "warning_threshold": warning_threshold,
+            "warning": warning,
+            "blocked": blocked,
+            "source": source,
+            "reason": reason,
+        }
 
     def _update_behavior_guard_equity(self, balances=None):
         guard = getattr(self, "behavior_guard", None)
@@ -3748,6 +4211,9 @@ class AppController(QMainWindow):
             f"Default Timeframe: {getattr(self, 'time_frame', '1h')}",
             f"Health Check: {self.get_health_check_summary()}",
         ]
+        bug_summary = self.market_chat_error_log_summary(open_window=False, max_entries=2)
+        if bug_summary:
+            context_parts.append("Bug Log Summary: " + self._plain_text(bug_summary))
 
         if terminal is not None:
             active_chart = None

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -87,3 +88,238 @@ def test_handle_market_chat_action_supports_single_ticker_symbols():
 
     assert "AAPL snapshot (1h)" in reply
     assert controller._last_requested_symbol == "AAPL"
+
+
+def test_handle_market_chat_action_can_start_ai_trading_from_pilot():
+    controller = _make_controller()
+    terminal = SimpleNamespace(
+        autotrading_enabled=False,
+        autotrade_scope_value="selected",
+    )
+
+    def set_autotrading_enabled(enabled):
+        terminal.autotrading_enabled = bool(enabled)
+
+    terminal._set_autotrading_enabled = set_autotrading_enabled
+    terminal._autotrade_scope_label = lambda: "Selected Symbol"
+
+    controller.terminal = terminal
+    controller.trading_system = object()
+    controller.get_active_autotrade_symbols = lambda: ["BTC/USDT"]
+    controller.is_emergency_stop_active = lambda: False
+
+    reply = asyncio.run(controller.handle_market_chat_action("start ai trading"))
+
+    assert reply == "AI trading is ON. Scope: Selected Symbol."
+    assert terminal.autotrading_enabled is True
+
+
+def test_handle_market_chat_action_can_stop_ai_trading_from_pilot():
+    controller = _make_controller()
+    terminal = SimpleNamespace(
+        autotrading_enabled=True,
+        autotrade_scope_value="all",
+    )
+
+    def set_autotrading_enabled(enabled):
+        terminal.autotrading_enabled = bool(enabled)
+
+    terminal._set_autotrading_enabled = set_autotrading_enabled
+    terminal._autotrade_scope_label = lambda: "All Symbols"
+
+    controller.terminal = terminal
+
+    reply = asyncio.run(controller.handle_market_chat_action("stop ai trading"))
+
+    assert reply == "AI trading is OFF."
+    assert terminal.autotrading_enabled is False
+
+
+def test_handle_market_chat_action_reports_why_ai_trading_cannot_start():
+    controller = _make_controller()
+    terminal = SimpleNamespace(
+        autotrading_enabled=False,
+        autotrade_scope_value="watchlist",
+    )
+
+    def set_autotrading_enabled(enabled):
+        terminal.autotrading_enabled = bool(enabled)
+
+    terminal._set_autotrading_enabled = set_autotrading_enabled
+    terminal._autotrade_scope_label = lambda: "Watchlist"
+
+    controller.terminal = terminal
+    controller.trading_system = object()
+    controller.get_active_autotrade_symbols = lambda: []
+    controller.is_emergency_stop_active = lambda: False
+
+    reply = asyncio.run(controller.handle_market_chat_action("start ai trading"))
+
+    assert reply == "AI trading cannot start because the watchlist scope has no checked symbols."
+    assert terminal.autotrading_enabled is False
+
+
+def test_handle_market_chat_action_can_open_trade_from_pilot():
+    controller = _make_controller()
+    submitted = {}
+
+    async def fake_submit_market_chat_trade(**kwargs):
+        submitted.update(kwargs)
+        return {"status": "filled", "order_id": "pilot-001"}
+
+    controller.submit_market_chat_trade = fake_submit_market_chat_trade
+
+    reply = asyncio.run(
+        controller.handle_market_chat_action(
+            "trade buy eur/usd amount 1000 type limit price 1.25 sl 1.2 tp 1.3 confirm"
+        )
+    )
+
+    assert submitted == {
+        "symbol": "EUR/USD",
+        "side": "buy",
+        "amount": 1000.0,
+        "order_type": "limit",
+        "price": 1.25,
+        "stop_loss": 1.2,
+        "take_profit": 1.3,
+    }
+    assert "Trade command executed." in reply
+    assert "Status: FILLED" in reply
+    assert "Order ID: pilot-001" in reply
+
+
+def test_submit_market_chat_trade_converts_oanda_micro_lots_to_units():
+    controller = _make_controller()
+    submitted = {}
+
+    async def fake_create_order(**kwargs):
+        submitted.update(kwargs)
+        return {"status": "submitted", "id": "oanda-001"}
+
+    controller.broker = SimpleNamespace(exchange_name="oanda", create_order=fake_create_order)
+
+    order = asyncio.run(
+        controller.submit_market_chat_trade(
+            symbol="EUR/USD",
+            side="buy",
+            amount=0.01,
+            quantity_mode="lots",
+        )
+    )
+
+    assert submitted["amount"] == 1000.0
+    assert order["requested_amount"] == 0.01
+    assert order["requested_quantity_mode"] == "lots"
+    assert order["amount_units"] == 1000.0
+
+
+def test_handle_market_chat_action_can_open_trade_from_pilot_in_lots():
+    controller = _make_controller()
+    controller.broker = SimpleNamespace(exchange_name="oanda")
+    submitted = {}
+
+    async def fake_submit_market_chat_trade(**kwargs):
+        submitted.update(kwargs)
+        return {"status": "filled", "order_id": "pilot-lot-001"}
+
+    controller.submit_market_chat_trade = fake_submit_market_chat_trade
+
+    reply = asyncio.run(
+        controller.handle_market_chat_action(
+            "trade buy eur/usd amount 0.01 lots confirm"
+        )
+    )
+
+    assert submitted == {
+        "symbol": "EUR/USD",
+        "side": "buy",
+        "amount": 0.01,
+        "quantity_mode": "lots",
+        "order_type": "market",
+        "price": None,
+        "stop_loss": None,
+        "take_profit": None,
+    }
+    assert "Amount: 0.01 lots" in reply
+    assert "Order ID: pilot-lot-001" in reply
+
+
+def test_handle_market_chat_action_can_close_position_from_pilot():
+    controller = _make_controller()
+    closed = {}
+
+    async def fake_close_market_chat_position(symbol, amount=None, quantity_mode=None):
+        closed["symbol"] = symbol
+        closed["amount"] = amount
+        closed["quantity_mode"] = quantity_mode
+        return {"status": "submitted", "order_id": "close-123"}
+
+    controller.close_market_chat_position = fake_close_market_chat_position
+
+    reply = asyncio.run(
+        controller.handle_market_chat_action(
+            "close position btc/usdt amount 0.5 confirm"
+        )
+    )
+
+    assert closed == {"symbol": "BTC/USDT", "amount": 0.5, "quantity_mode": None}
+    assert "Close-position command executed." in reply
+    assert "Symbol: BTC/USDT" in reply
+    assert "Amount: 0.5" in reply
+    assert "Order ID: close-123" in reply
+
+
+def test_handle_market_chat_action_can_summarize_recent_bug_logs():
+    controller = _make_controller()
+    opened = []
+    controller.terminal = SimpleNamespace(_open_logs=lambda: opened.append(True))
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        crash_path = Path(tmpdir) / "native_crash.log"
+        crash_path.write_text(
+            "\n".join(
+                [
+                    "Current thread 0x00002f8c (most recent call first):",
+                    '  File "C:\\\\repo\\\\src\\\\frontend\\\\ui\\\\terminal.py", line 9199 in _update_ai_signal',
+                    '  File "C:\\\\repo\\\\src\\\\frontend\\\\ui\\\\app_controller.py", line 4491 in publish_ai_signal',
+                    "",
+                    "=== Native crash trace session pid=27368 ===",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        app_log_path = Path(tmpdir) / "app.log"
+        app_log_path.write_text(
+            "INFO broker ready\n"
+            "Error calling Python override of QObject::timerEvent()\n",
+            encoding="utf-8",
+        )
+
+        controller._market_chat_log_file_paths = lambda: [crash_path, app_log_path]
+
+        reply = asyncio.run(controller.handle_market_chat_action("show bug summary"))
+
+    assert opened == [True]
+    assert "Bug summary from local logs:" in reply
+    assert "native_crash.log" in reply
+    assert "terminal.py:9199 in _update_ai_signal" in reply
+    assert "app.log" in reply
+
+
+def test_margin_closeout_snapshot_uses_reported_or_derived_balance_metrics():
+    controller = _make_controller()
+    controller.margin_closeout_guard_enabled = True
+    controller.max_margin_closeout_pct = 0.50
+    controller.balances = {
+        "equity": 1000.0,
+        "used": {"USD": 400.0},
+        "raw": {"marginCloseoutPercent": "0.62", "NAV": "1000", "marginUsed": "620"},
+    }
+
+    snapshot = controller.margin_closeout_snapshot()
+
+    assert snapshot["available"] is True
+    assert abs(float(snapshot["ratio"]) - 0.62) < 1e-9
+    assert snapshot["blocked"] is True
+    assert "blocked" in snapshot["reason"].lower()

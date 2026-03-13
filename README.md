@@ -22,7 +22,7 @@ Sopotek Trading AI is a desktop trading workstation built by Sopotek Corporation
 - AI trading controls, AI signal monitor, recommendations, Sopotek Pilot, news overlays, and Telegram command handling
 - Open orders, positions, trade log, closed journal, trade review, position analysis, performance analytics, system health tools, and Coinbase-style recent market trades in the Order Book dock
 - Risk and behavior protection including risk profiles, behavior guard, kill switch, drawdown-aware restrictions, and session health status
-- Backtesting, strategy optimization, journaling, trade checklist workflow, and local persistence through SQLite and QSettings
+- Backtesting, strategy optimization, journaling, trade checklist workflow, and local persistence through SQLite and QSettings, including date-range selection, animated in-progress equity graphing, and user-selected report export folders
 
 ## Key Workflows
 
@@ -48,6 +48,13 @@ Sopotek Trading AI is a desktop trading workstation built by Sopotek Corporation
 4. Confirm `Trade Log`, `Open Orders`, `Positions`, and `Closed Journal` update in a consistent way.
 5. Test `Sopotek Pilot`, Telegram, and screenshots only after the broker session is healthy.
 6. Enable AI trading only after manual execution and review workflows are behaving as expected.
+
+### Backtesting Workflow
+1. Open `Strategy Tester` from the terminal workspace.
+2. Pick the symbol, strategy, timeframe, and the exact `Start Date` / `End Date` you want to test.
+3. Start the run and watch the graph tab for the animated live-progress curve while the backtest is executing.
+4. Review `Results`, `Graph`, `Report`, and `Journal` after completion.
+5. Use `Generate Report` to choose the destination folder for the exported PDF and spreadsheet files.
 
 ## Architecture At A Glance
 
