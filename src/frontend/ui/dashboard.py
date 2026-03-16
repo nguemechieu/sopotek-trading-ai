@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, Signal
@@ -463,6 +464,61 @@ class Dashboard(QWidget):
             "password": password_value or None,
             "account_id": account_value or None,
         }
+
+    @staticmethod
+    def _strip_wrapped_quotes(value):
+        text = str(value or "").strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+            return text[1:-1].strip()
+        return text
+
+    @classmethod
+    def _coinbase_validation_error(cls, api_key, secret, password=None):
+        normalized_api = cls._strip_wrapped_quotes(api_key)
+        normalized_secret = cls._strip_wrapped_quotes(secret)
+        normalized_password = cls._strip_wrapped_quotes(password)
+
+        if normalized_password:
+            return (
+                "Coinbase Advanced Trade in Sopotek does not use the passphrase field. "
+                "Use the API key name in the first field and the privateKey PEM in the second field."
+            )
+
+        if not normalized_api.startswith("organizations/"):
+            return (
+                "Coinbase API Key Name must start with organizations/.../apiKeys/.... "
+                "This app expects a Coinbase Advanced Trade API key name, not a wallet address or another broker key."
+            )
+
+        if "\\n" in normalized_secret:
+            normalized_secret = normalized_secret.replace("\\r\\n", "\n").replace("\\n", "\n")
+
+        if "-----BEGIN" not in normalized_secret or "-----END" not in normalized_secret:
+            return (
+                "Coinbase Private Key is malformed. Paste the full privateKey value including the "
+                "BEGIN/END lines."
+            )
+
+        header_match = re.search(r"-----BEGIN [A-Z ]+-----", normalized_secret)
+        footer_match = re.search(r"-----END [A-Z ]+-----", normalized_secret)
+        if header_match is None or footer_match is None or header_match.start() >= footer_match.start():
+            return (
+                "Coinbase Private Key is malformed. Paste the full privateKey PEM exactly as Coinbase issued it."
+            )
+
+        body = normalized_secret[header_match.end():footer_match.start()]
+        body_lines = [line.strip() for line in body.splitlines() if line.strip()]
+        if not body_lines:
+            return (
+                "Coinbase Private Key is missing its encoded body. Paste the full privateKey PEM from Coinbase Advanced Trade."
+            )
+
+        if len("".join(body_lines)) < 32:
+            return (
+                "Coinbase Private Key looks truncated. Paste the complete privateKey PEM, not a shortened snippet."
+            )
+
+        return None
 
     def _build_ui(self):
         root_layout = QVBoxLayout(self)
@@ -1457,6 +1513,15 @@ class Dashboard(QWidget):
                 "The Binance secret contains spaces or line breaks. Paste the secret exactly as issued by the exchange.",
             )
             return
+        if exchange == "coinbase":
+            coinbase_error = self._coinbase_validation_error(api_key, secret, password=password)
+            if coinbase_error:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Coinbase Credentials",
+                    coinbase_error,
+                )
+                return
         if broker_type == "crypto" and exchange == "binance" and customer_region == "us":
             QMessageBox.warning(
                 self,

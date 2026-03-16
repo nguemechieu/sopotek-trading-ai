@@ -176,6 +176,38 @@ def test_chart_widget_exposes_depth_and_market_info_tabs():
     assert ask_y is not None and len(ask_y) == 3
 
 
+def test_chart_widget_populates_advanced_header_metrics():
+    _app()
+    widget = ChartWidget("EUR/USD", "4h", DummyController())
+
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-03-12T10:00:00+00:00",
+                    "2026-03-12T14:00:00+00:00",
+                    "2026-03-12T18:00:00+00:00",
+                ],
+                utc=True,
+            ),
+            "open": [1.1000, 1.1020, 1.1030],
+            "high": [1.1030, 1.1045, 1.1060],
+            "low": [1.0990, 1.1010, 1.1020],
+            "close": [1.1015, 1.1035, 1.1050],
+            "volume": [1000, 1200, 900],
+        }
+    )
+
+    widget.update_candles(df)
+    widget.update_price_lines(1.1048, 1.1052, last=1.1050)
+
+    assert widget.instrument_label.text() == "EUR/USD  4H"
+    assert "Bid 1.1048" in widget.market_micro_label.text()
+    assert "Ask 1.1052" in widget.market_micro_label.text()
+    assert "Spread 0.00040000" in widget.market_micro_label.text()
+    assert "T 2026-03-12 18:00 UTC" in widget.ohlcv_label.text()
+
+
 def test_orderbook_panel_shows_recent_market_trades():
     _app()
     panel = OrderBookPanel()

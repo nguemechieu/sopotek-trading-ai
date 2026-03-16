@@ -141,31 +141,34 @@ def _install_asyncio_exception_filter(loop, logger=None):
     loop.set_exception_handler(handler)
 
 
-app = QApplication(sys.argv)
+def main(argv=None):
+    app = QApplication(sys.argv if argv is None else list(argv))
 
-loop = QEventLoop(app)
-asyncio.set_event_loop(loop)
+    loop = QEventLoop(app)
+    asyncio.set_event_loop(loop)
+
+    def _stop_loop():
+        if loop.is_running():
+            loop.stop()
+
+    window = AppController()
+    _install_asyncio_exception_filter(loop, logger=getattr(window, "logger", None))
+    window.setIconSize(QSize(48, 48))
+    app.aboutToQuit.connect(_stop_loop)
+    window.setWindowIcon(QIcon("./assets/logo.ico"))
+    window.setWindowIconText("Sopotek Trading AI Platform")
+    window.setWindowTitle("Sopotek Trading AI")
+    window.show()
+
+    try:
+        with loop:
+            loop.run_forever()
+    except KeyboardInterrupt:
+        pass
+
+    return 0
 
 
-def _stop_loop():
-    if loop.is_running():
-        loop.stop()
-
-
-window = AppController()
-_install_asyncio_exception_filter(loop, logger=getattr(window, "logger", None))
-window.setIconSize(QSize(48, 48))
-app.aboutToQuit.connect(_stop_loop)
 if __name__ == "__main__":
- window.setWindowIcon(QIcon("./assets/logo.ico"))
- window.setWindowIconText("Sopotek Trading AI Platform")
- window.setWindowTitle("Sopotek Trading AI")
-
- window.show()
-
-try:
-    with loop:
-        loop.run_forever()
-except KeyboardInterrupt:
-    pass
+    raise SystemExit(main())
 

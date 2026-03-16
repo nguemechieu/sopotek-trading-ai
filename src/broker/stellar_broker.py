@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,9 +17,11 @@ from broker.base_broker import BaseBroker
 
 try:  # pragma: no cover - optional dependency at runtime
     from stellar_sdk import AiohttpClient, Asset, Keypair, Network, ServerAsync, TransactionBuilder
+    from stellar_sdk.exceptions import BadRequestError
 except Exception:  # pragma: no cover - optional dependency at runtime
     AiohttpClient = None
     Asset = None
+    BadRequestError = None
     Keypair = None
     Network = None
     ServerAsync = None
@@ -80,6 +83,7 @@ class StellarBroker(BaseBroker):
     DEFAULT_TRADES_CACHE_TTL = 20.0
     DEFAULT_TRADES_COOLDOWN_SECONDS = 30.0
     DEFAULT_OHLCV_COOLDOWN_SECONDS = 45.0
+    HORIZON_MAX_TRADE_AGGREGATION_LIMIT = 200
     VALID_ASSET_CODE_RE = re.compile(r"^[A-Z]{2,12}$")
     VALID_PUBLIC_KEY_RE = re.compile(r"^G[A-Z2-7]{55}$")
     VALID_SECRET_KEY_RE = re.compile(r"^S[A-Z2-7]{55}$")
@@ -431,6 +435,11 @@ class StellarBroker(BaseBroker):
     def _symbol_from_assets(self, base: StellarAssetDescriptor, quote: StellarAssetDescriptor) -> str:
         return f"{base.code}/{quote.code}"
 
+    def _asset_identifier(self, descriptor: StellarAssetDescriptor) -> str:
+        if descriptor.is_native:
+            return descriptor.code
+        return f"{descriptor.code}:{descriptor.issuer}"
+
     def _market_payload(self, base: StellarAssetDescriptor, quote: StellarAssetDescriptor) -> dict:
         symbol = self._symbol_from_assets(base, quote)
         return {
@@ -676,6 +685,55 @@ class StellarBroker(BaseBroker):
             params["endTime"] = end_time
         return params
 
+    async def _fetch_trade_aggregation_records(
+        self,
+        base_asset: StellarAssetDescriptor,
+        quote_asset: StellarAssetDescriptor,
+        resolution: int,
+        start_time: int,
+        end_time: int,
+        requested_limit: int,
+    ) -> Tuple[List[dict], Optional[aiohttp.ClientResponseError]]:
+        max_limit = self.HORIZON_MAX_TRADE_AGGREGATION_LIMIT
+        chunk_span = max_limit * resolution
+        chunk_start = start_time
+        records: List[dict] = []
+        last_rate_limit_error = None
+
+        while chunk_start < end_time:
+            chunk_end = min(end_time, chunk_start + chunk_span)
+            chunk_limit = max(1, min((chunk_end - chunk_start) // resolution, max_limit))
+            if chunk_limit <= 0:
+                break
+
+            for use_snake_case in (False, True):
+                params = self._trade_aggregations_params(
+                    base_asset=base_asset,
+                    quote_asset=quote_asset,
+                    resolution=resolution,
+                    start_time=chunk_start,
+                    end_time=chunk_end,
+                    limit=chunk_limit,
+                    use_snake_case=use_snake_case,
+                )
+                try:
+                    payload = await self._request("GET", "/trade_aggregations", params=params)
+                except aiohttp.ClientResponseError as exc:
+                    if exc.status == 429:
+                        last_rate_limit_error = exc
+                        return records, last_rate_limit_error
+                    if use_snake_case:
+                        raise
+                    continue
+
+                current_records = ((payload.get("_embedded") or {}).get("records")) or payload.get("records") or []
+                records.extend(current_records)
+                break
+
+            chunk_start = chunk_end
+
+        return records, last_rate_limit_error
+
     def _parse_timestamp_ms(self, value) -> int:
         if value in (None, ""):
             return 0
@@ -754,22 +812,20 @@ class StellarBroker(BaseBroker):
         return [buckets[key] for key in sorted(buckets.keys())][-limit:]
 
     def _records_to_candles(self, records: List[dict], limit: int) -> List[List[float]]:
-        candles = []
+        candles_by_timestamp: Dict[int, List[float]] = {}
         for record in records:
             timestamp = self._parse_timestamp_ms(record.get("timestamp"))
             if timestamp <= 0:
                 continue
-            candles.append(
-                [
-                    timestamp,
-                    self._float(record.get("open"), 0.0),
-                    self._float(record.get("high"), 0.0),
-                    self._float(record.get("low"), 0.0),
-                    self._float(record.get("close"), 0.0),
-                    self._float(record.get("base_volume"), 0.0),
-                ]
-            )
-        return candles[-limit:]
+            candles_by_timestamp[timestamp] = [
+                timestamp,
+                self._float(record.get("open"), 0.0),
+                self._float(record.get("high"), 0.0),
+                self._float(record.get("low"), 0.0),
+                self._float(record.get("close"), 0.0),
+                self._float(record.get("base_volume"), 0.0),
+            ]
+        return [candles_by_timestamp[key] for key in sorted(candles_by_timestamp.keys())][-limit:]
 
     def _horizon_price(self, payload: dict) -> float:
         price = payload.get("price")
@@ -867,11 +923,23 @@ class StellarBroker(BaseBroker):
         if self._connected:
             return True
 
-        self.session = aiohttp.ClientSession()
-        await self._load_account(suppress_rate_limit=True)
-        self._connected = True
-        self.logger.info("Connected to Stellar Horizon (%s)", self.horizon_url)
-        return True
+        resolver = aiohttp.ThreadedResolver()
+        connector = aiohttp.TCPConnector(
+            resolver=resolver,
+            family=socket.AF_INET,
+            ttl_dns_cache=300,
+        )
+        timeout = aiohttp.ClientTimeout(total=45)
+        self.session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+
+        try:
+            await self._load_account(suppress_rate_limit=True)
+            self._connected = True
+            self.logger.info("Connected to Stellar Horizon (%s)", self.horizon_url)
+            return True
+        except Exception:
+            await self.close()
+            raise
 
     async def close(self):
         if self.session is not None:
@@ -1024,31 +1092,14 @@ class StellarBroker(BaseBroker):
         end_time = max((now_ms // resolution) * resolution, resolution)
         start_time = end_time - (resolution * max(requested_limit + 2, 4))
 
-        records = []
-        last_rate_limit_error = None
-        for use_snake_case in (False, True):
-            params = self._trade_aggregations_params(
-                base_asset=base_asset,
-                quote_asset=quote_asset,
-                resolution=resolution,
-                start_time=start_time,
-                end_time=end_time,
-                limit=requested_limit,
-                use_snake_case=use_snake_case,
-            )
-            try:
-                payload = await self._request("GET", "/trade_aggregations", params=params)
-            except aiohttp.ClientResponseError as exc:
-                if exc.status == 429:
-                    last_rate_limit_error = exc
-                    break
-                if use_snake_case:
-                    raise
-                continue
-            current_records = ((payload.get("_embedded") or {}).get("records")) or payload.get("records") or []
-            if current_records:
-                records = current_records
-                break
+        records, last_rate_limit_error = await self._fetch_trade_aggregation_records(
+            base_asset=base_asset,
+            quote_asset=quote_asset,
+            resolution=resolution,
+            start_time=start_time,
+            end_time=end_time,
+            requested_limit=requested_limit,
+        )
 
         candles = self._records_to_candles(records, requested_limit)
         if not candles:
@@ -1145,8 +1196,173 @@ class StellarBroker(BaseBroker):
             "raw": account,
         }
 
+    def _format_balance_amount(self, value: float) -> str:
+        return f"{float(value):.7f}"
+
+    async def _validate_order_funding(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        price: float,
+        base_asset: StellarAssetDescriptor,
+        quote_asset: StellarAssetDescriptor,
+    ) -> Dict[str, float]:
+        balance_snapshot = await self.fetch_balance()
+        free_balances = dict(balance_snapshot.get("free") or {})
+        normalized_side = str(side or "").strip().lower()
+
+        if normalized_side == "buy":
+            required_amount = max(float(amount), 0.0) * max(float(price), 0.0)
+            available_amount = self._float(free_balances.get(quote_asset.code), -1.0)
+            if available_amount >= 0 and required_amount > (available_amount + 1e-7):
+                reserve_note = ""
+                if quote_asset.is_native:
+                    reserve_note = " XLM must also remain available for Stellar account reserves and fees."
+                raise ValueError(
+                    f"Insufficient {quote_asset.code} balance to buy {self._format_balance_amount(amount)} "
+                    f"{base_asset.code} on {symbol}. Need about {self._format_balance_amount(required_amount)} "
+                    f"{quote_asset.code}, available {self._format_balance_amount(available_amount)}.{reserve_note}"
+                )
+            return {quote_asset.code: max(available_amount, 0.0)}
+
+        required_amount = max(float(amount), 0.0)
+        available_amount = self._float(free_balances.get(base_asset.code), -1.0)
+        if available_amount >= 0 and required_amount > (available_amount + 1e-7):
+            reserve_note = ""
+            if base_asset.is_native:
+                reserve_note = " XLM must also remain available for Stellar account reserves and fees."
+            raise ValueError(
+                f"Insufficient {base_asset.code} balance to sell {self._format_balance_amount(amount)} "
+                f"on {symbol}. Available {self._format_balance_amount(available_amount)}.{reserve_note}"
+            )
+        return {base_asset.code: max(available_amount, 0.0)}
+
+    def _translate_order_submission_error(
+        self,
+        exc: Exception,
+        symbol: str,
+        side: str,
+        amount: float,
+        price: float,
+        base_asset: StellarAssetDescriptor,
+        quote_asset: StellarAssetDescriptor,
+        available_balances: Optional[Dict[str, float]] = None,
+    ) -> Exception:
+        if BadRequestError is None or not isinstance(exc, BadRequestError):
+            return exc
+
+        extras = getattr(exc, "extras", None) or {}
+        result_codes = extras.get("result_codes") or {}
+        transaction_code = str(result_codes.get("transaction") or "").strip()
+        operation_codes = result_codes.get("operations") or []
+        detail = str(getattr(exc, "detail", None) or "The order was rejected by the Stellar network.")
+        normalized_side = str(side or "").strip().lower()
+        available_balances = dict(available_balances or {})
+
+        if transaction_code == "tx_insufficient_balance":
+            if normalized_side == "buy":
+                required_amount = max(float(amount), 0.0) * max(float(price), 0.0)
+                asset_code = quote_asset.code
+                available_amount = self._float(available_balances.get(asset_code), 0.0)
+                reserve_note = " XLM must also remain available for Stellar account reserves and fees." if quote_asset.is_native else ""
+                return ValueError(
+                    f"Stellar rejected the buy order for {symbol}: insufficient spendable {asset_code}. "
+                    f"Need about {self._format_balance_amount(required_amount)} {asset_code}, "
+                    f"available {self._format_balance_amount(available_amount)}.{reserve_note}"
+                )
+
+            asset_code = base_asset.code
+            available_amount = self._float(available_balances.get(asset_code), 0.0)
+            reserve_note = " XLM must also remain available for Stellar account reserves and fees." if base_asset.is_native else ""
+            return ValueError(
+                f"Stellar rejected the sell order for {symbol}: insufficient spendable {asset_code}. "
+                f"Requested {self._format_balance_amount(amount)} {asset_code}, "
+                f"available {self._format_balance_amount(available_amount)}.{reserve_note}"
+            )
+
+        code_suffix = transaction_code or ", ".join(str(code) for code in operation_codes if code)
+        if code_suffix:
+            return ValueError(f"Stellar rejected the order for {symbol} ({code_suffix}): {detail}")
+        return ValueError(f"Stellar rejected the order for {symbol}: {detail}")
+
     async def fetch_positions(self, symbols=None):
         return []
+
+    def _has_trustline(self, descriptor: StellarAssetDescriptor) -> bool:
+        if descriptor.is_native:
+            return True
+        if descriptor.code not in self._account_asset_codes:
+            return False
+        known_descriptor = self.asset_registry.get(descriptor.code)
+        if known_descriptor is not None and known_descriptor.issuer and descriptor.issuer:
+            return str(known_descriptor.issuer).strip() == str(descriptor.issuer).strip()
+        return True
+
+    async def create_trustline(self, asset, limit=None):
+        descriptor = asset if isinstance(asset, StellarAssetDescriptor) else self._parse_asset_text(str(asset or "").strip())
+        if descriptor.is_native:
+            return {
+                "asset": self._asset_identifier(descriptor),
+                "code": descriptor.code,
+                "issuer": descriptor.issuer,
+                "status": "native",
+                "message": "XLM is the native Stellar asset and does not require a trustline.",
+            }
+        if self._has_trustline(descriptor):
+            return {
+                "asset": self._asset_identifier(descriptor),
+                "code": descriptor.code,
+                "issuer": descriptor.issuer,
+                "status": "exists",
+                "message": f"Trustline already exists for {descriptor.code}.",
+            }
+
+        limit_value = None if limit in (None, "") else f"{float(limit):.7f}"
+
+        def _build(builder):
+            builder.append_change_trust_op(
+                asset=descriptor.to_sdk(),
+                limit=limit_value,
+            )
+
+        try:
+            response = await self._submit_transaction(_build)
+        except Exception as exc:
+            if BadRequestError is not None and isinstance(exc, BadRequestError):
+                extras = getattr(exc, "extras", None) or {}
+                result_codes = extras.get("result_codes") or {}
+                transaction_code = str(result_codes.get("transaction") or "").strip()
+                detail = str(getattr(exc, "detail", None) or "The trustline request was rejected by the Stellar network.")
+                if transaction_code == "tx_insufficient_balance":
+                    raise ValueError(
+                        f"Stellar rejected the trustline for {descriptor.code}: insufficient spendable XLM for account reserves or fees."
+                    ) from exc
+                if transaction_code:
+                    raise ValueError(
+                        f"Stellar rejected the trustline for {descriptor.code} ({transaction_code}): {detail}"
+                    ) from exc
+                raise ValueError(f"Stellar rejected the trustline for {descriptor.code}: {detail}") from exc
+            raise
+
+        self._register_asset_descriptor(descriptor)
+        if descriptor.code not in self._account_asset_codes:
+            self._account_asset_codes.append(descriptor.code)
+        self._save_asset_cache()
+        try:
+            await self._load_account(force=True, allow_stale=False, suppress_rate_limit=True)
+        except Exception:
+            pass
+
+        return {
+            "id": response.get("hash"),
+            "asset": self._asset_identifier(descriptor),
+            "code": descriptor.code,
+            "issuer": descriptor.issuer,
+            "status": "submitted",
+            "message": f"Trustline submitted for {descriptor.code}.",
+            "raw": response,
+        }
 
     async def fetch_orders(self, symbol=None, limit=None):
         payload = await self._request(
@@ -1202,17 +1418,37 @@ class StellarBroker(BaseBroker):
             if reference_price <= 0:
                 raise ValueError(f"Unable to determine Stellar buy price for {symbol}")
             effective_price = reference_price * (1 + slippage_pct) if order_type == "market" else reference_price
+            available_balances = await self._validate_order_funding(
+                symbol=symbol,
+                side=order_side,
+                amount=float(amount),
+                price=effective_price,
+                base_asset=base_asset,
+                quote_asset=quote_asset,
+            )
 
             def _build(builder):
                 builder.append_manage_buy_offer_op(
                     selling=quote_asset.to_sdk(),
                     buying=base_asset.to_sdk(),
-                    buy_amount=f"{float(amount):.7f}",
+                    amount=f"{float(amount):.7f}",
                     price=f"{effective_price:.7f}",
                     offer_id=int(params.pop("offer_id", 0)),
                 )
 
-            response = await self._submit_transaction(_build)
+            try:
+                response = await self._submit_transaction(_build)
+            except Exception as exc:
+                raise self._translate_order_submission_error(
+                    exc,
+                    symbol=symbol,
+                    side=order_side,
+                    amount=float(amount),
+                    price=effective_price,
+                    base_asset=base_asset,
+                    quote_asset=quote_asset,
+                    available_balances=available_balances,
+                ) from exc
             return {
                 "id": response.get("hash"),
                 "symbol": self._symbol_from_assets(base_asset, quote_asset),
@@ -1231,6 +1467,14 @@ class StellarBroker(BaseBroker):
             raise ValueError(f"Unable to determine Stellar sell price for {symbol}")
         effective_price = reference_price * max(1 - slippage_pct, 0.0001) if order_type == "market" else reference_price
         stellar_price = 1.0 / effective_price if effective_price else 0.0
+        available_balances = await self._validate_order_funding(
+            symbol=symbol,
+            side=order_side,
+            amount=float(amount),
+            price=effective_price,
+            base_asset=base_asset,
+            quote_asset=quote_asset,
+        )
 
         def _build(builder):
             builder.append_manage_sell_offer_op(
@@ -1241,7 +1485,19 @@ class StellarBroker(BaseBroker):
                 offer_id=int(params.pop("offer_id", 0)),
             )
 
-        response = await self._submit_transaction(_build)
+        try:
+            response = await self._submit_transaction(_build)
+        except Exception as exc:
+            raise self._translate_order_submission_error(
+                exc,
+                symbol=symbol,
+                side=order_side,
+                amount=float(amount),
+                price=effective_price,
+                base_asset=base_asset,
+                quote_asset=quote_asset,
+                available_balances=available_balances,
+            ) from exc
         return {
             "id": response.get("hash"),
             "symbol": self._symbol_from_assets(base_asset, quote_asset),

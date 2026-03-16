@@ -1,4 +1,5 @@
 import logging
+import re
 import socket
 import time
 
@@ -111,10 +112,41 @@ class CCXTBroker(BaseBroker):
         self.account_id = self._normalized_credential(self.account_id)
         self.wallet = self._normalized_credential(self.wallet)
         if self._exchange_code() == "coinbase" and self.secret:
-            secret = str(self.secret).strip()
-            if "\\n" in secret:
-                secret = secret.replace("\\r\\n", "\n").replace("\\n", "\n")
-            self.secret = secret
+            self.api_key = self._normalize_coinbase_api_key(self.api_key)
+            self.secret = self._normalize_coinbase_secret(self.secret)
+
+    @staticmethod
+    def _strip_wrapped_quotes(value):
+        text = str(value or "").strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+            return text[1:-1].strip()
+        return text
+
+    @classmethod
+    def _normalize_coinbase_api_key(cls, value):
+        normalized = cls._strip_wrapped_quotes(value)
+        return normalized or None
+
+    @classmethod
+    def _normalize_coinbase_secret(cls, value):
+        secret = cls._strip_wrapped_quotes(value)
+        if not secret:
+            return None
+        if "\\n" in secret:
+            secret = secret.replace("\\r\\n", "\n").replace("\\n", "\n")
+
+        if "-----BEGIN" in secret and "-----END" in secret:
+            header_match = re.search(r"-----BEGIN [A-Z ]+-----", secret)
+            footer_match = re.search(r"-----END [A-Z ]+-----", secret)
+            if header_match and footer_match and header_match.start() < footer_match.start():
+                header = header_match.group(0)
+                footer = footer_match.group(0)
+                middle = secret[header_match.end():footer_match.start()]
+                if "\n" not in secret and "\r" not in secret:
+                    middle = re.sub(r"\s+", "", middle)
+                    secret = f"{header}\n{middle}\n{footer}\n" if middle else f"{header}\n{footer}\n"
+
+        return secret
 
     def _validate_credentials(self):
         exchange_code = self._exchange_code()

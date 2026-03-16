@@ -253,6 +253,48 @@ def test_coinbase_ccxt_broker_normalizes_private_key_newlines(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_coinbase_ccxt_broker_normalizes_single_line_pem_from_ui(monkeypatch):
+    import broker.ccxt_broker as broker_mod
+
+    monkeypatch.setattr(
+        broker_mod.aiohttp,
+        "TCPConnector",
+        lambda family=None, resolver=None, ttl_dns_cache=None: {
+            "family": family,
+            "resolver": resolver,
+            "ttl_dns_cache": ttl_dns_cache,
+        },
+    )
+    monkeypatch.setattr(broker_mod.aiohttp, "ThreadedResolver", lambda: "threaded-resolver")
+    monkeypatch.setattr(broker_mod.aiohttp, "ClientSession", lambda connector=None, **kwargs: FakeSession(connector=connector, **kwargs))
+    monkeypatch.setattr(broker_mod.ccxt, "coinbase", FakeCoinbaseExchange, raising=False)
+
+    async def scenario():
+        config = SimpleNamespace(
+            exchange="coinbase",
+            api_key='"organizations/test/apiKeys/key-1"',
+            secret='"-----BEGIN EC PRIVATE KEY----- line-1 line-2 -----END EC PRIVATE KEY-----"',
+            password=None,
+            uid=None,
+            mode="live",
+            sandbox=False,
+            timeout=15000,
+            options={},
+            params={},
+        )
+        broker = CCXTBroker(config)
+
+        await broker.connect()
+
+        assert broker.api_key == "organizations/test/apiKeys/key-1"
+        assert broker.secret == "-----BEGIN EC PRIVATE KEY-----\nline-1line-2\n-----END EC PRIVATE KEY-----\n"
+        assert broker.exchange.cfg["secret"] == broker.secret
+
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
 def test_coinbase_websocket_normalizes_product_ids_to_app_symbols(monkeypatch):
     import market_data.websocket.coinbase_web_socket as ws_mod
 

@@ -302,6 +302,69 @@ def test_sopotek_trading_scales_basic_risk_rejections_into_smaller_orders():
     assert trading.pipeline_status_snapshot()["BTC/USDT"]["status"] == "approved"
 
 
+def test_sopotek_trading_deduplicates_repeated_allocator_rejection_logs():
+    controller = SimpleNamespace(
+        broker=DummyBroker(),
+        symbols=["BTC/USDT"],
+        time_frame="1h",
+        limit=200,
+        strategy_name="Trend Following",
+        strategy_params={},
+        max_portfolio_risk=0.10,
+        max_risk_per_trade=0.02,
+        max_position_size_pct=0.10,
+        max_gross_exposure_pct=2.0,
+        balances={"total": {"USDT": 10000}},
+        initial_capital=10000,
+        market_data_repository=None,
+        trade_repository=None,
+        handle_trade_execution=lambda trade: None,
+        rejection_log_cooldown_seconds=60.0,
+    )
+
+    trading = SopotekTrading(controller=controller)
+    trading.risk_engine = RiskEngine(account_equity=10000, max_position_size_pct=0.10)
+    trading.portfolio = SimpleNamespace(equity=lambda: 10000.0, portfolio=None, market_prices={})
+    trading.portfolio_risk_engine = None
+    warnings = []
+    trading.logger = SimpleNamespace(
+        warning=lambda template, reason: warnings.append(template % reason),
+        info=lambda *_args, **_kwargs: None,
+    )
+
+    async def allocate_trade(**_kwargs):
+        return SimpleNamespace(
+            approved=False,
+            reason="Allocator reduced the ticket below the minimum useful allocation (0.75 < 500.00).",
+            metrics={},
+            adjusted_amount=0.0,
+        )
+
+    trading.portfolio_allocator = SimpleNamespace(
+        sync_equity=lambda _equity: None,
+        allocate_trade=allocate_trade,
+    )
+
+    signal = {
+        "symbol": "BTC/USDT",
+        "side": "buy",
+        "amount": 1.0,
+        "price": 100.0,
+        "confidence": 0.80,
+        "reason": "undersized ticket",
+        "strategy_name": "Trend Following",
+    }
+
+    first = asyncio.run(trading.process_signal("BTC/USDT", dict(signal), dataset=FakeDataset(_sample_frame())))
+    second = asyncio.run(trading.process_signal("BTC/USDT", dict(signal), dataset=FakeDataset(_sample_frame())))
+
+    assert first is None
+    assert second is None
+    assert warnings == ["Trade rejected by portfolio allocator: Allocator reduced the ticket below the minimum useful allocation (0.75 < 500.00)."]
+    assert trading.pipeline_status_snapshot()["BTC/USDT"]["stage"] == "portfolio_allocator"
+    assert trading.pipeline_status_snapshot()["BTC/USDT"]["status"] == "rejected"
+
+
 def test_sopotek_trading_cancels_stale_orders_before_exit_like_signal():
     controller = SimpleNamespace(
         broker=CleanupBroker(

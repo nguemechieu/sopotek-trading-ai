@@ -44,6 +44,7 @@ SQLAlchemy>=2.0
 
 python-dotenv>=1.0
 keyring>=24.0
+cryptography>=42.0
 
 # ==========================================
 # ASYNC / EVENT SYSTEM
@@ -67,3 +68,4 @@ sounddevice>=0.4
 # ==========================================
 
 reportlab>=4.0
+coinbase

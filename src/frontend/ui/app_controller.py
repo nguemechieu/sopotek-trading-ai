@@ -35,6 +35,7 @@ from event_bus.event_bus import EventBus
 from event_bus.event_types import EventType
 from frontend.ui.dashboard import Dashboard
 from frontend.ui.i18n import DEFAULT_LANGUAGE, normalize_language_code, translate
+from frontend.ui.services.screenshot_service import capture_widget_to_output, sanitize_screenshot_fragment
 from frontend.ui.terminal import Terminal
 from integrations.news_service import NewsService
 from integrations.telegram_service import TelegramService
@@ -213,6 +214,7 @@ class AppController(QMainWindow):
         self.autotrade_scope = str(self.settings.value("autotrade/scope", "all") or "all").strip().lower()
         if self.autotrade_scope not in {"all", "selected", "watchlist"}:
             self.autotrade_scope = "all"
+        self._market_data_shortfall_notices = {}
         raw_watchlist = self.settings.value("autotrade/watchlist", "[]")
         try:
             parsed_watchlist = json.loads(raw_watchlist or "[]")
@@ -429,6 +431,17 @@ class AppController(QMainWindow):
                 "Coinbase Advanced Trade in Sopotek uses the API key name and private key."
             )
 
+        if "coinbase" in lowered and any(
+            token in lowered
+            for token in ("unauthorized", "authentication", "invalid signature", "forbidden", "401")
+        ):
+            return (
+                "Coinbase authentication failed. In Sopotek's Coinbase mode, use Coinbase Advanced Trade credentials: "
+                "put the API key name like organizations/.../apiKeys/... in the first field and the privateKey PEM in "
+                "the second field. If you pasted the private key from JSON, keep the full BEGIN/END block or the "
+                "escaped \\n form."
+            )
+
         return message or "Unknown initialization error"
 
     def _broker_is_connected(self, broker):
@@ -470,6 +483,89 @@ class AppController(QMainWindow):
             columns=["symbol", "timestamp", "open", "high", "low", "close", "volume"]
         )
         self.performance_engine = PerformanceEngine()
+        self._restore_performance_state()
+
+    def _performance_trade_payload_from_record(self, trade):
+        return {
+            "symbol": getattr(trade, "symbol", ""),
+            "side": getattr(trade, "side", ""),
+            "source": getattr(trade, "source", ""),
+            "price": getattr(trade, "price", ""),
+            "size": getattr(trade, "quantity", ""),
+            "order_type": getattr(trade, "order_type", ""),
+            "status": getattr(trade, "status", ""),
+            "order_id": getattr(trade, "order_id", ""),
+            "timestamp": getattr(trade, "timestamp", ""),
+            "pnl": getattr(trade, "pnl", ""),
+            "strategy_name": getattr(trade, "strategy_name", ""),
+            "reason": getattr(trade, "reason", ""),
+            "confidence": getattr(trade, "confidence", ""),
+            "expected_price": getattr(trade, "expected_price", ""),
+            "spread_bps": getattr(trade, "spread_bps", ""),
+            "slippage_bps": getattr(trade, "slippage_bps", ""),
+            "fee": getattr(trade, "fee", ""),
+        }
+
+    def _load_persisted_performance_history(self):
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return []
+
+        raw_value = settings.value("performance/equity_history", "[]")
+        try:
+            payload = json.loads(raw_value or "[]")
+        except Exception:
+            payload = raw_value if isinstance(raw_value, list) else []
+
+        history = []
+        for value in list(payload or [])[-2000:]:
+            try:
+                numeric = float(value)
+            except Exception:
+                continue
+            if pd.notna(numeric):
+                history.append(numeric)
+        return history
+
+    def _persist_performance_history(self):
+        perf = getattr(self, "performance_engine", None)
+        settings = getattr(self, "settings", None)
+        if perf is None or settings is None:
+            return
+
+        history = []
+        for value in list(getattr(perf, "equity_curve", []) or [])[-2000:]:
+            try:
+                numeric = float(value)
+            except Exception:
+                continue
+            if pd.notna(numeric):
+                history.append(numeric)
+        settings.setValue("performance/equity_history", json.dumps(history))
+
+    def _restore_performance_state(self):
+        perf = getattr(self, "performance_engine", None)
+        if perf is None:
+            return
+
+        if hasattr(perf, "load_equity_history"):
+            perf.load_equity_history(self._load_persisted_performance_history())
+
+        repository = getattr(self, "trade_repository", None)
+        if repository is None or not hasattr(repository, "get_trades"):
+            return
+
+        try:
+            stored = list(reversed(repository.get_trades(limit=500) or []))
+        except Exception:
+            self.logger.debug("Unable to restore persisted trade activity for performance analysis", exc_info=True)
+            return
+
+        trades = [self._performance_trade_payload_from_record(item) for item in stored]
+        if hasattr(perf, "load_trades"):
+            perf.load_trades(trades)
+        else:
+            perf.trades = list(trades)
 
     def _rebind_storage_dependencies(self):
         trading_system = getattr(self, "trading_system", None)
@@ -625,6 +721,7 @@ class AppController(QMainWindow):
 
                 self.balances = await self._fetch_balances(self.broker)
                 self.balance = self.balances
+                self._update_performance_equity(self.balances)
 
                 self.logger.info(
                     "Broker ready exchange=%s type=%s symbols=%s (raw=%s filtered=%s)",
@@ -864,7 +961,10 @@ class AppController(QMainWindow):
 
         self.balances = await self._fetch_balances(self.broker)
         self.balance = self.balances
+        equity = self._update_performance_equity(self.balances)
         self._update_behavior_guard_equity(self.balances)
+        if equity is not None:
+            self.equity_signal.emit(equity)
 
     async def initialize_trading(self):
         try:
@@ -877,6 +977,9 @@ class AppController(QMainWindow):
             self.terminal.logout_requested.connect(self._on_logout_requested)
             if hasattr(self.terminal, "load_persisted_runtime_data"):
                 await self.terminal.load_persisted_runtime_data()
+            equity = self._extract_balance_equity_value(getattr(self, "balances", {}))
+            if equity is not None:
+                self.equity_signal.emit(equity)
             self._create_task(self.run_startup_health_check(), "startup_health_check")
 
         except Exception as e:
@@ -1444,6 +1547,7 @@ class AppController(QMainWindow):
         quantity_mode=None,
         order_type="market",
         price=None,
+        stop_price=None,
         stop_loss=None,
         take_profit=None,
     ):
@@ -1463,6 +1567,7 @@ class AppController(QMainWindow):
                 amount=amount_units,
                 type=order_type,
                 price=price,
+                stop_price=stop_price,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 source="chatgpt",
@@ -1477,6 +1582,7 @@ class AppController(QMainWindow):
                 amount=amount_units,
                 type=order_type,
                 price=price,
+                stop_price=stop_price,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
             )
@@ -1738,6 +1844,7 @@ class AppController(QMainWindow):
             "Trading Commands\n"
             "- trade buy EUR/USD amount 0.01 lots confirm\n"
             "- trade sell GBP/USD amount 2000 type limit price 1.2710 sl 1.2750 tp 1.2620 confirm\n"
+            "- trade buy BTC/USDT amount 0.25 type stop_limit trigger 65010 price 64990 confirm\n"
             "- cancel order id 123456 confirm\n"
             "- cancel orders for EUR/USD confirm\n"
             "- close position EUR/USD confirm\n"
@@ -2783,18 +2890,25 @@ class AppController(QMainWindow):
             return "Unable to capture a screenshot right now."
 
         trade_match = re.search(
-            r"(?:^|\b)trade\s+(buy|sell)\s+([A-Za-z0-9_:/.-]+)(?:\s+(?:amount|size|units)\s+([-+]?\d*\.?\d+)(?:\s+(lots?|units?))?)?(?:\s+(?:type)\s+(market|limit))?(?:\s+(?:price|at)\s+([-+]?\d*\.?\d+))?(?:\s+(?:sl|stop|stop_loss)\s+([-+]?\d*\.?\d+))?(?:\s+(?:tp|take_profit|takeprofit)\s+([-+]?\d*\.?\d+))?",
+            r"(?:^|\b)trade\s+(buy|sell)\s+([A-Za-z0-9_:/.-]+)"
+            r"(?:\s+(?:amount|size|units)\s+([-+]?\d*\.?\d+)(?:\s+(lots?|units?))?)?"
+            r"(?:\s+(?:type)\s+(market|limit|stop_limit|stop-limit|stop\s+limit))?"
+            r"(?:\s+(?:price|at)\s+([-+]?\d*\.?\d+))?"
+            r"(?:\s+(?:trigger|stop_price|stoptrigger|stop_trigger|stop\s+trigger)\s+([-+]?\d*\.?\d+))?"
+            r"(?:\s+(?:sl|stop|stop_loss)\s+([-+]?\d*\.?\d+))?"
+            r"(?:\s+(?:tp|take_profit|takeprofit)\s+([-+]?\d*\.?\d+))?",
             lowered,
         )
         if trade_match:
-            side, symbol, amount_text, quantity_mode, order_type, price_text, sl_text, tp_text = trade_match.groups()
+            side, symbol, amount_text, quantity_mode, order_type, price_text, stop_price_text, sl_text, tp_text = trade_match.groups()
             if "confirm" not in lowered:
                 mode_text = f" {quantity_mode}" if quantity_mode else ""
                 return (
                     "Trade command detected but not executed.\n"
                     "Add the word CONFIRM to place it.\n"
                     f"Parsed command: side={side.upper()} symbol={symbol.upper()} amount={amount_text or '?'}{mode_text} "
-                    f"type={(order_type or 'market').upper()} price={price_text or '-'} sl={sl_text or '-'} tp={tp_text or '-'}"
+                    f"type={(order_type or 'market').replace('-', '_').replace(' ', '_').upper()} "
+                    f"price={price_text or '-'} trigger={stop_price_text or '-'} sl={sl_text or '-'} tp={tp_text or '-'}"
                 )
 
             if not amount_text:
@@ -2804,12 +2918,18 @@ class AppController(QMainWindow):
             if amount <= 0:
                 return "Trade amount must be positive."
 
-            resolved_type = (order_type or "market").lower()
+            resolved_type = (order_type or "market").strip().lower().replace("-", "_").replace(" ", "_")
             price = float(price_text) if price_text else None
+            stop_price = float(stop_price_text) if stop_price_text else None
             stop_loss = float(sl_text) if sl_text else None
             take_profit = float(tp_text) if tp_text else None
             if resolved_type == "limit" and (price is None or price <= 0):
                 return "Limit trade commands need a positive price."
+            if resolved_type == "stop_limit":
+                if price is None or price <= 0:
+                    return "Stop-limit trade commands need a positive limit price."
+                if stop_price is None or stop_price <= 0:
+                    return "Stop-limit trade commands need a positive trigger price."
 
             try:
                 trade_kwargs = {
@@ -2818,6 +2938,7 @@ class AppController(QMainWindow):
                     "amount": amount,
                     "order_type": resolved_type,
                     "price": price,
+                    "stop_price": stop_price,
                     "stop_loss": stop_loss,
                     "take_profit": take_profit,
                 }
@@ -3292,27 +3413,7 @@ class AppController(QMainWindow):
 
         normalized = []
         for trade in reversed(trades):
-            normalized.append(
-                {
-                    "symbol": getattr(trade, "symbol", ""),
-                    "side": getattr(trade, "side", ""),
-                    "source": getattr(trade, "source", ""),
-                    "price": getattr(trade, "price", ""),
-                    "size": getattr(trade, "quantity", ""),
-                    "order_type": getattr(trade, "order_type", ""),
-                    "status": getattr(trade, "status", ""),
-                    "order_id": getattr(trade, "order_id", ""),
-                    "timestamp": getattr(trade, "timestamp", ""),
-                    "pnl": getattr(trade, "pnl", ""),
-                    "strategy_name": getattr(trade, "strategy_name", ""),
-                    "reason": getattr(trade, "reason", ""),
-                    "confidence": getattr(trade, "confidence", ""),
-                    "expected_price": getattr(trade, "expected_price", ""),
-                    "spread_bps": getattr(trade, "spread_bps", ""),
-                    "slippage_bps": getattr(trade, "slippage_bps", ""),
-                    "fee": getattr(trade, "fee", ""),
-                }
-            )
+            normalized.append(self._performance_trade_payload_from_record(trade))
 
         return normalized
 
@@ -3331,12 +3432,9 @@ class AppController(QMainWindow):
 
         status = str(trade.get("status") or "").strip().lower().replace("-", "_")
         order_id = str(trade.get("order_id") or "").strip()
-        should_record = status in {"filled", "closed"}
+        should_record = status in {"filled", "closed"} or trade.get("pnl") not in (None, "")
         if should_record and order_id:
-            if order_id in self._performance_recorded_orders:
-                should_record = False
-            else:
-                self._performance_recorded_orders.add(order_id)
+            self._performance_recorded_orders.add(order_id)
 
         if should_record and getattr(self, "performance_engine", None) is not None:
             self.performance_engine.record_trade(trade)
@@ -3356,12 +3454,18 @@ class AppController(QMainWindow):
         if not isinstance(balances, dict):
             return None
 
-        direct_equity = balances.get("equity")
+        direct_equity = self._balance_metric_value(
+            balances,
+            "nav",
+            "equity",
+            "net_liquidation",
+            "account_value",
+            "total_account_value",
+            "balance",
+            "cash",
+        )
         if direct_equity is not None:
-            try:
-                return float(direct_equity)
-            except Exception:
-                return None
+            return direct_equity
 
         total = balances.get("total")
         if isinstance(total, dict):
@@ -3379,6 +3483,33 @@ class AppController(QMainWindow):
                 except Exception:
                     return None
         return None
+
+    def _update_performance_equity(self, balances=None):
+        perf = getattr(self, "performance_engine", None)
+        if perf is None or not hasattr(perf, "update_equity"):
+            return None
+
+        equity = self._extract_balance_equity_value(balances if balances is not None else getattr(self, "balances", {}))
+        if equity is None:
+            return None
+
+        existing = getattr(perf, "equity_curve", None)
+        if isinstance(existing, list) and existing:
+            try:
+                last_value = float(existing[-1])
+            except Exception:
+                last_value = None
+            if last_value is not None and abs(last_value - float(equity)) <= 1e-9:
+                return equity
+
+        try:
+            perf.update_equity(equity)
+            self._persist_performance_history()
+        except Exception:
+            self.logger.debug("Performance equity update failed", exc_info=True)
+            return None
+
+        return equity
 
     def _safe_balance_metric(self, value):
         if value is None:
@@ -4383,20 +4514,15 @@ class AppController(QMainWindow):
         if chart is None:
             return None
 
-        safe_symbol = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(getattr(chart, "symbol", requested_symbol or "chart")))
-        safe_prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(prefix or "chart")).strip("_") or "chart"
-        output_dir = Path("output") / "screenshots"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        path = output_dir / f"{safe_prefix}_{safe_symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        safe_symbol = sanitize_screenshot_fragment(
+            str(getattr(chart, "symbol", requested_symbol or "chart")),
+            "chart",
+        )
         try:
             QApplication.processEvents()
             await asyncio.sleep(0.15)
             QApplication.processEvents()
-            pixmap = chart.grab()
-            if pixmap is None or pixmap.isNull():
-                return None
-            pixmap.save(str(path), "PNG")
-            return str(path)
+            return capture_widget_to_output(chart, prefix=prefix, suffix=safe_symbol)
         except Exception as exc:
             self.logger.debug("Chart screenshot capture failed: %s", exc)
             return None
@@ -4409,16 +4535,8 @@ class AppController(QMainWindow):
         if terminal is None:
             return None
 
-        safe_prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(prefix or "capture")).strip("_") or "capture"
-        output_dir = Path("output") / "screenshots"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        path = output_dir / f"{safe_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         try:
-            pixmap = terminal.grab()
-            if pixmap is None or pixmap.isNull():
-                return None
-            pixmap.save(str(path), "PNG")
-            return str(path)
+            return capture_widget_to_output(terminal, prefix=prefix)
         except Exception as exc:
             self.logger.debug("App screenshot capture failed: %s", exc)
             return None
@@ -4800,12 +4918,28 @@ class AppController(QMainWindow):
         service = getattr(self, "voice_service", None)
         return bool(service is not None and service.available())
 
-    def market_chat_voice_output_available(self):
-        output_provider = str(getattr(self, "voice_output_provider", "windows") or "windows").strip().lower() or "windows"
-        if output_provider == "openai":
-            return bool(getattr(self, "openai_api_key", ""))
+    def _windows_market_chat_voice_available(self):
         service = getattr(self, "voice_service", None)
         return bool(service is not None and service.available())
+
+    def _resolve_market_chat_output_provider(self, output_provider=None):
+        requested = str(
+            output_provider if output_provider is not None else getattr(self, "voice_output_provider", "windows") or "windows"
+        ).strip().lower() or "windows"
+        if requested not in {"windows", "openai"}:
+            requested = "windows"
+        if requested == "openai":
+            if str(getattr(self, "openai_api_key", "") or "").strip():
+                return "openai"
+            if self._windows_market_chat_voice_available():
+                return "windows"
+        return requested
+
+    def market_chat_voice_output_available(self):
+        output_provider = self._resolve_market_chat_output_provider()
+        if output_provider == "openai":
+            return bool(str(getattr(self, "openai_api_key", "") or "").strip())
+        return self._windows_market_chat_voice_available()
 
     def market_chat_voice_provider_choices(self):
         service = getattr(self, "voice_service", None)
@@ -4827,6 +4961,7 @@ class AppController(QMainWindow):
         service = getattr(self, "voice_service", None)
         provider = str(getattr(self, "voice_provider", "windows") or "windows").strip().lower() or "windows"
         output_provider = str(getattr(self, "voice_output_provider", "windows") or "windows").strip().lower() or "windows"
+        effective_output_provider = self._resolve_market_chat_output_provider(output_provider)
         voice_name = str(self._current_market_chat_voice_name() or "").strip()
         google_ready = bool(service is not None and service.recognition_provider_available("google"))
         windows_ready = bool(service is not None and service.recognition_provider_available("windows"))
@@ -4834,6 +4969,8 @@ class AppController(QMainWindow):
             "provider": provider,
             "recognition_provider": provider,
             "output_provider": output_provider,
+            "effective_output_provider": effective_output_provider,
+            "output_fallback": output_provider != effective_output_provider,
             "voice_name": voice_name,
             "google_available": google_ready,
             "windows_available": windows_ready,
@@ -4845,9 +4982,7 @@ class AppController(QMainWindow):
         }
 
     async def market_chat_list_voices(self, output_provider=None):
-        resolved_provider = str(
-            output_provider if output_provider is not None else getattr(self, "voice_output_provider", "windows") or "windows"
-        ).strip().lower() or "windows"
+        resolved_provider = self._resolve_market_chat_output_provider(output_provider)
         if resolved_provider == "openai":
             return list(self.OPENAI_TTS_VOICES)
         service = getattr(self, "voice_service", None)
@@ -4908,13 +5043,25 @@ class AppController(QMainWindow):
         return await service.listen(timeout_seconds=timeout_seconds, provider=getattr(self, "voice_provider", "windows"))
 
     async def market_chat_speak(self, text):
-        output_provider = str(getattr(self, "voice_output_provider", "windows") or "windows").strip().lower() or "windows"
+        requested_output_provider = str(getattr(self, "voice_output_provider", "windows") or "windows").strip().lower() or "windows"
+        output_provider = self._resolve_market_chat_output_provider(requested_output_provider)
         if output_provider == "openai":
-            return await self._market_chat_speak_openai(text, voice_name=self._current_market_chat_voice_name())
+            result = await self._market_chat_speak_openai(text, voice_name=self._current_market_chat_voice_name())
+            if result.get("ok") or not self._windows_market_chat_voice_available():
+                return result
+            service = getattr(self, "voice_service", None)
+            if service is None:
+                return result
+            fallback = await service.speak(text, voice_name=str(getattr(self, "voice_windows_name", "") or "").strip())
+            if fallback.get("ok"):
+                fallback["message"] = (
+                    f"OpenAI speech failed ({result.get('message') or 'unknown error'}). Used Windows speech instead."
+                )
+            return fallback
         service = getattr(self, "voice_service", None)
         if service is None:
             return {"ok": False, "message": "Voice service is not initialized."}
-        return await service.speak(text, voice_name=self._current_market_chat_voice_name())
+        return await service.speak(text, voice_name=str(getattr(self, "voice_windows_name", "") or "").strip())
 
     async def _market_chat_speak_openai(self, text, voice_name="alloy"):
         message = str(text or "").strip()
@@ -5265,6 +5412,8 @@ class AppController(QMainWindow):
 
         limit = self._resolve_history_limit(limit)
         candles = await self._safe_fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        received_count = len(candles) if isinstance(candles, list) else 0
+        self._notify_market_data_shortfall(symbol, timeframe, received_count, limit)
         if not candles:
             return
 
@@ -5292,6 +5441,55 @@ class AppController(QMainWindow):
             )
 
         self.candle_signal.emit(symbol, df)
+        return df
+
+    def _notify_market_data_shortfall(self, symbol, timeframe, received_count, requested_count):
+        normalized_symbol = str(symbol or "").upper().strip()
+        normalized_timeframe = str(timeframe or self.time_frame or "1h").strip() or "1h"
+        try:
+            requested = max(0, int(requested_count or 0))
+        except Exception:
+            requested = 0
+        try:
+            received = max(0, int(received_count or 0))
+        except Exception:
+            received = 0
+
+        if not normalized_symbol or requested <= 0:
+            return
+
+        notice_cache = getattr(self, "_market_data_shortfall_notices", None)
+        if not isinstance(notice_cache, dict):
+            notice_cache = {}
+            self._market_data_shortfall_notices = notice_cache
+        cache_key = (normalized_symbol, normalized_timeframe)
+
+        if received >= requested:
+            notice_cache.pop(cache_key, None)
+            return
+
+        if notice_cache.get(cache_key) == (received, requested):
+            return
+        notice_cache[cache_key] = (received, requested)
+
+        if received <= 0:
+            message = (
+                f"Not enough data for {normalized_symbol} ({normalized_timeframe}): no candles were returned. "
+                "Try another timeframe, load more history, or wait for more market data."
+            )
+        else:
+            message = (
+                f"Not enough data for {normalized_symbol} ({normalized_timeframe}): received {received} of "
+                f"{requested} requested candles. Indicators, AI signals, and backtests may be limited."
+            )
+
+        if getattr(self, "logger", None) is not None:
+            self.logger.warning(message)
+
+        terminal = getattr(self, "terminal", None)
+        system_console = getattr(terminal, "system_console", None) if terminal is not None else None
+        if system_console is not None:
+            system_console.log(message, "WARN")
 
     async def _warmup_visible_candles(self):
         # Preload a very small working set so startup stays responsive.

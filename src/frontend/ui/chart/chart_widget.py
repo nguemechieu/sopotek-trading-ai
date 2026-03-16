@@ -86,11 +86,11 @@ class ChartWidget(QWidget):
         self._auto_fit_pending = True
         self._last_view_context = None
         self.default_visible_bars = 120
-        self.chart_background = "#0a1020"
-        self.panel_background = "#0c1730"
-        self.grid_color = (112, 138, 184, 42)
-        self.axis_color = "#8fa7c6"
-        self.muted_text = "#7f95b5"
+        self.chart_background = "#11161f"
+        self.panel_background = "#171d29"
+        self.grid_color = (130, 142, 160, 34)
+        self.axis_color = "#9aa4b2"
+        self.muted_text = "#728198"
         self._last_price_change = None
         self._news_events = []
         self._news_items = []
@@ -108,8 +108,8 @@ class ChartWidget(QWidget):
         self.info_bar.setStyleSheet(
             """
             QFrame {
-                background-color: #0c1730;
-                border: 1px solid #173055;
+                background-color: #171d29;
+                border: 1px solid #273142;
                 border-radius: 12px;
             }
             """
@@ -118,16 +118,34 @@ class ChartWidget(QWidget):
         info_layout.setContentsMargins(14, 10, 14, 10)
         info_layout.setSpacing(12)
 
-        self.market_stats_label = QLabel()
-        self.market_stats_label.setStyleSheet("color: #32d296; font-weight: 700; font-size: 12px;")
-        info_layout.addWidget(self.market_stats_label, 1)
+        left_info = QVBoxLayout()
+        left_info.setContentsMargins(0, 0, 0, 0)
+        left_info.setSpacing(2)
+
+        self.instrument_label = QLabel()
+        self.instrument_label.setStyleSheet("color: #f6f8fb; font-weight: 800; font-size: 15px;")
+        left_info.addWidget(self.instrument_label)
 
         self.market_meta_label = QLabel()
-        self.market_meta_label.setStyleSheet("color: #7f95b5; font-size: 12px;")
-        info_layout.addWidget(self.market_meta_label, 2)
+        self.market_meta_label.setStyleSheet("color: #728198; font-size: 11px;")
+        left_info.addWidget(self.market_meta_label)
+        info_layout.addLayout(left_info, 2)
+
+        center_info = QVBoxLayout()
+        center_info.setContentsMargins(0, 0, 0, 0)
+        center_info.setSpacing(2)
+
+        self.market_stats_label = QLabel()
+        self.market_stats_label.setStyleSheet("color: #32d296; font-weight: 800; font-size: 15px;")
+        center_info.addWidget(self.market_stats_label)
+
+        self.market_micro_label = QLabel()
+        self.market_micro_label.setStyleSheet("color: #9aa4b2; font-size: 11px;")
+        center_info.addWidget(self.market_micro_label)
+        info_layout.addLayout(center_info, 3)
 
         self.ohlcv_label = QLabel()
-        self.ohlcv_label.setStyleSheet("color: #d8e6ff; font-weight: 700; font-size: 12px;")
+        self.ohlcv_label.setStyleSheet("color: #dde5ef; font-weight: 700; font-size: 11px;")
         self.ohlcv_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         info_layout.addWidget(self.ohlcv_label, 3)
 
@@ -138,21 +156,21 @@ class ChartWidget(QWidget):
         self.market_tabs.setStyleSheet(
             """
             QTabWidget::pane {
-                border: 1px solid #173055;
-                background-color: #09111f;
+                border: 1px solid #273142;
+                background-color: #11161f;
                 border-radius: 14px;
             }
             QTabBar::tab {
-                background-color: #0c1730;
-                color: #9fb6d8;
+                background-color: #171d29;
+                color: #8e9bab;
                 padding: 8px 16px;
                 margin-right: 4px;
                 border-top-left-radius: 10px;
                 border-top-right-radius: 10px;
             }
             QTabBar::tab:selected {
-                background-color: #11213e;
-                color: #f4f8ff;
+                background-color: #1f2735;
+                color: #f6f8fb;
             }
             """
         )
@@ -169,12 +187,12 @@ class ChartWidget(QWidget):
         self.splitter.setStyleSheet(
             """
             QSplitter::handle {
-                background-color: #132033;
-                border-top: 1px solid #24354f;
-                border-bottom: 1px solid #24354f;
+                background-color: #1a2230;
+                border-top: 1px solid #2b3748;
+                border-bottom: 1px solid #2b3748;
             }
             QSplitter::handle:hover {
-                background-color: #1c3150;
+                background-color: #243042;
             }
             """
         )
@@ -238,7 +256,7 @@ class ChartWidget(QWidget):
         depth_layout.setSpacing(8)
 
         self.depth_summary_label = QLabel("Depth chart will populate when live order book data arrives.")
-        self.depth_summary_label.setStyleSheet("color: #8fa7c6; font-size: 12px;")
+        self.depth_summary_label.setStyleSheet("color: #8e9bab; font-size: 12px;")
         depth_layout.addWidget(self.depth_summary_label)
 
         self.depth_plot = PlotWidget()
@@ -271,7 +289,7 @@ class ChartWidget(QWidget):
         self.market_info_summary = QLabel("Market details will update with ticker, candle, and order book context.")
         self.market_info_summary.setWordWrap(True)
         self.market_info_summary.setStyleSheet(
-            "color: #d9e6f7; background-color: #0c1730; border: 1px solid #173055; "
+            "color: #ecf2f8; background-color: #171d29; border: 1px solid #273142; "
             "border-radius: 12px; padding: 12px; font-size: 12px; font-weight: 600;"
         )
         info_tab_layout.addWidget(self.market_info_summary)
@@ -287,14 +305,14 @@ class ChartWidget(QWidget):
         ):
             card = QFrame()
             card.setStyleSheet(
-                "QFrame { background-color: #101a2d; border: 1px solid #20324d; border-radius: 12px; }"
+                "QFrame { background-color: #171d29; border: 1px solid #273142; border-radius: 12px; }"
             )
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(12, 12, 12, 12)
             title = QLabel(key)
-            title.setStyleSheet("color: #8ca8cc; font-size: 12px;")
+            title.setStyleSheet("color: #8e9bab; font-size: 12px;")
             value = QLabel("-")
-            value.setStyleSheet("color: #f4f8ff; font-size: 16px; font-weight: 700;")
+            value.setStyleSheet("color: #f6f8fb; font-size: 16px; font-weight: 700;")
             card_layout.addWidget(title)
             card_layout.addWidget(value)
             metrics_layout.addWidget(card, index // 4, index % 4)
@@ -303,7 +321,7 @@ class ChartWidget(QWidget):
 
         self.market_info_details = QTextBrowser()
         self.market_info_details.setStyleSheet(
-            "QTextBrowser { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; border-radius: 12px; padding: 12px; }"
+            "QTextBrowser { background-color: #171d29; color: #dde5ef; border: 1px solid #273142; border-radius: 12px; padding: 12px; }"
         )
         info_tab_layout.addWidget(self.market_info_details, 1)
         self.market_tabs.addTab(self.market_info_page, "Market Info")
@@ -351,8 +369,8 @@ class ChartWidget(QWidget):
         self.text_item = TextItem(
             html="",
             anchor=(0.0, 1.0),
-            border=mkPen((30, 56, 96, 220)),
-            fill=pg.mkBrush(8, 17, 34, 225),
+            border=mkPen((76, 92, 115, 210)),
+            fill=pg.mkBrush(23, 29, 41, 238),
         )
         self.price_plot.addItem(self.text_item)
 
@@ -360,7 +378,7 @@ class ChartWidget(QWidget):
             html="",
             anchor=(0.0, 1.0),
             border=mkPen((244, 162, 97, 180), width=1),
-            fill=pg.mkBrush(11, 18, 32, 240),
+            fill=pg.mkBrush(23, 29, 41, 240),
         )
         self.news_hover_item.setZValue(20)
         self.news_hover_item.setVisible(False)
@@ -391,7 +409,7 @@ class ChartWidget(QWidget):
 
     def _style_plot(self, plot, left_label=None, right_label=None, bottom_label=None, show_bottom=False):
         plot.setBackground(self.chart_background)
-        plot.showGrid(x=True, y=True, alpha=0.18)
+        plot.showGrid(x=True, y=True, alpha=0.16)
         plot.setMenuEnabled(False)
         plot.hideButtons()
 
@@ -411,6 +429,10 @@ class ChartWidget(QWidget):
             axis.setTextPen(pg.mkColor(self.axis_color))
             axis.setPen(pg.mkPen(self.axis_color, width=1))
             axis.setStyle(tickLength=-6, autoExpandTextSpace=False)
+            try:
+                axis.setGrid(48)
+            except Exception:
+                pass
 
         plot.showAxis("bottom") if show_bottom else plot.hideAxis("bottom")
         if right_label:
@@ -674,7 +696,8 @@ class ChartWidget(QWidget):
 
         self.v_line.setPos(x)
         self.h_line.setPos(y)
-        self.text_item.setHtml(f"<span style='color:#e3f2fd'>Price: {y:.6f}</span>")
+        row = self._row_for_x(x)
+        self.text_item.setHtml(self._hover_html(row, y))
         self.text_item.setPos(x, y)
         self._update_ohlcv_for_x(x)
         self._update_news_hover(x, y)
@@ -861,38 +884,46 @@ class ChartWidget(QWidget):
     def _update_chart_header(self):
         base, quote = self._symbol_parts()
         broker_name = self._active_broker_name().upper()
+        self.instrument_label.setText(f"{self.symbol.upper()}  {self.timeframe.upper()}")
 
         stats = self._last_candle_stats or {}
         if quote:
-            description = f"{base} priced in {quote}"
+            description = f"{broker_name}  |  {base} quoted in {quote}"
         else:
-            description = self._timeframe_description()
-        meta_prefix = f"{self.timeframe.upper()}  |  {broker_name}"
+            description = f"{broker_name}  |  {self._timeframe_description()}"
+
+        bid = self._format_numeric_value(self._last_bid)
+        ask = self._format_numeric_value(self._last_ask)
+        spread = None
+        if bid is not None and ask is not None and ask >= bid:
+            spread = ask - bid
 
         if stats:
             last_price = self._format_metric(stats.get("last_price", 0.0))
             variation = float(stats.get("variation_pct", 0.0))
             cumulative_volume = self._format_volume(stats.get("cumulative_volume", 0.0))
             positive = variation >= 0
-            change_color = "#32d296" if positive else "#ff5b7f"
+            change_color = "#2db784" if positive else "#d75462"
             prefix = "+" if positive else ""
-            self.market_stats_label.setText(f"{last_price}  {prefix}{variation:.2f}%  Vol {cumulative_volume}")
+            self.market_stats_label.setText(f"{last_price}  {prefix}{variation:.2f}%")
             self.market_stats_label.setStyleSheet(
-                f"color: {change_color}; font-weight: 800; font-size: 12px;"
+                f"color: {change_color}; font-weight: 800; font-size: 15px;"
             )
             self.market_meta_label.setText(
-                f"{meta_prefix}  |  {description}  |  Avg {self._format_metric(stats.get('average_close', 0.0))}  |  "
+                f"{description}  |  Avg {self._format_metric(stats.get('average_close', 0.0))}  |  "
                 f"Range {self._format_metric(stats.get('min_price', 0.0), 4)} - {self._format_metric(stats.get('max_price', 0.0), 4)}"
+            )
+            self.market_micro_label.setText(
+                f"Bid {self._format_metric(bid, 8)}  |  Ask {self._format_metric(ask, 8)}  |  "
+                f"Spread {self._format_metric(spread, 8)}  |  Visible Vol {cumulative_volume}"
             )
         else:
             self.market_stats_label.setText(self._timeframe_description())
-            self.market_stats_label.setStyleSheet("color: #8fa7c6; font-weight: 700; font-size: 12px;")
-            if quote:
-                self.market_meta_label.setText(
-                    f"{meta_prefix}  |  {description}  |  Quote asset {quote} against base asset {base}"
-                )
-            else:
-                self.market_meta_label.setText(f"{meta_prefix}  |  {self._timeframe_description()}")
+            self.market_stats_label.setStyleSheet("color: #8e9bab; font-weight: 700; font-size: 14px;")
+            self.market_meta_label.setText(description)
+            self.market_micro_label.setText(
+                f"Bid {self._format_metric(bid, 8)}  |  Ask {self._format_metric(ask, 8)}  |  Spread {self._format_metric(spread, 8)}"
+            )
 
     def _update_watermark_html(self):
         base, quote = self._symbol_parts()
@@ -900,9 +931,9 @@ class ChartWidget(QWidget):
         self.watermark_item.setHtml(
             (
                 "<div style='text-align:center;'>"
-                f"<div style='color: rgba(200,216,255,0.10); font-size: 42px; font-weight: 800; letter-spacing: 1px;'>{self.symbol.upper()}</div>"
-                f"<div style='color: rgba(148,171,214,0.10); font-size: 24px; font-weight: 700;'>{self.timeframe.upper()}</div>"
-                f"<div style='color: rgba(148,171,214,0.08); font-size: 12px; text-transform: uppercase;'>{description}</div>"
+                f"<div style='color: rgba(246,248,251,0.08); font-size: 40px; font-weight: 800; letter-spacing: 1px;'>{self.symbol.upper()}</div>"
+                f"<div style='color: rgba(154,164,178,0.10); font-size: 22px; font-weight: 700;'>{self.timeframe.upper()}</div>"
+                f"<div style='color: rgba(114,129,152,0.12); font-size: 11px; text-transform: uppercase;'>{description}</div>"
                 "</div>"
             )
         )
@@ -1083,27 +1114,61 @@ class ChartWidget(QWidget):
             return f"{numeric / 1_000:.2f}K"
         return f"{numeric:.2f}"
 
+    def _format_time_label(self, value):
+        if value in (None, ""):
+            return "-"
+
+        try:
+            if hasattr(value, "to_pydatetime"):
+                dt = value.to_pydatetime()
+            elif isinstance(value, datetime):
+                dt = value
+            elif isinstance(value, (int, float, np.integer, np.floating)):
+                numeric = float(value)
+                if abs(numeric) > 1e11:
+                    numeric = numeric / 1000.0
+                dt = datetime.fromtimestamp(numeric, tz=timezone.utc)
+            else:
+                text = str(value).strip()
+                if not text:
+                    return "-"
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            return str(value)
+
     def _set_ohlcv_from_row(self, row):
         if row is None:
-            self.ohlcv_label.setText("O -  H -  L -  C -  V -")
+            self.ohlcv_label.setText("Time -  O -  H -  L -  C -  Chg -  V -")
             return
 
+        open_price = self._format_numeric_value(row.get("open", 0.0))
+        close_price = self._format_numeric_value(row.get("close", 0.0))
+        delta = None
+        if open_price is not None and close_price is not None:
+            delta = close_price - open_price
+        prefix = "+" if delta is not None and delta >= 0 else ""
         self.ohlcv_label.setText(
             "  ".join(
                 [
+                    f"T {self._format_time_label(row.get('timestamp'))}",
                     f"O {self._format_metric(row.get('open', 0.0))}",
                     f"H {self._format_metric(row.get('high', 0.0))}",
                     f"L {self._format_metric(row.get('low', 0.0))}",
                     f"C {self._format_metric(row.get('close', 0.0))}",
+                    f"Chg {prefix}{self._format_metric(delta, 6)}",
                     f"V {self._format_volume(row.get('volume', 0.0))}",
                 ]
             )
         )
 
-    def _update_ohlcv_for_x(self, x_value):
+    def _row_for_x(self, x_value):
         if self._last_df is None or self._last_x is None or len(self._last_x) == 0:
-            self._set_ohlcv_from_row(None)
-            return
+            return None
 
         try:
             index = int(np.nanargmin(np.abs(self._last_x - float(x_value))))
@@ -1111,10 +1176,36 @@ class ChartWidget(QWidget):
             index = len(self._last_df) - 1
 
         if index < 0 or index >= len(self._last_df):
-            return
+            return None
+        return self._last_df.iloc[index]
 
-        row = self._last_df.iloc[index]
-        self._set_ohlcv_from_row(row)
+    def _hover_html(self, row, y_value):
+        if row is None:
+            return f"<span style='color:#f6f8fb'>Price {y_value:.6f}</span>"
+
+        open_price = self._format_numeric_value(row.get("open", 0.0))
+        close_price = self._format_numeric_value(row.get("close", 0.0))
+        delta = None
+        if open_price is not None and close_price is not None:
+            delta = close_price - open_price
+        delta_color = "#2db784" if (delta or 0.0) >= 0 else "#d75462"
+        delta_prefix = "+" if delta is not None and delta >= 0 else ""
+        return (
+            "<div style='padding: 6px 8px;'>"
+            f"<div style='color: #9aa4b2; font-size: 10px; font-weight: 700;'>{html.escape(self._format_time_label(row.get('timestamp')))}</div>"
+            f"<div style='color: #f6f8fb; font-size: 11px; margin-top: 2px;'>Cursor {y_value:.6f}</div>"
+            f"<div style='color: #dde5ef; font-size: 10px; margin-top: 3px;'>"
+            f"O {self._format_metric(row.get('open', 0.0))}  "
+            f"H {self._format_metric(row.get('high', 0.0))}  "
+            f"L {self._format_metric(row.get('low', 0.0))}  "
+            f"C {self._format_metric(row.get('close', 0.0))}</div>"
+            f"<div style='color: {delta_color}; font-size: 10px; font-weight: 700; margin-top: 3px;'>"
+            f"Bar change {delta_prefix}{self._format_metric(delta, 6)}  |  Volume {self._format_volume(row.get('volume', 0.0))}</div>"
+            "</div>"
+        )
+
+    def _update_ohlcv_for_x(self, x_value):
+        self._set_ohlcv_from_row(self._row_for_x(x_value))
 
     def _extract_time_axis(self, df):
         if "timestamp" not in df.columns:
@@ -2130,6 +2221,7 @@ class ChartWidget(QWidget):
         if last_f > 0:
             self.last_line.setPos(last_f)
             self.last_line.setVisible(True)
+        self._update_chart_header()
         self._refresh_market_panels()
 
     def set_bid_ask_lines_visible(self, visible: bool):

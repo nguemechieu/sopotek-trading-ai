@@ -18,10 +18,38 @@ class PerformanceEngine:
     def update_equity(self, equity):
         self.equity_curve.append(equity)
 
+    def load_equity_history(self, history):
+        self.equity_curve.clear()
+        for value in list(history or []):
+            try:
+                numeric = float(value)
+            except Exception:
+                continue
+            if np.isfinite(numeric):
+                self.equity_curve.append(numeric)
+
     def record_trade(self, trade):
         if trade is None:
             return
-        self.trades.append(dict(trade))
+        payload = dict(trade)
+        order_id = str(payload.get("order_id") or payload.get("id") or "").strip()
+        if order_id:
+            for index, existing in enumerate(self.trades):
+                existing_order_id = str(existing.get("order_id") or existing.get("id") or "").strip()
+                if existing_order_id == order_id:
+                    merged = dict(existing)
+                    for key, value in payload.items():
+                        if value not in (None, ""):
+                            merged[key] = value
+                    self.trades[index] = merged
+                    return
+        self.trades.append(payload)
+
+    def load_trades(self, trades):
+        self.trades.clear()
+        for trade in list(trades or []):
+            if isinstance(trade, dict):
+                self.record_trade(trade)
 
     # =====================================
     # REPORT

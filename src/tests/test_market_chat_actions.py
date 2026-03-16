@@ -181,12 +181,44 @@ def test_handle_market_chat_action_can_open_trade_from_pilot():
         "amount": 1000.0,
         "order_type": "limit",
         "price": 1.25,
+        "stop_price": None,
         "stop_loss": 1.2,
         "take_profit": 1.3,
     }
     assert "Trade command executed." in reply
     assert "Status: FILLED" in reply
     assert "Order ID: pilot-001" in reply
+
+
+def test_handle_market_chat_action_can_open_stop_limit_trade_from_pilot():
+    controller = _make_controller()
+    submitted = {}
+
+    async def fake_submit_market_chat_trade(**kwargs):
+        submitted.update(kwargs)
+        return {"status": "filled", "order_id": "pilot-stop-limit-001"}
+
+    controller.submit_market_chat_trade = fake_submit_market_chat_trade
+
+    reply = asyncio.run(
+        controller.handle_market_chat_action(
+            "trade sell eur/usd amount 1000 type stop_limit price 1.25 trigger 1.255 sl 1.26 tp 1.2 confirm"
+        )
+    )
+
+    assert submitted == {
+        "symbol": "EUR/USD",
+        "side": "sell",
+        "amount": 1000.0,
+        "order_type": "stop_limit",
+        "price": 1.25,
+        "stop_price": 1.255,
+        "stop_loss": 1.26,
+        "take_profit": 1.2,
+    }
+    assert "Trade command executed." in reply
+    assert "Type: STOP_LIMIT" in reply
+    assert "Order ID: pilot-stop-limit-001" in reply
 
 
 def test_submit_market_chat_trade_converts_oanda_micro_lots_to_units():
@@ -214,6 +246,33 @@ def test_submit_market_chat_trade_converts_oanda_micro_lots_to_units():
     assert order["amount_units"] == 1000.0
 
 
+def test_submit_market_chat_trade_passes_stop_limit_trigger_to_broker():
+    controller = _make_controller()
+    submitted = {}
+
+    async def fake_create_order(**kwargs):
+        submitted.update(kwargs)
+        return {"status": "submitted", "id": "stop-limit-001"}
+
+    controller.broker = SimpleNamespace(exchange_name="paper", create_order=fake_create_order)
+
+    order = asyncio.run(
+        controller.submit_market_chat_trade(
+            symbol="BTC/USDT",
+            side="buy",
+            amount=1.5,
+            order_type="stop_limit",
+            price=64990.0,
+            stop_price=65010.0,
+        )
+    )
+
+    assert submitted["type"] == "stop_limit"
+    assert submitted["price"] == 64990.0
+    assert submitted["stop_price"] == 65010.0
+    assert order["amount_units"] == 1.5
+
+
 def test_handle_market_chat_action_can_open_trade_from_pilot_in_lots():
     controller = _make_controller()
     controller.broker = SimpleNamespace(exchange_name="oanda")
@@ -238,6 +297,7 @@ def test_handle_market_chat_action_can_open_trade_from_pilot_in_lots():
         "quantity_mode": "lots",
         "order_type": "market",
         "price": None,
+        "stop_price": None,
         "stop_loss": None,
         "take_profit": None,
     }

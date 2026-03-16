@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from manager.portfolio_manager import PortfolioManager
 from execution.execution_manager import ExecutionManager
@@ -93,6 +93,7 @@ class SopotekTrading:
         self.limit = getattr(controller, "limit", 50000)
         self.running = False
         self._pipeline_status = {}
+        self._rejection_log_cache = {}
 
         self.logger.info("Sopotek Trading System initialized")
 
@@ -227,6 +228,26 @@ class SopotekTrading:
             symbol: dict(payload)
             for symbol, payload in (self._pipeline_status or {}).items()
         }
+
+    def _log_rejection_once(self, stage, symbol, reason, template):
+        normalized_stage = str(stage or "").strip().lower() or "unknown"
+        normalized_symbol = str(symbol or "").strip().upper()
+        normalized_reason = str(reason or "").strip() or "Trade rejected."
+        cooldown_seconds = float(getattr(self.controller, "rejection_log_cooldown_seconds", 60.0) or 60.0)
+        now = datetime.now(timezone.utc)
+        cache_key = (normalized_stage, normalized_symbol, normalized_reason)
+        previous = self._rejection_log_cache.get(cache_key)
+        if previous is not None and (now - previous).total_seconds() < cooldown_seconds:
+            return
+
+        stale_before = now - timedelta(seconds=max(cooldown_seconds * 4.0, 300.0))
+        self._rejection_log_cache = {
+            key: timestamp
+            for key, timestamp in self._rejection_log_cache.items()
+            if timestamp >= stale_before
+        }
+        self._rejection_log_cache[cache_key] = now
+        self.logger.warning(template, normalized_reason)
 
     def _symbols_match(self, left, right):
         normalize = lambda value: str(value or "").strip().upper().replace("-", "/").replace("_", "/")
@@ -640,7 +661,7 @@ class SopotekTrading:
             adjusted_amount = float(amount)
 
         if not allowed:
-            self.logger.warning("Trade rejected by risk engine: %s", basic_reason)
+            self._log_rejection_once("risk_engine", symbol, basic_reason, "Trade rejected by risk engine: %s")
             self._record_pipeline_status(symbol, "risk_engine", "rejected", basic_reason, signal=signal)
             return
         if adjusted_amount + 1e-12 < float(amount):
@@ -676,7 +697,12 @@ class SopotekTrading:
             if self.controller is not None:
                 self.controller.quant_allocation_snapshot = dict(allocation.metrics or {})
             if not allocation.approved:
-                self.logger.warning("Trade rejected by portfolio allocator: %s", allocation.reason)
+                self._log_rejection_once(
+                    "portfolio_allocator",
+                    symbol,
+                    allocation.reason,
+                    "Trade rejected by portfolio allocator: %s",
+                )
                 self._record_pipeline_status(symbol, "portfolio_allocator", "rejected", allocation.reason, signal=signal)
                 return
             amount = allocation.adjusted_amount
@@ -704,7 +730,12 @@ class SopotekTrading:
             if self.controller is not None:
                 self.controller.quant_risk_snapshot = dict(approval.metrics or {})
             if not approval.approved:
-                self.logger.warning("Trade rejected by institutional risk engine: %s", approval.reason)
+                self._log_rejection_once(
+                    "portfolio_risk_engine",
+                    symbol,
+                    approval.reason,
+                    "Trade rejected by institutional risk engine: %s",
+                )
                 self._record_pipeline_status(symbol, "portfolio_risk_engine", "rejected", approval.reason, signal=signal)
                 return
             amount = approval.adjusted_amount
@@ -729,7 +760,12 @@ class SopotekTrading:
                 margin_closeout_snapshot.get("reason")
                 or "Margin closeout guard blocked the trade."
             ).strip()
-            self.logger.warning("Trade rejected by margin closeout guard: %s", reason)
+            self._log_rejection_once(
+                "margin_closeout_guard",
+                symbol,
+                reason,
+                "Trade rejected by margin closeout guard: %s",
+            )
             self._record_pipeline_status(symbol, "margin_closeout_guard", "rejected", reason, signal=signal)
             return
 

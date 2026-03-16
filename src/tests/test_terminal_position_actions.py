@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSpinBox, QTableWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QPushButton, QSpinBox, QTableWidget, QTextBrowser
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -296,3 +296,99 @@ def test_refresh_strategy_assignment_window_shows_default_and_custom_symbol_mode
     assert window._strategy_assignment_table.item(0, 0).text() == "EUR/USD"
     assert window._strategy_assignment_table.item(0, 1).text() == "Assigned Strategy"
     assert window._strategy_assignment_table.item(1, 1).text() == "Default Strategy"
+
+
+def test_refresh_stellar_asset_explorer_window_populates_links_from_broker_registry():
+    _app()
+    window = SimpleNamespace(
+        _stellar_asset_status=QLabel(),
+        _stellar_asset_picker=QComboBox(),
+        _stellar_asset_input=QLineEdit(),
+        _stellar_asset_details=QTextBrowser(),
+    )
+    broker = SimpleNamespace(
+        asset_registry={
+            "XLM": SimpleNamespace(code="XLM", issuer=None),
+            "USDC": SimpleNamespace(code="USDC", issuer="GUSDCISSUER"),
+            "AQUA": SimpleNamespace(code="AQUA", issuer="GAQUAISSUER"),
+        },
+        _account_asset_codes=["XLM", "USDC"],
+        _network_asset_codes=["USDC", "AQUA"],
+    )
+    fake = SimpleNamespace(controller=SimpleNamespace(broker=broker, exchange="stellar"))
+    fake._stellar_expert_asset_url = lambda code, issuer=None: Terminal._stellar_expert_asset_url(fake, code, issuer)
+    fake._stellar_asset_identifier = lambda code, issuer=None: Terminal._stellar_asset_identifier(fake, code, issuer)
+    fake._parse_stellar_asset_entry = lambda raw: Terminal._parse_stellar_asset_entry(fake, raw)
+    fake._selected_stellar_asset_row = lambda current_window=None: Terminal._selected_stellar_asset_row(fake, current_window)
+    fake._stellar_asset_explorer_rows = lambda: Terminal._stellar_asset_explorer_rows(fake)
+
+    Terminal._refresh_stellar_asset_explorer_window(fake, window=window)
+
+    assert window._stellar_asset_picker.count() == 3
+    assert "Loaded 3 Stellar assets" in window._stellar_asset_status.text()
+    html = window._stellar_asset_details.toHtml()
+    assert "https://stellar.expert/explorer/public/asset/XLM" in html
+    assert "https://stellar.expert/explorer/public/asset/USDC-GUSDCISSUER" in html
+
+
+def test_stellar_asset_explorer_rows_mark_screening_and_trustline_state():
+    broker = SimpleNamespace(
+        asset_registry={
+            "XLM": SimpleNamespace(code="XLM", issuer=None),
+            "USDC": SimpleNamespace(code="USDC", issuer="GUSDCISSUER"),
+            "AQUA": SimpleNamespace(code="AQUA", issuer="GAQUAISSUER"),
+            "SCAM": SimpleNamespace(code="SCAM", issuer="GSCAMISSUER"),
+        },
+        _account_asset_codes=["XLM", "USDC"],
+        _network_asset_codes=["USDC", "AQUA"],
+    )
+    fake = SimpleNamespace(controller=SimpleNamespace(broker=broker, exchange="stellar"))
+    fake._stellar_expert_asset_url = lambda code, issuer=None: Terminal._stellar_expert_asset_url(fake, code, issuer)
+    fake._stellar_asset_identifier = lambda code, issuer=None: Terminal._stellar_asset_identifier(fake, code, issuer)
+
+    rows = Terminal._stellar_asset_explorer_rows(fake)
+    row_map = {row["id"]: row for row in rows}
+
+    assert row_map["USDC:GUSDCISSUER"]["screened"] is True
+    assert row_map["USDC:GUSDCISSUER"]["trusted"] is True
+    assert row_map["AQUA:GAQUAISSUER"]["needs_trustline"] is True
+    assert row_map["SCAM:GSCAMISSUER"]["screened"] is False
+
+
+def test_refresh_stellar_asset_explorer_window_filters_screened_assets_for_trustlines():
+    _app()
+    window = SimpleNamespace(
+        _stellar_asset_status=QLabel(),
+        _stellar_asset_picker=QComboBox(),
+        _stellar_asset_input=QLineEdit(),
+        _stellar_asset_details=QTextBrowser(),
+        _stellar_asset_filter_safe=QCheckBox(),
+        _stellar_asset_filter_untrusted=QCheckBox(),
+        _stellar_asset_trustline_btn=QPushButton(),
+    )
+    window._stellar_asset_filter_safe.setChecked(True)
+    window._stellar_asset_filter_untrusted.setChecked(True)
+    broker = SimpleNamespace(
+        asset_registry={
+            "XLM": SimpleNamespace(code="XLM", issuer=None),
+            "USDC": SimpleNamespace(code="USDC", issuer="GUSDCISSUER"),
+            "AQUA": SimpleNamespace(code="AQUA", issuer="GAQUAISSUER"),
+            "SCAM": SimpleNamespace(code="SCAM", issuer="GSCAMISSUER"),
+        },
+        _account_asset_codes=["XLM", "USDC"],
+        _network_asset_codes=["USDC", "AQUA"],
+        create_trustline=lambda asset: asset,
+    )
+    fake = SimpleNamespace(controller=SimpleNamespace(broker=broker, exchange="stellar"))
+    fake._stellar_expert_asset_url = lambda code, issuer=None: Terminal._stellar_expert_asset_url(fake, code, issuer)
+    fake._stellar_asset_identifier = lambda code, issuer=None: Terminal._stellar_asset_identifier(fake, code, issuer)
+    fake._parse_stellar_asset_entry = lambda raw: Terminal._parse_stellar_asset_entry(fake, raw)
+    fake._selected_stellar_asset_row = lambda current_window=None: Terminal._selected_stellar_asset_row(fake, current_window)
+    fake._stellar_asset_explorer_rows = lambda: Terminal._stellar_asset_explorer_rows(fake)
+
+    Terminal._refresh_stellar_asset_explorer_window(fake, window=window)
+
+    assert window._stellar_asset_picker.count() == 1
+    assert window._stellar_asset_picker.currentData() == "AQUA:GAQUAISSUER"
+    assert window._stellar_asset_trustline_btn.isEnabled() is True
+    assert "Loaded 1 Stellar assets (4 total)." in window._stellar_asset_status.text()

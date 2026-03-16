@@ -123,6 +123,7 @@ python src\main.py
 - [UI Workspace Guide](docs/ui-workspace.md)
 - [Integrations](docs/integrations.md)
 - [Internal API Notes](docs/api.md)
+- [Refactor Roadmap](docs/refactor-roadmap.md)
 - [Testing And Operations](docs/testing-and-operations.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Development Notes](docs/development.md)
