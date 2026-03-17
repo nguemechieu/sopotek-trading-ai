@@ -36,32 +36,40 @@ class DummyTerminal(QMainWindow):
         self.close_all_requests += 1
 
 
-def test_create_positions_panel_builds_table_and_action_button():
+def test_create_positions_panel_builds_tabbed_tables_and_action_button():
     _app()
     terminal = DummyTerminal()
 
-    create_positions_panel(terminal)
+    dock = create_positions_panel(terminal)
     terminal.positions_close_all_button.click()
 
     assert terminal.close_all_requests == 1
+    assert dock.windowTitle() == "Positions & Orders"
+    assert terminal.positions_orders_tabs.count() == 2
+    assert terminal.positions_orders_tabs.tabText(0) == "Positions"
+    assert terminal.positions_orders_tabs.tabText(1) == "Open Orders"
     assert terminal.positions_table.columnCount() == len(POSITION_HEADERS)
     assert [
         terminal.positions_table.horizontalHeaderItem(index).text()
         for index in range(terminal.positions_table.columnCount())
     ] == POSITION_HEADERS
-
-
-def test_create_open_orders_panel_builds_expected_columns():
-    _app()
-    terminal = DummyTerminal()
-
-    create_open_orders_panel(terminal)
-
     assert terminal.open_orders_table.columnCount() == len(OPEN_ORDER_HEADERS)
     assert [
         terminal.open_orders_table.horizontalHeaderItem(index).text()
         for index in range(terminal.open_orders_table.columnCount())
     ] == OPEN_ORDER_HEADERS
+    assert terminal.open_orders_dock is dock
+
+
+def test_create_open_orders_panel_reuses_combined_positions_dock():
+    _app()
+    terminal = DummyTerminal()
+
+    first = create_positions_panel(terminal)
+    second = create_open_orders_panel(terminal)
+
+    assert second is first
+    assert terminal.open_orders_dock is terminal.positions_dock
 
 
 def test_create_trade_log_panel_builds_expected_columns():

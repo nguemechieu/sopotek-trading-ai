@@ -26,5 +26,6 @@ if __name__ == "__main__":
 
     generate_features(
         "../data/processed/btc_1h_clean.csv",
-        "../data/features/btc_features.csv"
-    )
+        "../data/features/btc_features.csv")
+else:
+    print("This module is intended to be run as a script.")

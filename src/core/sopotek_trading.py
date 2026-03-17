@@ -17,6 +17,7 @@ from risk.trader_behavior_guard import TraderBehaviorGuard
 
 
 class SopotekTrading:
+    MAX_RUNTIME_ANALYSIS_BARS = 500
 
     def __init__(self, controller=None):
 
@@ -108,6 +109,24 @@ class SopotekTrading:
             weight_resolver = getattr(self.controller, "active_strategy_weight_map", None) if self.controller is not None else None
             weights = weight_resolver() if callable(weight_resolver) else {str(getattr(self.controller, "strategy_name", "Trend Following")): 1.0}
             self.portfolio_allocator.configure_strategy_weights(strategy_weights=weights, allocation_model="equal_weight")
+
+    def _resolve_runtime_history_limit(self, limit=None):
+        requested = max(1, int(limit or self.limit or 300))
+        controller = self.controller
+        configured_cap = getattr(controller, "runtime_history_limit", None) if controller is not None else None
+        try:
+            runtime_cap = max(100, int(configured_cap or self.MAX_RUNTIME_ANALYSIS_BARS))
+        except Exception:
+            runtime_cap = self.MAX_RUNTIME_ANALYSIS_BARS
+
+        broker_cap = getattr(self.broker, "MAX_OHLCV_COUNT", None)
+        try:
+            broker_cap = max(1, int(broker_cap)) if broker_cap is not None else None
+        except Exception:
+            broker_cap = None
+
+        effective_cap = runtime_cap if broker_cap is None else min(runtime_cap, broker_cap)
+        return max(1, min(requested, effective_cap))
 
     def _safe_numeric_value(self, value, fallback):
         if value in (None, ""):
@@ -444,7 +463,7 @@ class SopotekTrading:
             raise ValueError("Symbol is required")
 
         target_timeframe = str(timeframe or self.time_frame or "1h").strip() or "1h"
-        target_limit = max(1, int(limit or self.limit or 300))
+        target_limit = self._resolve_runtime_history_limit(limit)
 
         dataset = await self.data_hub.get_symbol_dataset(
             symbol=normalized_symbol,

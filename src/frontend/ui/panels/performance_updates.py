@@ -11,6 +11,16 @@ def performance_snapshot(terminal):
         if numeric is not None:
             equity_series.append(numeric)
 
+    equity_timestamps = []
+    time_series_getter = getattr(terminal, "_performance_time_series", None)
+    if callable(time_series_getter):
+        for value in time_series_getter():
+            numeric = terminal._safe_float(value)
+            if numeric is not None:
+                equity_timestamps.append(numeric)
+    if len(equity_timestamps) != len(equity_series):
+        equity_timestamps = []
+
     perf = getattr(terminal.controller, "performance_engine", None)
     report = {}
     if perf is not None and hasattr(perf, "report"):
@@ -238,7 +248,9 @@ def performance_snapshot(terminal):
         "insights": insights,
         "metrics": metrics,
         "equity_series": equity_series,
+        "equity_timestamps": equity_timestamps,
         "drawdown_series": [abs(value) for value in drawdown_series],
+        "drawdown_timestamps": list(equity_timestamps),
         "symbol_rows": symbol_rows[:8],
     }
 
@@ -279,11 +291,21 @@ def populate_performance_view(terminal, widgets, snapshot):
 
     curve = widgets.get("equity_curve")
     if curve is not None:
-        curve.setData(snapshot.get("equity_series", []))
+        equity_series = snapshot.get("equity_series", [])
+        equity_timestamps = snapshot.get("equity_timestamps", [])
+        if equity_timestamps and len(equity_timestamps) == len(equity_series):
+            curve.setData(equity_timestamps, equity_series)
+        else:
+            curve.setData(equity_series)
 
     drawdown_curve = widgets.get("drawdown_curve")
     if drawdown_curve is not None:
-        drawdown_curve.setData(snapshot.get("drawdown_series", []))
+        drawdown_series = snapshot.get("drawdown_series", [])
+        drawdown_timestamps = snapshot.get("drawdown_timestamps", [])
+        if drawdown_timestamps and len(drawdown_timestamps) == len(drawdown_series):
+            drawdown_curve.setData(drawdown_timestamps, drawdown_series)
+        else:
+            drawdown_curve.setData(drawdown_series)
 
     insights = widgets.get("insights")
     if insights is not None:

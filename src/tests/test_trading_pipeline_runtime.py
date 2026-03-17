@@ -618,3 +618,54 @@ def test_sopotek_trading_start_tolerates_invalid_initial_capital_text(monkeypatc
 
     assert trading.risk_engine is not None
     assert abs(float(trading.risk_engine.account_equity) - 15000.0) < 1e-9
+
+
+def test_sopotek_trading_process_symbol_caps_runtime_history_limit_for_live_pipeline():
+    controller = SimpleNamespace(
+        broker=DummyBroker(),
+        symbols=["USD/JPY"],
+        time_frame="1h",
+        limit=50000,
+        strategy_name="Trend Following",
+        strategy_params={},
+        max_portfolio_risk=0.10,
+        max_risk_per_trade=0.02,
+        max_position_size_pct=0.10,
+        max_gross_exposure_pct=2.0,
+        balances={"total": {"USD": 10000}},
+        initial_capital=10000,
+        market_data_repository=None,
+        trade_repository=None,
+        handle_trade_execution=lambda trade: None,
+        publish_ai_signal=lambda *args, **kwargs: None,
+        publish_strategy_debug=lambda *args, **kwargs: None,
+    )
+
+    trading = SopotekTrading(controller=controller)
+    dataset = FakeDataset(_sample_frame())
+    captured = {}
+
+    async def fake_get_symbol_dataset(**kwargs):
+        captured.update(kwargs)
+        return dataset
+
+    async def fake_process_signal(symbol, signal, dataset=None):
+        return {"status": "filled", "symbol": symbol, "dataset": dataset}
+
+    trading.data_hub.get_symbol_dataset = fake_get_symbol_dataset
+    trading.signal_engine.generate_signal = lambda **kwargs: {
+        "symbol": "USD/JPY",
+        "side": "buy",
+        "amount": 1.0,
+        "confidence": 0.65,
+        "reason": "runtime cap test",
+        "strategy_name": "Trend Following",
+    }
+    trading.process_signal = fake_process_signal
+
+    result = asyncio.run(trading.process_symbol("USD/JPY", timeframe="1h"))
+
+    assert result["status"] == "filled"
+    assert captured["symbol"] == "USD/JPY"
+    assert captured["timeframe"] == "1h"
+    assert captured["limit"] == SopotekTrading.MAX_RUNTIME_ANALYSIS_BARS

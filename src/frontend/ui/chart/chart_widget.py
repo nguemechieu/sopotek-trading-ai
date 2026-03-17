@@ -5,6 +5,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -54,11 +55,47 @@ from frontend.ui.chart.indicator_utils import (
 )
 
 
+TIMEFRAME_OPTIONS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1mn"]
+
+
+class TradingDateAxisItem(DateAxisItem):
+    def tickStrings(self, values, scale, spacing):
+        labels = []
+        if spacing < 60:
+            time_format = "%m-%d %H:%M:%S"
+        elif spacing < 86400:
+            time_format = "%m-%d %H:%M"
+        elif spacing < 31 * 86400:
+            time_format = "%Y-%m-%d"
+        else:
+            time_format = "%Y-%m"
+
+        for value in values:
+            try:
+                numeric = float(value)
+            except Exception:
+                labels.append("")
+                continue
+
+            if not np.isfinite(numeric):
+                labels.append("")
+                continue
+
+            try:
+                dt = datetime.fromtimestamp(numeric, tz=timezone.utc)
+                labels.append(dt.strftime(time_format))
+            except Exception:
+                labels.append("")
+
+        return labels
+
+
 class ChartWidget(QWidget):
     sigMouseMoved = QtCore.Signal(object)
     sigTradeLevelRequested = QtCore.Signal(dict)
     sigTradeLevelChanged = QtCore.Signal(dict)
     sigTradeContextAction = QtCore.Signal(dict)
+    sigTimeframeSelected = QtCore.Signal(str)
 
     def __init__(self, symbol: str, timeframe: str, controller, candle_up_color: str = "#26a69a", candle_down_color: str = "#ef5350"):
         super().__init__()
@@ -99,6 +136,7 @@ class ChartWidget(QWidget):
         self._trade_overlay_state = {"side": "buy", "entry": None, "stop_loss": None, "take_profit": None}
         self._last_orderbook_bids = []
         self._last_orderbook_asks = []
+        self._timeframe_picker_updating = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -142,7 +180,48 @@ class ChartWidget(QWidget):
         self.market_micro_label = QLabel()
         self.market_micro_label.setStyleSheet("color: #9aa4b2; font-size: 11px;")
         center_info.addWidget(self.market_micro_label)
+
+        self.background_context_label = QLabel()
+        self.background_context_label.setStyleSheet("color: #e7c56f; font-size: 11px; font-weight: 700;")
+        self.background_context_label.setWordWrap(True)
+        center_info.addWidget(self.background_context_label)
         info_layout.addLayout(center_info, 3)
+
+        timeframe_info = QVBoxLayout()
+        timeframe_info.setContentsMargins(0, 0, 0, 0)
+        timeframe_info.setSpacing(2)
+
+        timeframe_title = QLabel("Timeframe")
+        timeframe_title.setStyleSheet("color: #728198; font-size: 11px; font-weight: 700;")
+        timeframe_info.addWidget(timeframe_title)
+
+        self.timeframe_picker = QComboBox()
+        self.timeframe_picker.setMinimumWidth(96)
+        self.timeframe_picker.setMaximumWidth(112)
+        self.timeframe_picker.setStyleSheet(
+            """
+            QComboBox {
+                background-color: #11161f;
+                color: #f6f8fb;
+                border: 1px solid #273142;
+                border-radius: 10px;
+                padding: 5px 10px;
+                font-weight: 700;
+            }
+            QComboBox::drop-down {
+                border: 0;
+                width: 20px;
+            }
+            """
+        )
+        self.timeframe_picker.addItems(TIMEFRAME_OPTIONS)
+        if self.timeframe_picker.findText(str(self.timeframe)) < 0:
+            self.timeframe_picker.addItem(str(self.timeframe))
+        self.timeframe_picker.setCurrentText(str(self.timeframe))
+        self.timeframe_picker.setToolTip("Select the timeframe for this chart.")
+        self.timeframe_picker.currentTextChanged.connect(self._handle_timeframe_picker_changed)
+        timeframe_info.addWidget(self.timeframe_picker)
+        info_layout.addLayout(timeframe_info, 0)
 
         self.ohlcv_label = QLabel()
         self.ohlcv_label.setStyleSheet("color: #dde5ef; font-weight: 700; font-size: 11px;")
@@ -199,7 +278,7 @@ class ChartWidget(QWidget):
         candlestick_layout.addWidget(self.splitter)
         self.market_tabs.addTab(self.candlestick_page, "Candlestick")
 
-        date_axis_top = DateAxisItem(orientation="bottom")
+        date_axis_top = TradingDateAxisItem(orientation="bottom")
         self.price_plot = PlotWidget(axisItems={"bottom": date_axis_top})
         self.price_plot.setLabel("right", "Price")
         self.price_plot.hideAxis("left")
@@ -225,7 +304,7 @@ class ChartWidget(QWidget):
         self.price_plot.addItem(self.news_markers)
         self.price_plot.addItem(self.trade_scatter)
 
-        date_axis_mid = DateAxisItem(orientation="bottom")
+        date_axis_mid = TradingDateAxisItem(orientation="bottom")
         self.volume_plot = PlotWidget(axisItems={"bottom": date_axis_mid})
         self.volume_plot.setXLink(self.price_plot)
         self.volume_plot.setLabel("left", "Volume")
@@ -237,11 +316,11 @@ class ChartWidget(QWidget):
         self.volume_bars = pg.BarGraphItem(x=[], height=[], width=60.0, brush="#5c6bc0")
         self.volume_plot.addItem(self.volume_bars)
 
-        date_axis_bottom = DateAxisItem(orientation="bottom")
+        date_axis_bottom = TradingDateAxisItem(orientation="bottom")
         self.heatmap_plot = PlotWidget(axisItems={"bottom": date_axis_bottom})
         self.heatmap_plot.setXLink(self.price_plot)
         self.heatmap_plot.setLabel("left", "Orderbook")
-        self.heatmap_plot.setLabel("bottom", "Gregorian Time")
+        self.heatmap_plot.setLabel("bottom", "Date / Time (UTC)")
         self.heatmap_plot.setMinimumHeight(120)
         self.splitter.addWidget(self.heatmap_plot)
 
@@ -327,8 +406,8 @@ class ChartWidget(QWidget):
         self.market_tabs.addTab(self.market_info_page, "Market Info")
 
         self._style_plot(self.price_plot, right_label="Price", show_bottom=False)
-        self._style_plot(self.volume_plot, left_label="Volume", show_bottom=False)
-        self._style_plot(self.heatmap_plot, left_label="Orderbook", bottom_label="Time", show_bottom=True)
+        self._style_plot(self.volume_plot, left_label="Volume", bottom_label="Date / Time (UTC)", show_bottom=True)
+        self._style_plot(self.heatmap_plot, left_label="Orderbook", bottom_label="Date / Time (UTC)", show_bottom=False)
 
         self.v_line = InfiniteLine(angle=90, movable=False, pen=mkPen((142, 164, 196, 90), width=1, style=QtCore.Qt.PenStyle.DashLine))
         self.h_line = InfiniteLine(angle=0, movable=False, pen=mkPen((142, 164, 196, 90), width=1, style=QtCore.Qt.PenStyle.DashLine))
@@ -445,7 +524,7 @@ class ChartWidget(QWidget):
         if existing is not None:
             return existing
 
-        axis = DateAxisItem(orientation="bottom")
+        axis = TradingDateAxisItem(orientation="bottom")
         pane = PlotWidget(axisItems={"bottom": axis})
         pane.setXLink(self.price_plot)
         pane.hideAxis("right")
@@ -880,6 +959,31 @@ class ChartWidget(QWidget):
             "1mn": "1 month chart",
         }
         return mapping.get(str(self.timeframe).lower(), f"{self.timeframe} chart")
+
+    def _handle_timeframe_picker_changed(self, value):
+        if self._timeframe_picker_updating:
+            return
+        self.set_timeframe(value, emit_signal=True)
+
+    def set_timeframe(self, timeframe, emit_signal=False):
+        normalized = str(timeframe or self.timeframe or "1h").strip().lower() or "1h"
+        previous = str(getattr(self, "timeframe", "") or "").strip().lower()
+        self.timeframe = normalized
+
+        picker = getattr(self, "timeframe_picker", None)
+        if picker is not None:
+            if picker.findText(normalized) < 0:
+                picker.addItem(normalized)
+            self._timeframe_picker_updating = True
+            try:
+                picker.setCurrentText(normalized)
+            finally:
+                self._timeframe_picker_updating = False
+
+        if previous != normalized:
+            self.refresh_context_display()
+            if emit_signal:
+                self.sigTimeframeSelected.emit(normalized)
 
     def _update_chart_header(self):
         base, quote = self._symbol_parts()
@@ -2238,3 +2342,9 @@ class ChartWidget(QWidget):
 
     def link_all_charts(self, _count):
         return
+
+from frontend.ui.chart.chart_market_context import install_chart_market_context
+from frontend.ui.chart.chart_trade_features import install_chart_trade_features
+
+install_chart_market_context(ChartWidget)
+install_chart_trade_features(ChartWidget)

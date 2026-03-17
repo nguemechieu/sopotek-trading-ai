@@ -12,7 +12,7 @@ from pathlib import Path
 
 import aiohttp
 import pandas as pd
-from PySide6.QtCore import QSettings, Signal
+from PySide6.QtCore import QSettings, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -52,6 +52,7 @@ from market_data.websocket.coinbase_web_socket import CoinbaseWebSocket
 from market_data.websocket.paper_web_socket import PaperWebSocket
 from licensing.license_manager import LicenseManager
 from storage.database import configure_database, get_database_url, init_database
+from storage.equity_repository import EquitySnapshotRepository
 from storage.market_data_repository import MarketDataRepository
 from storage.trade_repository import TradeRepository
 from strategy.strategy import Strategy
@@ -60,6 +61,23 @@ try:
     import winsound
 except Exception:  # pragma: no cover - non-Windows fallback
     winsound = None
+
+
+def _bounded_window_extent(requested, available, *, margin=24, minimum=640):
+    try:
+        requested_value = int(requested)
+    except Exception:
+        requested_value = int(minimum)
+
+    try:
+        available_value = int(available)
+    except Exception:
+        available_value = requested_value
+
+    usable = max(320, available_value - max(0, int(margin)))
+    bounded_minimum = min(max(320, int(minimum)), usable)
+    bounded_size = max(bounded_minimum, min(requested_value, usable))
+    return bounded_size, bounded_minimum
 
 
 class AppController(QMainWindow):
@@ -245,6 +263,25 @@ class AppController(QMainWindow):
         )
         self.symbol_strategy_assignments = self._load_strategy_symbol_payload("strategy/symbol_assignments")
         self.symbol_strategy_rankings = self._load_strategy_symbol_payload("strategy/symbol_rankings")
+        self.symbol_strategy_locks = self._load_strategy_symbol_lock_payload(
+            "strategy/symbol_assignment_locks",
+            fallback_symbols=list(self.symbol_strategy_assignments.keys()),
+        )
+        self.strategy_auto_assignment_enabled = str(
+            self.settings.value("strategy/auto_assignment_enabled", "true")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self.strategy_auto_assignment_ready = not self.strategy_auto_assignment_enabled
+        self.strategy_auto_assignment_in_progress = False
+        self.strategy_auto_assignment_progress = {
+            "completed": 0,
+            "total": 0,
+            "current_symbol": "",
+            "timeframe": self.time_frame,
+            "updated_at": "",
+            "message": "Waiting to scan symbols.",
+            "failed_symbols": [],
+        }
+        self._strategy_auto_assignment_task = None
 
         self.portfolio = None
         self.ai_signal = None
@@ -518,13 +555,24 @@ class AppController(QMainWindow):
             payload = raw_value if isinstance(raw_value, list) else []
 
         history = []
-        for value in list(payload or [])[-2000:]:
+        for item in list(payload or [])[-2000:]:
+            timestamp = None
+            value = item
+            if isinstance(item, dict):
+                timestamp = item.get("timestamp")
+                value = item.get("equity", item.get("value"))
+
             try:
                 numeric = float(value)
             except Exception:
                 continue
-            if pd.notna(numeric):
+            if not pd.notna(numeric):
+                continue
+
+            if timestamp in (None, ""):
                 history.append(numeric)
+            else:
+                history.append({"equity": numeric, "timestamp": timestamp})
         return history
 
     def _persist_performance_history(self):
@@ -533,23 +581,105 @@ class AppController(QMainWindow):
         if perf is None or settings is None:
             return
 
+        equity_values = list(getattr(perf, "equity_curve", []) or [])[-2000:]
+        equity_timestamps = list(getattr(perf, "equity_timestamps", []) or [])[-len(equity_values):]
+
         history = []
-        for value in list(getattr(perf, "equity_curve", []) or [])[-2000:]:
+        for index, value in enumerate(equity_values):
             try:
                 numeric = float(value)
             except Exception:
                 continue
-            if pd.notna(numeric):
+            if not pd.notna(numeric):
+                continue
+
+            timestamp = equity_timestamps[index] if index < len(equity_timestamps) else None
+            if timestamp in (None, ""):
                 history.append(numeric)
+            else:
+                try:
+                    history.append({"equity": numeric, "timestamp": float(timestamp)})
+                except Exception:
+                    history.append({"equity": numeric, "timestamp": timestamp})
         settings.setValue("performance/equity_history", json.dumps(history))
+
+    def _load_persisted_equity_history_from_repository(self, limit=2000):
+        repository = getattr(self, "equity_repository", None)
+        if repository is None or not hasattr(repository, "get_snapshots"):
+            return []
+
+        exchange = self._active_exchange_code() if hasattr(self, "_active_exchange_code") else None
+        account_label = self.current_account_label() if hasattr(self, "current_account_label") else None
+        if str(account_label or "").strip().lower() == "not set":
+            account_label = None
+
+        try:
+            snapshots = repository.get_snapshots(limit=limit, exchange=exchange, account_label=account_label)
+        except TypeError:
+            snapshots = repository.get_snapshots(limit=limit)
+        except Exception:
+            self.logger.debug("Unable to restore equity snapshot ledger", exc_info=True)
+            return []
+
+        history = []
+        for item in reversed(list(snapshots or [])):
+            equity = getattr(item, "equity", None)
+            if equity in (None, ""):
+                continue
+            timestamp = getattr(item, "timestamp", None)
+            if isinstance(timestamp, datetime):
+                timestamp = timestamp.replace(tzinfo=timezone.utc).timestamp() if timestamp.tzinfo is None else timestamp.astimezone(timezone.utc).timestamp()
+            history.append({"equity": float(equity), "timestamp": timestamp})
+        return history
+
+    def _persist_equity_snapshot(self, equity, balances=None):
+        repository = getattr(self, "equity_repository", None)
+        if repository is None or not hasattr(repository, "save_snapshot"):
+            return None
+
+        balance_payload = balances if isinstance(balances, dict) else getattr(self, "balances", {}) or {}
+        exchange = self._active_exchange_code() if hasattr(self, "_active_exchange_code") else None
+        account_label = self.current_account_label() if hasattr(self, "current_account_label") else None
+        if str(account_label or "").strip().lower() == "not set":
+            account_label = None
+
+        balance_value = self._balance_metric_value(
+            balance_payload,
+            "balance",
+            "cash",
+            "equity",
+            "nav",
+            "net_liquidation",
+            "account_value",
+        )
+        free_margin = self._safe_balance_metric(balance_payload.get("free")) if isinstance(balance_payload, dict) else None
+        used_margin = self._safe_balance_metric(balance_payload.get("used")) if isinstance(balance_payload, dict) else None
+
+        try:
+            return repository.save_snapshot(
+                equity=float(equity),
+                exchange=exchange,
+                account_label=account_label,
+                balance=balance_value,
+                free_margin=free_margin,
+                used_margin=used_margin,
+                payload=balance_payload,
+            )
+        except Exception:
+            self.logger.debug("Unable to persist equity snapshot ledger", exc_info=True)
+            return None
 
     def _restore_performance_state(self):
         perf = getattr(self, "performance_engine", None)
         if perf is None:
             return
 
+        equity_history = self._load_persisted_equity_history_from_repository(limit=2000)
+        if not equity_history:
+            equity_history = self._load_persisted_performance_history()
+
         if hasattr(perf, "load_equity_history"):
-            perf.load_equity_history(self._load_persisted_performance_history())
+            perf.load_equity_history(equity_history)
 
         repository = getattr(self, "trade_repository", None)
         if repository is None or not hasattr(repository, "get_trades"):
@@ -622,6 +752,7 @@ class AppController(QMainWindow):
         self.database_connection_url = configured_url or get_database_url()
         self.market_data_repository = MarketDataRepository()
         self.trade_repository = TradeRepository()
+        self.equity_repository = EquitySnapshotRepository()
         self._rebind_storage_dependencies()
 
         if persist:
@@ -633,6 +764,8 @@ class AppController(QMainWindow):
     def _setup_ui(self, controller):
         self.setWindowTitle("Sopotek Trading AI Platform")
         self.resize(1600, 900)
+        self.setMinimumSize(960, 640)
+        self._fit_window_to_available_screen(requested_width=1600, requested_height=900)
 
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
@@ -641,6 +774,28 @@ class AppController(QMainWindow):
         self.stack.addWidget(self.dashboard)
 
         self.dashboard.login_requested.connect(self._on_login_requested)
+
+    def _fit_window_to_available_screen(self, requested_width=None, requested_height=None):
+        screen = self.screen()
+        if screen is None:
+            app = QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        width, minimum_width = _bounded_window_extent(
+            requested_width if requested_width is not None else self.width() or 1600,
+            available.width(),
+            minimum=960,
+        )
+        height, minimum_height = _bounded_window_extent(
+            requested_height if requested_height is not None else self.height() or 900,
+            available.height(),
+            minimum=640,
+        )
+        self.setMinimumSize(minimum_width, minimum_height)
+        self.resize(width, height)
 
     def _on_login_requested(self, config):
         self._create_task(self.handle_login(config), "handle_login")
@@ -743,6 +898,7 @@ class AppController(QMainWindow):
 
                 await self.initialize_trading()
                 self.symbols_signal.emit(exchange, self.symbols)
+                self.schedule_strategy_auto_assignment(symbols=self.symbols, timeframe=self.time_frame, force=False)
                 await self._restart_telegram_service()
 
                 await self._start_market_stream()
@@ -974,6 +1130,8 @@ class AppController(QMainWindow):
             self.terminal = Terminal(self)
             self.stack.addWidget(self.terminal)
             self.stack.setCurrentWidget(self.terminal)
+            self._fit_window_to_available_screen()
+            QTimer.singleShot(0, self._fit_window_to_available_screen)
             self.terminal.logout_requested.connect(self._on_logout_requested)
             if hasattr(self.terminal, "load_persisted_runtime_data"):
                 await self.terminal.load_persisted_runtime_data()
@@ -1086,6 +1244,8 @@ class AppController(QMainWindow):
                     self.symbols = list(updated_symbols)
                     exchange_name = getattr(broker, "exchange_name", getattr(broker_cfg, "exchange", "broker")) or "broker"
                     self.symbols_signal.emit(str(exchange_name), list(self.symbols))
+                    if getattr(self, "connected", False):
+                        self.schedule_strategy_auto_assignment(symbols=self.symbols, timeframe=self.time_frame, force=False)
 
     async def request_news(self, symbol, force=False, max_age_seconds=300):
         normalized = str(symbol or "").upper().strip()
@@ -1313,6 +1473,7 @@ class AppController(QMainWindow):
                 assignment_mode = str(
                     row.get("assignment_mode") or ("ranked" if len(source_rows) > 1 else "single")
                 ).strip().lower()
+                assignment_source = str(row.get("assignment_source") or "manual").strip().lower()
                 cleaned_rows.append(
                     {
                         "strategy_name": strategy_name,
@@ -1321,6 +1482,7 @@ class AppController(QMainWindow):
                         "symbol": normalized_symbol,
                         "timeframe": str(row.get("timeframe") or "").strip(),
                         "assignment_mode": assignment_mode if assignment_mode in {"single", "ranked"} else "single",
+                        "assignment_source": assignment_source if assignment_source in {"manual", "auto"} else "manual",
                         "rank": int(row.get("rank", len(cleaned_rows) + 1) or (len(cleaned_rows) + 1)),
                         "total_profit": float(row.get("total_profit", 0.0) or 0.0),
                         "sharpe_ratio": float(row.get("sharpe_ratio", 0.0) or 0.0),
@@ -1335,10 +1497,476 @@ class AppController(QMainWindow):
         return normalized
 
     def _persist_strategy_symbol_state(self):
+        lock_set = getattr(self, "symbol_strategy_locks", None)
+        if not isinstance(lock_set, set):
+            lock_set = set(lock_set or [])
+            self.symbol_strategy_locks = lock_set
         self.settings.setValue("strategy/multi_strategy_enabled", bool(self.multi_strategy_enabled))
         self.settings.setValue("strategy/max_symbol_strategies", int(self.max_symbol_strategies))
         self.settings.setValue("strategy/symbol_assignments", json.dumps(self.symbol_strategy_assignments))
         self.settings.setValue("strategy/symbol_rankings", json.dumps(self.symbol_strategy_rankings))
+        self.settings.setValue("strategy/symbol_assignment_locks", json.dumps(sorted(lock_set)))
+        self.settings.setValue("strategy/auto_assignment_enabled", bool(getattr(self, "strategy_auto_assignment_enabled", True)))
+
+    def _load_strategy_symbol_lock_payload(self, key, fallback_symbols=None):
+        raw_value = self.settings.value(key, None)
+        payload = None
+        if raw_value not in (None, ""):
+            try:
+                payload = json.loads(raw_value)
+            except Exception:
+                payload = None
+
+        if payload is None:
+            source = list(fallback_symbols or [])
+        elif isinstance(payload, dict):
+            source = [symbol for symbol, locked in payload.items() if locked]
+        elif isinstance(payload, (list, tuple, set)):
+            source = list(payload)
+        else:
+            source = []
+
+        normalized = []
+        for symbol in source:
+            normalized_symbol = self._normalize_strategy_symbol_key(symbol)
+            if normalized_symbol and normalized_symbol not in normalized:
+                normalized.append(normalized_symbol)
+        return set(normalized)
+
+    def _mark_symbol_strategy_assignment_locked(self, symbol, locked=True):
+        normalized_symbol = self._normalize_strategy_symbol_key(symbol)
+        lock_set = getattr(self, "symbol_strategy_locks", None)
+        if not isinstance(lock_set, set):
+            lock_set = set(lock_set or [])
+            self.symbol_strategy_locks = lock_set
+        if not normalized_symbol:
+            return False
+        if locked:
+            lock_set.add(normalized_symbol)
+        else:
+            lock_set.discard(normalized_symbol)
+        return normalized_symbol in lock_set
+
+    def symbol_strategy_assignment_locked(self, symbol):
+        normalized_symbol = self._normalize_strategy_symbol_key(symbol)
+        lock_set = getattr(self, "symbol_strategy_locks", set()) or set()
+        return normalized_symbol in lock_set
+
+    def _strategy_auto_assignment_symbols(self, symbols=None):
+        symbol_sources = []
+        if symbols is not None:
+            symbol_sources.append(list(symbols or []))
+        else:
+            symbol_sources.extend(
+                [
+                    list(getattr(self, "symbols", []) or []),
+                    list(getattr(self, "symbol_strategy_assignments", {}).keys()),
+                    list(getattr(self, "symbol_strategy_rankings", {}).keys()),
+                    list(getattr(self, "symbol_strategy_locks", set()) or set()),
+                ]
+            )
+
+        symbol_candidates = []
+        for source in symbol_sources:
+            for symbol in list(source or []):
+                normalized_symbol = self._normalize_strategy_symbol_key(symbol)
+                if normalized_symbol and normalized_symbol not in symbol_candidates:
+                    symbol_candidates.append(normalized_symbol)
+        return symbol_candidates
+
+    def _symbol_has_saved_strategy_state(self, symbol):
+        normalized_symbol = self._normalize_strategy_symbol_key(symbol)
+        if not normalized_symbol:
+            return False
+        if self.symbol_strategy_assignment_locked(normalized_symbol):
+            return True
+        assigned_rows = list((getattr(self, "symbol_strategy_assignments", {}) or {}).get(normalized_symbol, []) or [])
+        return bool(assigned_rows)
+
+    def _partition_strategy_auto_assignment_symbols(self, symbols=None):
+        symbol_candidates = self._strategy_auto_assignment_symbols(symbols=symbols)
+        restored_symbols = []
+        missing_symbols = []
+        for symbol in symbol_candidates:
+            if self._symbol_has_saved_strategy_state(symbol):
+                restored_symbols.append(symbol)
+            else:
+                missing_symbols.append(symbol)
+        return symbol_candidates, missing_symbols, restored_symbols
+
+    def _restore_saved_strategy_assignments(self, restored_symbols, timeframe=None, message=None):
+        timeframe_value = str(timeframe or getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+        restored_symbols = list(restored_symbols or [])
+        restored_count = len(restored_symbols)
+        summary_message = message or (
+            f"Loaded saved strategy assignments for {restored_count} symbol{'s' if restored_count != 1 else ''}."
+            if restored_count
+            else "No saved strategy assignments were available."
+        )
+
+        self.strategy_auto_assignment_in_progress = False
+        self.strategy_auto_assignment_ready = True
+        self._update_strategy_auto_assignment_progress(
+            completed=restored_count,
+            total=restored_count,
+            current_symbol="",
+            timeframe=timeframe_value,
+            message=summary_message,
+            failed_symbols=[],
+        )
+
+        trading_system = getattr(self, "trading_system", None)
+        if trading_system is not None and hasattr(trading_system, "refresh_strategy_preferences"):
+            try:
+                trading_system.refresh_strategy_preferences()
+            except Exception:
+                pass
+
+        return {
+            "assigned_symbols": [],
+            "restored_symbols": list(restored_symbols),
+            "skipped_symbols": [],
+            "failed_symbols": [],
+            "timeframe": timeframe_value,
+        }
+
+    def strategy_auto_assignment_status(self):
+        progress = dict(getattr(self, "strategy_auto_assignment_progress", {}) or {})
+        progress["failed_symbols"] = list(progress.get("failed_symbols", []) or [])
+        progress["enabled"] = bool(getattr(self, "strategy_auto_assignment_enabled", True))
+        progress["running"] = bool(getattr(self, "strategy_auto_assignment_in_progress", False))
+        progress["ready"] = (not progress["enabled"]) or bool(getattr(self, "strategy_auto_assignment_ready", False))
+        progress["locked_symbols"] = sorted(list(getattr(self, "symbol_strategy_locks", set()) or set()))
+        progress["assigned_symbols"] = len(getattr(self, "symbol_strategy_assignments", {}) or {})
+        return progress
+
+    def _update_strategy_auto_assignment_progress(self, **changes):
+        snapshot = dict(getattr(self, "strategy_auto_assignment_progress", {}) or {})
+        snapshot.update(changes)
+        snapshot["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if "failed_symbols" not in snapshot:
+            snapshot["failed_symbols"] = []
+        else:
+            snapshot["failed_symbols"] = list(snapshot.get("failed_symbols", []) or [])
+        self.strategy_auto_assignment_progress = snapshot
+        terminal = getattr(self, "terminal", None)
+        if terminal is None:
+            return snapshot
+        window = getattr(terminal, "detached_tool_windows", {}).get("strategy_assignments")
+        if window is not None and hasattr(terminal, "_refresh_strategy_assignment_window"):
+            try:
+                terminal._refresh_strategy_assignment_window(window=window, message=snapshot.get("message"))
+            except Exception:
+                pass
+        return snapshot
+
+    def _strategy_registry_for_auto_assignment(self):
+        trading_system = getattr(self, "trading_system", None)
+        registry = getattr(trading_system, "strategy", None)
+        if registry is not None and hasattr(registry, "list"):
+            return registry
+        from strategy.strategy_registry import StrategyRegistry
+
+        return StrategyRegistry()
+
+    def _build_strategy_ranker(self, strategy_registry):
+        from backtesting.strategy_ranker import StrategyRanker
+
+        return StrategyRanker(
+            strategy_registry=strategy_registry,
+            initial_balance=getattr(self, "initial_capital", 10000),
+        )
+
+    def _normalize_strategy_ranking_frame(self, dataset):
+        if dataset is None:
+            return None
+        frame = dataset.copy() if hasattr(dataset, "copy") else pd.DataFrame(dataset)
+        if not isinstance(frame, pd.DataFrame):
+            frame = pd.DataFrame(frame)
+        if frame.empty:
+            return None
+
+        lowered = {str(column).strip().lower(): column for column in frame.columns}
+        if all(name in lowered for name in ("timestamp", "open", "high", "low", "close", "volume")):
+            normalized = frame[[lowered[name] for name in ("timestamp", "open", "high", "low", "close", "volume")]].copy()
+            normalized.columns = ["timestamp", "open", "high", "low", "close", "volume"]
+        elif frame.shape[1] >= 6:
+            normalized = frame.iloc[:, :6].copy()
+            normalized.columns = ["timestamp", "open", "high", "low", "close", "volume"]
+        else:
+            return None
+
+        for column in ("open", "high", "low", "close", "volume"):
+            normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+        normalized.dropna(subset=["open", "high", "low", "close"], inplace=True)
+        if normalized.empty:
+            return None
+        return normalized.reset_index(drop=True)
+
+    def save_ranked_strategies_for_symbol(self, symbol, rankings, timeframe=None, assignment_source="manual", persist=True):
+        normalized_symbol = self._normalize_strategy_symbol_key(symbol)
+        assignment_source = str(assignment_source or "manual").strip().lower()
+        if assignment_source not in {"manual", "auto"}:
+            assignment_source = "manual"
+
+        cleaned_rows = []
+        for index, row in enumerate(list(rankings or []), start=1):
+            if not isinstance(row, dict):
+                continue
+            strategy_name = Strategy.normalize_strategy_name(row.get("strategy_name"))
+            if not strategy_name:
+                continue
+            cleaned_rows.append(
+                {
+                    "strategy_name": strategy_name,
+                    "score": float(row.get("score", 0.0) or 0.0),
+                    "weight": float(row.get("weight", 0.0) or 0.0),
+                    "symbol": normalized_symbol,
+                    "timeframe": str(row.get("timeframe") or timeframe or self.time_frame or "").strip(),
+                    "assignment_mode": "ranked",
+                    "assignment_source": assignment_source,
+                    "rank": int(row.get("rank", index) or index),
+                    "total_profit": float(row.get("total_profit", 0.0) or 0.0),
+                    "sharpe_ratio": float(row.get("sharpe_ratio", 0.0) or 0.0),
+                    "win_rate": float(row.get("win_rate", 0.0) or 0.0),
+                    "final_equity": float(row.get("final_equity", 0.0) or 0.0),
+                    "max_drawdown": float(row.get("max_drawdown", 0.0) or 0.0),
+                    "closed_trades": int(row.get("closed_trades", 0) or 0),
+                }
+            )
+        cleaned_rows.sort(key=lambda item: (-float(item.get("score", 0.0) or 0.0), int(item.get("rank", 0) or 0)))
+        if cleaned_rows:
+            self.symbol_strategy_rankings[normalized_symbol] = cleaned_rows
+        else:
+            self.symbol_strategy_rankings.pop(normalized_symbol, None)
+        if persist:
+            self._persist_strategy_symbol_state()
+        return list(cleaned_rows)
+
+    def schedule_strategy_auto_assignment(self, symbols=None, timeframe=None, force=False):
+        if not bool(getattr(self, "strategy_auto_assignment_enabled", True)) and not force:
+            self.strategy_auto_assignment_ready = True
+            return None
+        if not force:
+            _all_symbols, missing_symbols, restored_symbols = self._partition_strategy_auto_assignment_symbols(symbols=symbols)
+            if restored_symbols and not missing_symbols:
+                self._strategy_auto_assignment_task = None
+                self._restore_saved_strategy_assignments(
+                    restored_symbols,
+                    timeframe=timeframe,
+                )
+                return None
+            if missing_symbols:
+                symbols = list(missing_symbols)
+        task = getattr(self, "_strategy_auto_assignment_task", None)
+        if task is not None and not task.done():
+            return task
+        self.strategy_auto_assignment_ready = False
+        self._strategy_auto_assignment_task = asyncio.get_event_loop().create_task(
+            self.auto_rank_and_assign_strategies(symbols=symbols, timeframe=timeframe, force=force)
+        )
+        return self._strategy_auto_assignment_task
+
+    async def auto_rank_and_assign_strategies(self, symbols=None, timeframe=None, force=False, min_candles=120, history_limit=240):
+        if not bool(getattr(self, "strategy_auto_assignment_enabled", True)) and not force:
+            self.strategy_auto_assignment_ready = True
+            return self.strategy_auto_assignment_status()
+
+        timeframe_value = str(timeframe or getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+        symbol_candidates = self._strategy_auto_assignment_symbols(symbols=symbols)
+        restored_symbols = []
+        if not force:
+            _all_symbols, missing_symbols, restored_symbols = self._partition_strategy_auto_assignment_symbols(symbols=symbols)
+            symbol_candidates = list(missing_symbols)
+
+        registry = self._strategy_registry_for_auto_assignment()
+        strategy_names = list(getattr(registry, "list", lambda: [])() or [])
+        if restored_symbols and not symbol_candidates:
+            return self._restore_saved_strategy_assignments(restored_symbols, timeframe=timeframe_value)
+        if not symbol_candidates or not strategy_names:
+            self.strategy_auto_assignment_in_progress = False
+            self.strategy_auto_assignment_ready = True
+            self._update_strategy_auto_assignment_progress(
+                completed=len(symbol_candidates),
+                total=len(symbol_candidates),
+                current_symbol="",
+                timeframe=timeframe_value,
+                message="No symbols or strategies available for automatic assignment.",
+                failed_symbols=[],
+            )
+            return self.strategy_auto_assignment_status()
+
+        self.strategy_auto_assignment_in_progress = True
+        self.strategy_auto_assignment_ready = False
+        scan_message = f"Scanning {len(symbol_candidates)} symbols and ranking {len(strategy_names)} strategies."
+        if restored_symbols:
+            scan_message = (
+                f"Loaded saved strategy assignments for {len(restored_symbols)} "
+                f"symbol{'s' if len(restored_symbols) != 1 else ''}. "
+                f"Scanning {len(symbol_candidates)} new symbol{'s' if len(symbol_candidates) != 1 else ''} "
+                f"and ranking {len(strategy_names)} strategies."
+            )
+        self._update_strategy_auto_assignment_progress(
+            completed=0,
+            total=len(symbol_candidates),
+            current_symbol="",
+            timeframe=timeframe_value,
+            message=scan_message,
+            failed_symbols=[],
+        )
+
+        terminal = getattr(self, "terminal", None)
+        system_console = getattr(terminal, "system_console", None) if terminal is not None else None
+        if system_console is not None:
+            system_console.log(
+                f"Scanning {len(symbol_candidates)} symbols and ranking {len(strategy_names)} strategies before manual overrides unlock.",
+                "INFO",
+            )
+
+        assigned_symbols = []
+        skipped_symbols = []
+        failed_symbols = []
+        refreshed_preferences = False
+        ranker = self._build_strategy_ranker(registry)
+
+        try:
+            for index, symbol in enumerate(symbol_candidates, start=1):
+                self._update_strategy_auto_assignment_progress(
+                    completed=index - 1,
+                    total=len(symbol_candidates),
+                    current_symbol=symbol,
+                    timeframe=timeframe_value,
+                    message=f"Scanning {symbol} ({index}/{len(symbol_candidates)}) and ranking strategies.",
+                    failed_symbols=failed_symbols,
+                )
+
+                symbol_cache = getattr(self, "candle_buffers", {}).get(symbol, {})
+                frame = self._normalize_strategy_ranking_frame(symbol_cache.get(timeframe_value) if isinstance(symbol_cache, dict) else None)
+                if frame is None or len(frame) < max(20, int(min_candles or 20)):
+                    try:
+                        fetched = await self.request_candle_data(symbol, timeframe=timeframe_value, limit=max(int(history_limit or 240), int(min_candles or 120)))
+                    except Exception as exc:
+                        fetched = None
+                        failed_symbols.append({"symbol": symbol, "reason": str(exc)})
+                    frame = self._normalize_strategy_ranking_frame(fetched)
+                    if frame is None:
+                        symbol_cache = getattr(self, "candle_buffers", {}).get(symbol, {})
+                        frame = self._normalize_strategy_ranking_frame(symbol_cache.get(timeframe_value) if isinstance(symbol_cache, dict) else None)
+
+                if frame is None or len(frame) < max(20, int(min_candles or 20)):
+                    if not any(item.get("symbol") == symbol for item in failed_symbols):
+                        failed_symbols.append(
+                            {
+                                "symbol": symbol,
+                                "reason": f"Not enough candle history for {symbol} ({timeframe_value}).",
+                            }
+                        )
+                    continue
+
+                results = await asyncio.to_thread(
+                    ranker.rank,
+                    frame.copy(),
+                    symbol,
+                    timeframe_value,
+                    strategy_names,
+                )
+                records = results.to_dict("records") if results is not None and not getattr(results, "empty", True) else []
+                if not records:
+                    failed_symbols.append({"symbol": symbol, "reason": f"No ranked strategies were produced for {symbol}."})
+                    continue
+
+                locked = self.symbol_strategy_assignment_locked(symbol)
+                if force or not locked:
+                    assigned = self.assign_ranked_strategies_to_symbol(
+                        symbol,
+                        records,
+                        top_n=int(getattr(self, "max_symbol_strategies", 3) or 3),
+                        timeframe=timeframe_value,
+                        assignment_source="auto",
+                        lock_symbol=False,
+                        refresh_preferences=False,
+                    )
+                    if assigned:
+                        assigned_symbols.append(symbol)
+                        refreshed_preferences = True
+                else:
+                    self.save_ranked_strategies_for_symbol(
+                        symbol,
+                        records,
+                        timeframe=timeframe_value,
+                        assignment_source="auto",
+                        persist=True,
+                    )
+                    skipped_symbols.append(symbol)
+
+                self._update_strategy_auto_assignment_progress(
+                    completed=index,
+                    total=len(symbol_candidates),
+                    current_symbol=symbol,
+                    timeframe=timeframe_value,
+                    message=f"Scanned {index}/{len(symbol_candidates)} symbols.",
+                    failed_symbols=failed_symbols,
+                )
+
+            if refreshed_preferences:
+                trading_system = getattr(self, "trading_system", None)
+                if trading_system is not None and hasattr(trading_system, "refresh_strategy_preferences"):
+                    try:
+                        trading_system.refresh_strategy_preferences()
+                    except Exception:
+                        pass
+
+            self.strategy_auto_assignment_in_progress = False
+            self.strategy_auto_assignment_ready = True
+            summary_message = (
+                f"Automatic strategy assignment completed: {len(assigned_symbols)} symbols assigned, "
+                f"{len(restored_symbols)} saved symbols restored, "
+                f"{len(skipped_symbols)} manual overrides preserved, {len(failed_symbols)} symbols skipped."
+            )
+            self._update_strategy_auto_assignment_progress(
+                completed=len(symbol_candidates),
+                total=len(symbol_candidates),
+                current_symbol="",
+                timeframe=timeframe_value,
+                message=summary_message,
+                failed_symbols=failed_symbols,
+            )
+            if system_console is not None:
+                system_console.log(summary_message, "INFO")
+            return {
+                "assigned_symbols": list(assigned_symbols),
+                "restored_symbols": list(restored_symbols),
+                "skipped_symbols": list(skipped_symbols),
+                "failed_symbols": list(failed_symbols),
+                "timeframe": timeframe_value,
+            }
+        except asyncio.CancelledError:
+            self.strategy_auto_assignment_in_progress = False
+            self.strategy_auto_assignment_ready = False
+            self._update_strategy_auto_assignment_progress(
+                completed=int((getattr(self, "strategy_auto_assignment_progress", {}) or {}).get("completed", 0) or 0),
+                total=len(symbol_candidates),
+                current_symbol="",
+                timeframe=timeframe_value,
+                message="Automatic strategy assignment was cancelled.",
+                failed_symbols=failed_symbols,
+            )
+            raise
+        except Exception as exc:
+            self.strategy_auto_assignment_in_progress = False
+            self.strategy_auto_assignment_ready = False
+            failure_message = f"Automatic strategy assignment failed: {exc}"
+            self._update_strategy_auto_assignment_progress(
+                completed=int((getattr(self, "strategy_auto_assignment_progress", {}) or {}).get("completed", 0) or 0),
+                total=len(symbol_candidates),
+                current_symbol="",
+                timeframe=timeframe_value,
+                message=failure_message,
+                failed_symbols=failed_symbols,
+            )
+            if system_console is not None:
+                system_console.log(failure_message, "ERROR")
+            raise
 
     def ranked_strategies_for_symbol(self, symbol):
         normalized_symbol = self._normalize_strategy_symbol_key(symbol)
@@ -1365,6 +1993,7 @@ class AppController(QMainWindow):
             "explicit_rows": explicit_rows,
             "active_rows": active_rows,
             "ranked_rows": ranked_rows,
+            "locked": self.symbol_strategy_assignment_locked(normalized_symbol),
         }
 
     def assigned_strategies_for_symbol(self, symbol):
@@ -1392,6 +2021,7 @@ class AppController(QMainWindow):
     def clear_symbol_strategy_assignment(self, symbol):
         normalized_symbol = self._normalize_strategy_symbol_key(symbol)
         removed = list(self.symbol_strategy_assignments.pop(normalized_symbol, []) or [])
+        self._mark_symbol_strategy_assignment_locked(normalized_symbol, True)
         self._persist_strategy_symbol_state()
 
         trading_system = getattr(self, "trading_system", None)
@@ -1419,6 +2049,7 @@ class AppController(QMainWindow):
                 "symbol": normalized_symbol,
                 "timeframe": str(timeframe or self.time_frame or "").strip(),
                 "assignment_mode": "single",
+                "assignment_source": "manual",
                 "rank": 1,
                 "total_profit": 0.0,
                 "sharpe_ratio": 0.0,
@@ -1429,6 +2060,7 @@ class AppController(QMainWindow):
             }
         ]
         self.symbol_strategy_assignments[normalized_symbol] = assigned
+        self._mark_symbol_strategy_assignment_locked(normalized_symbol, True)
         self._persist_strategy_symbol_state()
 
         trading_system = getattr(self, "trading_system", None)
@@ -1482,40 +2114,36 @@ class AppController(QMainWindow):
     def hedging_is_active(self, broker=None):
         return bool(getattr(self, "hedging_enabled", True)) and self.broker_supports_hedging(broker)
 
-    def assign_ranked_strategies_to_symbol(self, symbol, rankings, top_n=None, timeframe=None):
+    def assign_ranked_strategies_to_symbol(
+        self,
+        symbol,
+        rankings,
+        top_n=None,
+        timeframe=None,
+        assignment_source="manual",
+        lock_symbol=None,
+        refresh_preferences=True,
+    ):
         normalized_symbol = self._normalize_strategy_symbol_key(symbol)
         limit = max(1, int(top_n or self.max_symbol_strategies or 1))
         self.max_symbol_strategies = limit
-        cleaned_rows = []
-        for index, row in enumerate(list(rankings or []), start=1):
-            if not isinstance(row, dict):
-                continue
-            strategy_name = Strategy.normalize_strategy_name(row.get("strategy_name"))
-            if not strategy_name:
-                continue
-            cleaned_rows.append(
-                {
-                    "strategy_name": strategy_name,
-                    "score": float(row.get("score", 0.0) or 0.0),
-                    "weight": 0.0,
-                    "symbol": normalized_symbol,
-                    "timeframe": str(row.get("timeframe") or timeframe or self.time_frame or "").strip(),
-                    "assignment_mode": "ranked",
-                    "rank": int(row.get("rank", index) or index),
-                    "total_profit": float(row.get("total_profit", 0.0) or 0.0),
-                    "sharpe_ratio": float(row.get("sharpe_ratio", 0.0) or 0.0),
-                    "win_rate": float(row.get("win_rate", 0.0) or 0.0),
-                    "final_equity": float(row.get("final_equity", 0.0) or 0.0),
-                    "max_drawdown": float(row.get("max_drawdown", 0.0) or 0.0),
-                    "closed_trades": int(row.get("closed_trades", 0) or 0),
-                }
-            )
-        cleaned_rows.sort(key=lambda item: (-float(item.get("score", 0.0) or 0.0), int(item.get("rank", 0) or 0)))
-        if cleaned_rows:
-            self.symbol_strategy_rankings[normalized_symbol] = cleaned_rows
+        assignment_source = str(assignment_source or "manual").strip().lower()
+        if assignment_source not in {"manual", "auto"}:
+            assignment_source = "manual"
+        if lock_symbol is None:
+            lock_symbol = assignment_source != "auto"
+
+        cleaned_rows = self.save_ranked_strategies_for_symbol(
+            normalized_symbol,
+            rankings,
+            timeframe=timeframe,
+            assignment_source=assignment_source,
+            persist=False,
+        )
         top_rows = cleaned_rows[:limit]
         if not top_rows:
             self.symbol_strategy_assignments.pop(normalized_symbol, None)
+            self._mark_symbol_strategy_assignment_locked(normalized_symbol, bool(lock_symbol))
             self._persist_strategy_symbol_state()
             return []
 
@@ -1527,12 +2155,14 @@ class AppController(QMainWindow):
             assigned_item = dict(item)
             assigned_item["rank"] = index
             assigned_item["weight"] = float(weight_seed[index - 1] / total_weight)
+            assigned_item["assignment_source"] = assignment_source
             assigned.append(assigned_item)
         self.symbol_strategy_assignments[normalized_symbol] = assigned
+        self._mark_symbol_strategy_assignment_locked(normalized_symbol, bool(lock_symbol))
         self._persist_strategy_symbol_state()
 
         trading_system = getattr(self, "trading_system", None)
-        if trading_system is not None and hasattr(trading_system, "refresh_strategy_preferences"):
+        if refresh_preferences and trading_system is not None and hasattr(trading_system, "refresh_strategy_preferences"):
             try:
                 trading_system.refresh_strategy_preferences()
             except Exception:
@@ -3505,6 +4135,7 @@ class AppController(QMainWindow):
         try:
             perf.update_equity(equity)
             self._persist_performance_history()
+            self._persist_equity_snapshot(equity, balances if balances is not None else getattr(self, "balances", {}))
         except Exception:
             self.logger.debug("Performance equity update failed", exc_info=True)
             return None
@@ -5464,7 +6095,8 @@ class AppController(QMainWindow):
             self._market_data_shortfall_notices = notice_cache
         cache_key = (normalized_symbol, normalized_timeframe)
 
-        if received >= requested:
+        shortfall = max(0, requested - received)
+        if received >= requested or shortfall <= 1:
             notice_cache.pop(cache_key, None)
             return
 
@@ -5507,6 +6139,21 @@ class AppController(QMainWindow):
             await self.news_service.close()
             self._news_cache.clear()
             self._news_inflight.clear()
+
+            auto_assignment_task = getattr(self, "_strategy_auto_assignment_task", None)
+            if auto_assignment_task is not None and not auto_assignment_task.done():
+                auto_assignment_task.cancel()
+            self._strategy_auto_assignment_task = None
+            self.strategy_auto_assignment_in_progress = False
+            self.strategy_auto_assignment_ready = not bool(getattr(self, "strategy_auto_assignment_enabled", True))
+            self._update_strategy_auto_assignment_progress(
+                completed=0,
+                total=0,
+                current_symbol="",
+                timeframe=str(getattr(self, "time_frame", "1h") or "1h"),
+                message="Waiting to scan symbols.",
+                failed_symbols=[],
+            )
 
             if self._ticker_task and not self._ticker_task.done():
                 self._ticker_task.cancel()

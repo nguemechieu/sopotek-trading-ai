@@ -26,7 +26,6 @@ from config.config import AppConfig, BrokerConfig, RiskConfig, SystemConfig
 from config.credential_manager import CredentialManager
 from broker.market_venues import MARKET_VENUE_CHOICES, supported_market_venues_for_profile
 from frontend.ui.i18n import iter_supported_languages
-from strategy.strategy import Strategy
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -77,20 +76,6 @@ BROKER_COPY = {
     "forex": "Account-aware FX setup with the fields needed for a cleaner Oanda handoff.",
     "stocks": "Equity sessions tuned for Alpaca with a simpler launch path and saved profiles.",
     "paper": "A zero-risk rehearsal mode that still feels like the real desk experience.",
-}
-
-STRATEGY_COPY = {
-    "AI Hybrid": "Model-led decision support with classical fallback logic when AI confidence is not ready.",
-    "Trend Following": "Directional bias with momentum filters for cleaner trend participation.",
-    "Mean Reversion": "Best for calmer reversions and oversold bounce setups.",
-    "Breakout": "Range escape logic for expansion moves out of consolidation.",
-    "EMA Cross": "A familiar crossover structure with simple trend confirmation.",
-    "Momentum Continuation": "Chases strong participation when trend and momentum align together.",
-    "Pullback Trend": "Waits for a controlled retracement before rejoining the dominant move.",
-    "Volatility Breakout": "Looks for expansion in both range and participation before entry.",
-    "MACD Trend": "Balanced directional bias for swing-style continuation entries.",
-    "Range Fade": "Designed for quieter ranges where price is likely to rotate back inward.",
-
 }
 
 
@@ -579,8 +564,8 @@ class Dashboard(QWidget):
         headline_col.addWidget(self.hero_title_label)
 
         self.hero_lead_label = QLabel(
-            "Configure broker, strategy, and risk profile before launching the trading terminal. "
-            "This screen is designed to make the next step feel obvious, calm, and safe."
+            "Configure broker access and risk profile before launching the trading terminal. "
+            "Strategy assignment happens automatically per symbol after launch, with terminal overrides available when needed."
         )
         self.hero_lead_label.setObjectName("heroLead")
         self.hero_lead_label.setWordWrap(True)
@@ -608,14 +593,14 @@ class Dashboard(QWidget):
         market_layout.addWidget(self.market_title_label)
 
         self.market_body_label = QLabel(
-            "Use the dashboard like a pre-flight panel: confirm broker type, strategy posture, and credentials before the terminal takes over."
+            "Use the dashboard like a pre-flight panel: confirm broker type, credentials, and risk posture before the terminal takes over."
         )
         self.market_body_label.setObjectName("heroSectionBody")
         self.market_body_label.setWordWrap(True)
         market_layout.addWidget(self.market_body_label)
 
         self.market_primary = self._create_market_strip("Primary Venue", "Venue routing stays aligned with customer region and launch mode.")
-        self.market_secondary = self._create_market_strip("Strategy Lens", "AI Hybrid with moderate risk budget and cleaner onboarding copy.")
+        self.market_secondary = self._create_market_strip("Strategy Routing", "Per-symbol strategy ranking starts after launch, and terminal overrides stay available.")
         self.market_tertiary = self._create_market_strip("Operator Signal", "Saved profile support keeps repeat sessions faster and safer.")
         market_layout.addWidget(self.market_primary)
         market_layout.addWidget(self.market_secondary)
@@ -638,7 +623,7 @@ class Dashboard(QWidget):
 
         self.check_credentials = self._create_checklist_row("Credentials", "Needs input")
         self.check_broker = self._create_checklist_row("Broker setup", "Ready")
-        self.check_strategy = self._create_checklist_row("Strategy plan", "Ready")
+        self.check_strategy = self._create_checklist_row("Strategy routing", "Automatic")
         self.check_risk = self._create_checklist_row("Risk profile", "Conservative")
         checklist_layout.addWidget(self.check_credentials)
         checklist_layout.addWidget(self.check_broker)
@@ -762,11 +747,9 @@ class Dashboard(QWidget):
         self.market_type_box = QComboBox()
         for label, value in MARKET_VENUE_CHOICES:
             self.market_type_box.addItem(label, value)
-        self.strategy_box = QComboBox()
-        self.strategy_box.addItems(list(Strategy.AVAILABLE_STRATEGIES))
         strategy_row.addWidget(self._wrap_field("Mode", self.mode_box), 1)
         strategy_row.addWidget(self._wrap_field("Venue", self.market_type_box), 1)
-        strategy_row.addWidget(self._wrap_field("Strategy", self.strategy_box), 1)
+        strategy_row.addStretch(1)
         panel_layout.addLayout(strategy_row)
 
         self.credentials_label = QLabel("Credentials")
@@ -831,7 +814,7 @@ class Dashboard(QWidget):
         self.summary_body.setWordWrap(True)
         summary_layout.addWidget(self.summary_body)
 
-        self.summary_meta = QLabel("Risk 2%  |  Strategy AI Hybrid  |  Profile not saved yet")
+        self.summary_meta = QLabel("Risk 2%  |  Strategy Auto per symbol  |  Profile not saved yet")
         self.summary_meta.setObjectName("summaryMeta")
         self.summary_meta.setWordWrap(True)
         summary_layout.addWidget(self.summary_meta)
@@ -871,8 +854,8 @@ class Dashboard(QWidget):
         panel_layout.addWidget(self.connect_button)
 
         self.footer_label = QLabel(
-            "Start in paper mode when testing a new broker or strategy combination. "
-            "The dashboard is designed to make that transition obvious and fast."
+            "Start in paper mode when testing a new broker path. "
+            "Per-symbol strategy assignment happens after launch, and the terminal can still override it when needed."
         )
         self.footer_label.setObjectName("hintLabel")
         self.footer_label.setWordWrap(True)
@@ -975,7 +958,6 @@ class Dashboard(QWidget):
         self.mode_box.currentTextChanged.connect(self._update_broker_hint)
         self.mode_box.currentTextChanged.connect(self._update_session_preview)
         self.market_type_box.currentIndexChanged.connect(self._update_session_preview)
-        self.strategy_box.currentTextChanged.connect(self._update_session_preview)
         self.risk_input.valueChanged.connect(self._update_session_preview)
         self.api_input.textChanged.connect(self._update_session_preview)
         self.secret_input.textChanged.connect(self._update_session_preview)
@@ -1097,10 +1079,6 @@ class Dashboard(QWidget):
         if market_type_block is not None and hasattr(market_type_block, "label_widget"):
             market_type_block.label_widget.setText("Venue")
 
-        strategy_block = self.strategy_box.parentWidget()
-        if strategy_block is not None and hasattr(strategy_block, "label_widget"):
-            strategy_block.label_widget.setText(self._tr("dashboard.strategy"))
-
         risk_block = self.risk_input.parentWidget()
         if risk_block is not None and hasattr(risk_block, "label_widget"):
             risk_block.label_widget.setText(self._tr("dashboard.risk_budget"))
@@ -1157,7 +1135,6 @@ class Dashboard(QWidget):
         market_type_index = self.market_type_box.findData((broker.get("options", {}) or {}).get("market_type", "auto"))
         self.market_type_box.setCurrentIndex(market_type_index if market_type_index >= 0 else 0)
         self.risk_input.setValue(int(creds.get("risk", {}).get("risk_percent", 2) or 2))
-        self.strategy_box.setCurrentText(Strategy.normalize_strategy_name(creds.get("strategy", "Trend Following")))
 
         self._update_optional_fields()
         self._update_broker_hint()
@@ -1181,7 +1158,6 @@ class Dashboard(QWidget):
             self._refresh_market_type_options()
             auto_index = self.market_type_box.findData("auto")
             self.market_type_box.setCurrentIndex(auto_index if auto_index >= 0 else 0)
-            self.strategy_box.setCurrentText("AI Hybrid")
             self.risk_input.setValue(2)
         elif preset_name == "crypto":
             self.exchange_type_box.setCurrentText("crypto")
@@ -1195,7 +1171,6 @@ class Dashboard(QWidget):
             self._refresh_market_type_options()
             spot_index = self.market_type_box.findData("spot")
             self.market_type_box.setCurrentIndex(spot_index if spot_index >= 0 else 0)
-            self.strategy_box.setCurrentText("Trend Following")
             self.risk_input.setValue(2)
         elif preset_name == "forex":
             self.exchange_type_box.setCurrentText("forex")
@@ -1205,7 +1180,6 @@ class Dashboard(QWidget):
             self._refresh_market_type_options()
             otc_index = self.market_type_box.findData("otc")
             self.market_type_box.setCurrentIndex(otc_index if otc_index >= 0 else 0)
-            self.strategy_box.setCurrentText("MACD Trend")
             self.risk_input.setValue(1)
 
         self._update_optional_fields()
@@ -1334,7 +1308,7 @@ class Dashboard(QWidget):
         customer_region = self._selected_customer_region()
         mode = self.mode_box.currentText()
         market_type = str(self.market_type_box.currentData() or "auto").upper()
-        strategy = self.strategy_box.currentText()
+        strategy = "Auto per-symbol assignment"
         risk_value = self.risk_input.value()
 
         is_paper = broker_type == "paper" or exchange == "paper" or mode == "paper"
@@ -1356,7 +1330,7 @@ class Dashboard(QWidget):
 
         readiness = 20
         readiness += 20 if exchange else 0
-        readiness += 15 if strategy else 0
+        readiness += 15 if mode else 0
         readiness += 15 if risk_value <= 3 else 8
         readiness += 20 if credentials_ready else 0
         readiness += 10 if (not needs_account_id or has_account_id) else 0
@@ -1385,30 +1359,30 @@ class Dashboard(QWidget):
         self.license_status_label.setText(f"{license_plan}: {license_summary}")
 
         venue_label = exchange.upper() if exchange else "PAPER"
-        strategy_copy = STRATEGY_COPY.get(strategy, "The selected strategy is ready for a cleaner launch flow.")
+        strategy_copy = "The system ranks strategies per symbol after launch, and terminal users can still override assignments when needed."
         mode_copy = "paper rehearsal" if is_paper else "live execution"
 
         self.market_primary.body_label.setText(
             f"{venue_label} selected with {mode_copy} framing and {customer_region.upper()} customer routing."
         )
-        self.market_secondary.body_label.setText(f"{strategy} selected. {strategy_copy}")
+        self.market_secondary.body_label.setText(f"{strategy}. {strategy_copy}")
         self.market_tertiary.body_label.setText(
             f"Risk budget is {risk_value}%. Venue {market_type}. Profiles are {'saved' if self.remember_checkbox.isChecked() else 'temporary'} for this session."
         )
 
         broker_ready = bool(exchange)
-        strategy_ready = bool(strategy)
+        strategy_ready = True
         risk_ready = risk_value <= 3
 
         self._set_check_state(self.check_credentials, "Ready" if credentials_ready else "Needs input", credentials_ready)
         self._set_check_state(self.check_broker, "Ready" if broker_ready else "Choose venue", broker_ready)
-        self._set_check_state(self.check_strategy, strategy if strategy_ready else "Choose strategy", strategy_ready)
+        self._set_check_state(self.check_strategy, "Auto or terminal-managed", strategy_ready)
         self._set_check_state(self.check_risk, "Conservative" if risk_ready else "Aggressive", risk_ready)
 
         if is_paper:
             self.summary_title.setText("Paper desk ready")
             self.summary_body.setText(
-                "This setup is optimized for a safer rehearsal. You can validate the broker shape, charts, and strategy flow before taking live risk."
+                "This setup is optimized for a safer rehearsal. You can validate the broker shape, charts, and automatic strategy routing before taking live risk."
             )
             self.connect_button.setText("Open Paper Terminal")
             self.live_guard_checkbox.setVisible(False)
@@ -1416,7 +1390,7 @@ class Dashboard(QWidget):
         else:
             self.summary_title.setText(f"{venue_label} live launch")
             self.summary_body.setText(
-                "This session is configured for live execution. Review credentials, account details, and the selected strategy before entering the terminal."
+                "This session is configured for live execution. Review credentials, account details, and risk posture before entering the terminal. Strategy assignment will happen automatically per symbol after launch."
             )
             if hasattr(self.controller, "license_allows") and not self.controller.license_allows("live_trading"):
                 self.connect_button.setText("Activate License For Live Trading")
@@ -1429,7 +1403,7 @@ class Dashboard(QWidget):
 
         profile_state = self.saved_account_box.currentText()
         profile_copy = profile_state if profile_state and profile_state != "Recent profiles" else "Profile not saved yet"
-        self.summary_meta.setText(f"Risk {risk_value}%  |  Strategy {strategy}  |  {profile_copy}")
+        self.summary_meta.setText(f"Risk {risk_value}%  |  Strategy Auto per symbol  |  {profile_copy}")
 
     def _confirm_live_launch(self, exchange, account_id):
         confirmation = QMessageBox.question(
@@ -1581,7 +1555,7 @@ class Dashboard(QWidget):
             broker=broker_config,
             risk=RiskConfig(risk_percent=self.risk_input.value()),
             system=SystemConfig(),
-            strategy=self.strategy_box.currentText(),
+            strategy=str(getattr(self.controller, "strategy_name", "Trend Following") or "Trend Following"),
         )
 
         if self.remember_checkbox.isChecked():

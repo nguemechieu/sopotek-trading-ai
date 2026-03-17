@@ -8,9 +8,9 @@ import subprocess
 import sys
 import threading
 import time
-import tomllib
-import traceback
 
+import traceback
+import tomllib
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
@@ -22,10 +22,19 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QPushButton, QLabel, QComboBox, QProgressBar,
     QTabWidget, QToolBar, QFileDialog, QDialog, QGridLayout, QDoubleSpinBox, QMessageBox, QFormLayout, QInputDialog, QColorDialog, QDateEdit,
-    QFrame,
+    QFrame, QHeaderView, QMenu, QMenuBar,
     QHBoxLayout, QSizePolicy, QTextEdit, QTextBrowser, QApplication, QLineEdit, QSlider, QCheckBox, QScrollArea
 )
 from shiboken6 import isValid
+
+if __name__ == "__main__" and (__package__ is None or __package__ == ""):
+    src_root = Path(__file__).resolve().parents[2]
+    src_value = str(src_root)
+    if src_value not in sys.path:
+        sys.path.insert(0, src_value)
+    from main import main as app_main
+
+    raise SystemExit(app_main())
 
 from backtesting.backtest_engine import BacktestEngine
 from backtesting.report_generator import ReportGenerator
@@ -254,6 +263,7 @@ class Terminal(QMainWindow):
         self._setup_core()
         self._setup_ui()
         self._setup_panels()
+        self._restore_settings()
         self._connect_signals()
         self._setup_spinner()
 
@@ -280,6 +290,14 @@ class Terminal(QMainWindow):
         self.order_type = self.controller.order_type
         self.setWindowTitle("Sopotek AI Trading Terminal")
         self.resize(1700, 950)
+        self.setMinimumSize(1024, 680)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setDockOptions(
+            QMainWindow.DockOption.AllowNestedDocks
+            | QMainWindow.DockOption.AllowTabbedDocks
+            | QMainWindow.DockOption.GroupedDragging
+            | QMainWindow.DockOption.AnimatedDocks
+        )
 
         self.connection_indicator = QLabel("● CONNECTING")
         self.connection_indicator.setStyleSheet(
@@ -293,6 +311,17 @@ class Terminal(QMainWindow):
         self.system_status_button = None
         self.system_status_dock = None
         self.ai_signal_dock = None
+        self.secondary_toolbar = None
+        self.market_watch_dock = None
+        self.tick_chart_dock = None
+        self.system_console_dock = None
+        self.positions_dock = None
+        self.open_orders_dock = None
+        self.trade_log_dock = None
+        self.orderbook_dock = None
+        self.strategy_scorecard_dock = None
+        self.strategy_debug_dock = None
+        self.risk_heatmap_dock = None
         self.trading_activity_label = None
         self.live_trading_bar_frame = None
         self.live_trading_bar_label = None
@@ -444,6 +473,7 @@ class Terminal(QMainWindow):
             return
         self._sync_watchlist_from_table()
         self._reorder_market_watch_rows()
+        self._queue_terminal_layout_fit()
         self._refresh_terminal()
 
     def _market_watch_row_snapshot(self, row):
@@ -702,6 +732,28 @@ class Terminal(QMainWindow):
             return list(page.findChildren(ChartWidget))
         except Exception:
             return []
+
+    def _chart_page_for_widget(self, target_chart):
+        if target_chart is None:
+            return None
+        if isinstance(target_chart, ChartWidget):
+            for page in self._iter_detached_chart_pages():
+                if target_chart in self._chart_widgets_in_page(page):
+                    return page
+            if self._chart_tabs_ready():
+                try:
+                    count = self.chart_tabs.count()
+                except RuntimeError:
+                    count = 0
+                for index in range(count):
+                    try:
+                        page = self.chart_tabs.widget(index)
+                    except RuntimeError:
+                        break
+                    if target_chart in self._chart_widgets_in_page(page):
+                        return page
+            return target_chart
+        return None
 
     def _all_chart_widgets(self):
         charts = []
@@ -996,20 +1048,19 @@ class Terminal(QMainWindow):
         frame_border = "#de6b7f" if armed else "#805760"
         label_color = "#ffe3e8" if armed else "#d8b9c0"
         chunk_color = "#ff6b81" if armed else "#b85b69"
-        chunk_glow = "#ffc2cc" if armed else "#e59aa7"
         return (
-            "QFrame {{ "
+            "QFrame { "
             f"background-color: {frame_background}; border: 1px solid {frame_border}; border-radius: 14px; "
-            "}}"
-            "QLabel {{ "
+            "}"
+            "QLabel { "
             f"color: {label_color}; font-size: 11px; font-weight: 800; letter-spacing: 0.8px; "
-            "padding: 0 2px; border: 0; background: transparent; }}"
-            "QProgressBar {{ "
+            "padding: 0 2px; border: 0; background: transparent; }"
+            "QProgressBar { "
             "background-color: #12070a; border: 1px solid #5d3139; border-radius: 6px; "
-            "padding: 0; min-height: 10px; max-height: 10px; }}"
-            "QProgressBar::chunk {{ "
+            "padding: 0; min-height: 10px; max-height: 10px; }"
+            "QProgressBar::chunk { "
             f"background-color: {chunk_color}; border-radius: 5px; margin: 1px; "
-            f"selection-background-color: {chunk_glow}; }}"
+            "}"
         )
 
     def _update_session_badge(self):
@@ -1153,7 +1204,7 @@ class Terminal(QMainWindow):
                 """
             )
             self._update_trading_activity_indicator(active=False)
-        self.auto_button.setMinimumWidth(188)
+        self.auto_button.setMinimumWidth(164)
         self.auto_button.setToolTip(
             "Turn AI auto trading on or off for the current scope. "
             "When enabled, the bot scans the chosen symbols and sends live signals/orders."
@@ -1203,7 +1254,8 @@ class Terminal(QMainWindow):
             self.controller.time_frame
         )
 
-        self._restore_settings()
+        self.chart_tabs.setUsesScrollButtons(True)
+        self.chart_tabs.tabBar().setExpanding(False)
         self.apply_language()
 
     # ==========================================================
@@ -1318,6 +1370,9 @@ class Terminal(QMainWindow):
         self.action_app_settings = QAction(self)
         self.action_app_settings.triggered.connect(self._open_settings)
         self.settings_menu.addAction(self.action_app_settings)
+        self.action_risk_settings = QAction("Risk Settings", self)
+        self.action_risk_settings.triggered.connect(self._open_risk_settings)
+        self.settings_menu.addAction(self.action_risk_settings)
         self.action_portfolio_view = QAction(self)
         self.action_portfolio_view.triggered.connect(self._show_portfolio_exposure)
         self.settings_menu.addAction(self.action_portfolio_view)
@@ -1331,51 +1386,84 @@ class Terminal(QMainWindow):
             self.language_menu.addAction(action)
             self.language_actions[code] = action
 
-        self.tools_menu = menu_bar.addMenu("")
         self.action_market_chat = QAction("Sopotek Pilot", self)
         self.action_market_chat.triggered.connect(self._open_market_chat_window)
-        self.tools_menu.addAction(self.action_market_chat)
         self.action_recommendations = QAction("Recommendations", self)
         self.action_recommendations.triggered.connect(self._open_recommendations_window)
-        self.tools_menu.addAction(self.action_recommendations)
         self.action_ml_monitor = QAction(self)
         self.action_ml_monitor.triggered.connect(self._open_ml_monitor)
-        self.tools_menu.addAction(self.action_ml_monitor)
         self.action_logs = QAction(self)
         self.action_logs.triggered.connect(self._open_logs)
-        self.tools_menu.addAction(self.action_logs)
         self.action_performance = QAction(self)
         self.action_performance.triggered.connect(self._open_performance)
-        self.tools_menu.addAction(self.action_performance)
+        self.action_performance.setShortcut("Ctrl+Shift+P")
         self.action_closed_journal = QAction("Closed Journal", self)
         self.action_closed_journal.triggered.connect(self._open_closed_journal_window)
-        self.tools_menu.addAction(self.action_closed_journal)
         self.action_trade_checklist = QAction("Trade Checklist", self)
         self.action_trade_checklist.triggered.connect(self._open_trade_checklist_window)
-        self.tools_menu.addAction(self.action_trade_checklist)
+        self.action_trade_checklist.setShortcut("Ctrl+Shift+K")
         self.action_journal_review = QAction("Journal Review", self)
         self.action_journal_review.triggered.connect(self._open_trade_journal_review_window)
-        self.tools_menu.addAction(self.action_journal_review)
         self.action_system_health = QAction("System Health", self)
         self.action_system_health.triggered.connect(self._open_system_health_window)
-        self.tools_menu.addAction(self.action_system_health)
         self.action_quant_pm = QAction("Quant PM", self)
         self.action_quant_pm.triggered.connect(self._open_quant_pm_window)
-        self.tools_menu.addAction(self.action_quant_pm)
         self.action_ml_research = QAction("ML Research Lab", self)
         self.action_ml_research.triggered.connect(self._open_ml_research_window)
-        self.tools_menu.addAction(self.action_ml_research)
         self.action_position_analysis = QAction("Position Analysis", self)
         self.action_position_analysis.triggered.connect(self._open_position_analysis_window)
-        self.tools_menu.addAction(self.action_position_analysis)
+        self.action_position_analysis.setShortcut("Ctrl+Shift+I")
         self.action_strategy_optimization = QAction("Strategy Optimization", self)
         self.action_strategy_optimization.triggered.connect(self._optimize_strategy)
-        self.tools_menu.addAction(self.action_strategy_optimization)
         self.action_strategy_assigner = QAction("Strategy Assigner", self)
         self.action_strategy_assigner.triggered.connect(self._open_strategy_assignment_window)
-        self.tools_menu.addAction(self.action_strategy_assigner)
         self.action_stellar_asset_explorer = QAction("Stellar Asset Explorer", self)
         self.action_stellar_asset_explorer.triggered.connect(self._open_stellar_asset_explorer_window)
+
+        self.risk_menu = menu_bar.addMenu("")
+        self.risk_menu.addAction(self.action_risk_settings)
+        self.risk_menu.addAction(self.action_portfolio_view)
+        self.risk_menu.addAction(self.action_position_analysis)
+        self.risk_menu.addAction(self.action_trade_checklist)
+        self.risk_menu.addSeparator()
+        self.risk_menu.addAction(self.action_system_health)
+        self.risk_menu.addAction(self.action_kill_switch)
+
+        self.review_menu = menu_bar.addMenu("")
+        self.review_menu.addAction(self.action_performance)
+        self.review_menu.addAction(self.action_recommendations)
+        self.review_menu.addAction(self.action_closed_journal)
+        self.review_menu.addAction(self.action_journal_review)
+        self.review_menu.addSeparator()
+        self.review_menu.addAction(self.action_generate_report)
+        self.review_menu.addAction(self.action_export_trades)
+
+        self.research_menu = menu_bar.addMenu("")
+        self.research_menu.addAction(self.action_market_chat)
+        self.research_menu.addAction(self.action_quant_pm)
+        self.research_menu.addAction(self.action_ml_monitor)
+        self.research_menu.addAction(self.action_ml_research)
+        self.research_menu.addSeparator()
+        self.research_menu.addAction(self.action_strategy_optimization)
+        self.research_menu.addAction(self.action_strategy_assigner)
+        self.research_menu.addAction(self.action_run_backtest)
+        self.research_menu.addAction(self.action_stellar_asset_explorer)
+
+        self.tools_menu = menu_bar.addMenu("")
+        self.tools_menu.addAction(self.action_market_chat)
+        self.tools_menu.addAction(self.action_recommendations)
+        self.tools_menu.addAction(self.action_ml_monitor)
+        self.tools_menu.addAction(self.action_logs)
+        self.tools_menu.addAction(self.action_performance)
+        self.tools_menu.addAction(self.action_closed_journal)
+        self.tools_menu.addAction(self.action_trade_checklist)
+        self.tools_menu.addAction(self.action_journal_review)
+        self.tools_menu.addAction(self.action_system_health)
+        self.tools_menu.addAction(self.action_quant_pm)
+        self.tools_menu.addAction(self.action_ml_research)
+        self.tools_menu.addAction(self.action_position_analysis)
+        self.tools_menu.addAction(self.action_strategy_optimization)
+        self.tools_menu.addAction(self.action_strategy_assigner)
         self.tools_menu.addAction(self.action_stellar_asset_explorer)
 
         self.help_menu = menu_bar.addMenu("")
@@ -1424,6 +1512,9 @@ class Terminal(QMainWindow):
             self.charts_menu.setTitle(self._tr("terminal.menu.charts"))
             self.data_menu.setTitle(self._tr("terminal.menu.data"))
             self.settings_menu.setTitle(self._tr("terminal.menu.settings"))
+            self.risk_menu.setTitle(self._tr("terminal.menu.risk"))
+            self.review_menu.setTitle(self._tr("terminal.menu.review"))
+            self.research_menu.setTitle(self._tr("terminal.menu.research"))
             self.language_menu.setTitle(self._tr("terminal.menu.language"))
             self.tools_menu.setTitle(self._tr("terminal.menu.tools"))
             self.help_menu.setTitle(self._tr("terminal.menu.help"))
@@ -1453,6 +1544,7 @@ class Terminal(QMainWindow):
             self.action_refresh_orderbook.setText(self._tr("terminal.action.refresh_orderbook"))
             self.action_reload_balance.setText(self._tr("terminal.action.reload_balance"))
             self.action_app_settings.setText(self._tr("terminal.action.app_settings"))
+            self.action_risk_settings.setText(self._tr("terminal.action.risk_settings"))
             self.action_portfolio_view.setText(self._tr("terminal.action.portfolio"))
             self.action_market_chat.setText("Sopotek Pilot")
             self.action_recommendations.setText("Recommendations")
@@ -1513,12 +1605,24 @@ class Terminal(QMainWindow):
     # ==========================================================
 
     def _create_toolbar(self):
+        frame_style = "QFrame { background-color: #0f1726; border: 1px solid #24324a; border-radius: 16px; }"
+
         toolbar = QToolBar("Main Toolbar")
+        toolbar.setObjectName("terminal_main_toolbar")
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
         toolbar.setStyleSheet("QToolBar { spacing: 8px; padding: 6px; }")
         self.toolbar = toolbar
-        self.addToolBar(toolbar)
+        self.addToolBar(Qt.TopToolBarArea, toolbar)
+
+        controls_toolbar = QToolBar("Trading Controls")
+        controls_toolbar.setObjectName("terminal_controls_toolbar")
+        controls_toolbar.setMovable(False)
+        controls_toolbar.setFloatable(False)
+        controls_toolbar.setStyleSheet("QToolBar { spacing: 8px; padding: 4px 6px 8px 6px; }")
+        self.secondary_toolbar = controls_toolbar
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        self.addToolBar(Qt.TopToolBarArea, controls_toolbar)
 
         symbol_box = QFrame()
         symbol_box.setStyleSheet(
@@ -1533,7 +1637,10 @@ class Terminal(QMainWindow):
         symbol_layout.addWidget(self.symbol_label)
 
         self.symbol_picker = QComboBox()
-        self.symbol_picker.setMinimumWidth(170)
+        self.symbol_picker.setMinimumWidth(150)
+        self.symbol_picker.setMaximumWidth(240)
+        self.symbol_picker.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.symbol_picker.setMinimumContentsLength(10)
         self.symbol_picker.setStyleSheet(
             """
             QComboBox {
@@ -1564,9 +1671,7 @@ class Terminal(QMainWindow):
         toolbar.addWidget(symbol_box)
 
         timeframe_box = QFrame()
-        timeframe_box.setStyleSheet(
-            "QFrame { background-color: #0f1726; border: 1px solid #24324a; border-radius: 16px; }"
-        )
+        timeframe_box.setStyleSheet(frame_style)
         timeframe_layout = QHBoxLayout(timeframe_box)
         timeframe_layout.setContentsMargins(10, 6, 10, 6)
         timeframe_layout.setSpacing(6)
@@ -1585,24 +1690,29 @@ class Terminal(QMainWindow):
 
         toolbar.addWidget(timeframe_box)
 
+        toolbar_spacer = QWidget()
+        toolbar_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(toolbar_spacer)
+
         utility_box = QFrame()
-        utility_box.setStyleSheet(
-            "QFrame { background-color: #0f1726; border: 1px solid #24324a; border-radius: 16px; }"
-        )
+        utility_box.setStyleSheet(frame_style)
         utility_layout = QHBoxLayout(utility_box)
         utility_layout.setContentsMargins(8, 6, 8, 6)
         utility_layout.setSpacing(8)
 
+        self.connection_indicator.hide()
+        utility_layout.addWidget(self.heartbeat)
+
         self.system_status_button = QPushButton("Status")
         self.system_status_button.setStyleSheet(self._action_button_style())
-        self.system_status_button.setMinimumWidth(84)
+        self.system_status_button.setMinimumWidth(78)
         self.system_status_button.setToolTip("Show or hide the System Status panel")
         self.system_status_button.clicked.connect(self._show_system_status_panel)
         utility_layout.addWidget(self.system_status_button)
 
         self.screenshot_button = QPushButton(self._tr("terminal.toolbar.screenshot"))
         self.screenshot_button.setStyleSheet(self._action_button_style())
-        self.screenshot_button.setMinimumWidth(110)
+        self.screenshot_button.setMinimumWidth(96)
         self.screenshot_button.clicked.connect(self.take_screen_shot)
         utility_layout.addWidget(self.screenshot_button)
 
@@ -1615,7 +1725,7 @@ class Terminal(QMainWindow):
         utility_layout.addWidget(self.license_badge)
 
         self.live_trading_bar_frame = QFrame()
-        self.live_trading_bar_frame.setMinimumWidth(180)
+        self.live_trading_bar_frame.setMinimumWidth(148)
         live_bar_layout = QVBoxLayout(self.live_trading_bar_frame)
         live_bar_layout.setContentsMargins(10, 6, 10, 6)
         live_bar_layout.setSpacing(4)
@@ -1623,7 +1733,7 @@ class Terminal(QMainWindow):
         self.live_trading_bar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         live_bar_layout.addWidget(self.live_trading_bar_label)
         self.live_trading_bar = QProgressBar()
-        self.live_trading_bar.setFixedWidth(160)
+        self.live_trading_bar.setFixedWidth(128)
         self.live_trading_bar.setFixedHeight(12)
         self.live_trading_bar.setRange(0, 0)
         self.live_trading_bar.setTextVisible(False)
@@ -1632,25 +1742,23 @@ class Terminal(QMainWindow):
 
         self.kill_switch_button = QPushButton("Kill Switch")
         self.kill_switch_button.setStyleSheet(self._danger_button_style())
-        self.kill_switch_button.setMinimumWidth(108)
+        self.kill_switch_button.setMinimumWidth(102)
         self.kill_switch_button.clicked.connect(self._toggle_emergency_stop)
         utility_layout.addWidget(self.kill_switch_button)
 
         self.trading_activity_label = QLabel("AI Idle")
-        self.trading_activity_label.setMinimumWidth(74)
+        self.trading_activity_label.setMinimumWidth(70)
         self.trading_activity_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         utility_layout.addWidget(self.trading_activity_label)
 
-        toolbar.addWidget(utility_box)
+        controls_toolbar.addWidget(utility_box)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(spacer)
+        controls_spacer = QWidget()
+        controls_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        controls_toolbar.addWidget(controls_spacer)
 
         actions_box = QFrame()
-        actions_box.setStyleSheet(
-            "QFrame { background-color: #0f1726; border: 1px solid #24324a; border-radius: 16px; }"
-        )
+        actions_box.setStyleSheet(frame_style)
         actions_layout = QHBoxLayout(actions_box)
         actions_layout.setContentsMargins(8, 6, 8, 6)
         actions_layout.setSpacing(8)
@@ -1660,8 +1768,8 @@ class Terminal(QMainWindow):
         actions_layout.addWidget(scope_label)
 
         self.autotrade_scope_picker = QComboBox()
-        self.autotrade_scope_picker.setMinimumWidth(120)
-        self.autotrade_scope_picker.setMaximumWidth(140)
+        self.autotrade_scope_picker.setMinimumWidth(108)
+        self.autotrade_scope_picker.setMaximumWidth(126)
         self.autotrade_scope_picker.setStyleSheet(
             """
             QComboBox {
@@ -1689,7 +1797,7 @@ class Terminal(QMainWindow):
         self.auto_button.clicked.connect(self._toggle_autotrading)
         actions_layout.addWidget(self.auto_button)
 
-        toolbar.addWidget(actions_box)
+        controls_toolbar.addWidget(actions_box)
 
         self._set_active_timeframe_button(self.current_timeframe)
         self._apply_autotrade_scope(self.autotrade_scope_value)
@@ -1697,37 +1805,6 @@ class Terminal(QMainWindow):
         self._update_session_badge()
         self._update_live_trading_bar()
         self._update_kill_switch_button()
-        return
-
-        toolbar = QToolBar("Main Toolbar")
-        self.addToolBar(toolbar)
-        toolbar.addWidget(self.connection_indicator)
-
-        self.heartbeat.setText("●")
-        toolbar.addWidget(self.heartbeat)
-
-        for tf in ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1mn"]:
-            btn = QPushButton(tf)
-            btn.clicked.connect(lambda _, t=tf: self._set_timeframe(t))
-
-
-            toolbar.addWidget(btn)
-            toolbar.addSeparator()
-
-
-            self.timeframe_buttons[tf] = btn
-
-        toolbar.addSeparator()
-        self.auto_button = QPushButton("AutoTrading OFF")
-        self.auto_button.clicked.connect(self._toggle_autotrading)
-
-        toolbar.addWidget(self.auto_button)
-
-
-
-        screenshot_btn = QPushButton("Screenshot")
-        screenshot_btn.clicked.connect(self.take_screen_shot)
-        toolbar.addWidget(screenshot_btn)
 
     # ==========================================================
     # AUTOTRADING
@@ -2148,6 +2225,11 @@ class Terminal(QMainWindow):
         chart = charts[0]
 
         self.current_timeframe = chart.timeframe
+        self.controller.time_frame = chart.timeframe
+        self.settings.setValue("terminal/current_timeframe", chart.timeframe)
+        self._set_active_timeframe_button(chart.timeframe)
+        if hasattr(chart, "set_timeframe"):
+            chart.set_timeframe(chart.timeframe, emit_signal=False)
         if self.symbol_picker is not None:
             self.symbol_picker.setCurrentText(chart.symbol)
 
@@ -2173,6 +2255,7 @@ class Terminal(QMainWindow):
             chart.sigTradeLevelRequested.connect(self._handle_chart_trade_level_request)
             chart.sigTradeLevelChanged.connect(self._handle_chart_trade_level_changed)
             chart.sigTradeContextAction.connect(self._handle_chart_trade_context_action)
+            chart.sigTimeframeSelected.connect(lambda timeframe, chart_ref=chart: self._set_chart_timeframe(chart_ref, timeframe))
             chart._sopotek_trade_signal_hooks_installed = True
         return chart
 
@@ -2333,34 +2416,58 @@ class Terminal(QMainWindow):
 
         self._open_symbol_chart(self.symbol_picker.currentText(), self.current_timeframe)
 
-    def _set_timeframe(self, tf="1h"):
-
-        self.current_timeframe = tf
-        self._set_active_timeframe_button(tf)
-
-        if not self._chart_tabs_ready():
-            return
-
-        index = self.chart_tabs.currentIndex()
-        page = self.chart_tabs.widget(index)
+    def _set_chart_timeframe(self, chart, tf="1h"):
+        normalized_tf = str(tf or self.current_timeframe or "1h").strip().lower() or "1h"
+        page = self._chart_page_for_widget(chart)
         charts = self._chart_widgets_in_page(page)
+
+        self.current_timeframe = normalized_tf
+        self.controller.time_frame = normalized_tf
+        self.settings.setValue("terminal/current_timeframe", normalized_tf)
+        self._set_active_timeframe_button(normalized_tf)
+
         if not charts:
             return
 
-        primary_chart = charts[0]
-        for chart in charts:
-            chart.timeframe = tf
-            if hasattr(chart, "refresh_context_display"):
-                chart.refresh_context_display()
-            self._schedule_chart_data_refresh(chart)
+        anchor_chart = chart if chart in charts else charts[0]
+        for chart_widget in charts:
+            if hasattr(chart_widget, "set_timeframe"):
+                chart_widget.set_timeframe(normalized_tf, emit_signal=False)
+            else:
+                chart_widget.timeframe = normalized_tf
+                if hasattr(chart_widget, "refresh_context_display"):
+                    chart_widget.refresh_context_display()
+            self._schedule_chart_data_refresh(chart_widget)
 
-        if len(charts) == 1:
-            tab_text = f"{primary_chart.symbol} ({tf})"
-        else:
-            tab_text = f"Multi Chart ({tf})"
-        self.chart_tabs.setTabText(index, tab_text)
+        if self.symbol_picker is not None:
+            self.symbol_picker.setCurrentText(anchor_chart.symbol)
 
+        if self._chart_tabs_ready():
+            try:
+                index = self.chart_tabs.indexOf(page)
+            except RuntimeError:
+                index = -1
+            if index >= 0:
+                self.chart_tabs.setCurrentIndex(index)
+                self.chart_tabs.setTabText(index, self._chart_page_title(page, fallback_index=index))
+
+        if page is not None:
+            window = page.window()
+            if window is not None and window is not self and getattr(window, "_contains_chart_page", False):
+                window.setWindowTitle(self._chart_page_title(page))
+                self._save_detached_chart_layouts()
+
+        self._last_chart_request_key = (anchor_chart.symbol, normalized_tf)
         self._request_active_orderbook()
+
+    def _set_timeframe(self, tf="1h"):
+        chart = self._current_chart_widget()
+        if chart is None and self._chart_tabs_ready():
+            try:
+                chart = self.chart_tabs.currentWidget()
+            except RuntimeError:
+                chart = None
+        self._set_chart_timeframe(chart, tf)
 
     def _toggle_bid_ask_lines(self, checked):
         self.show_bid_ask_lines = bool(checked)
@@ -2375,11 +2482,18 @@ class Terminal(QMainWindow):
         if self._ui_shutting_down:
             return
 
-        df = candles_to_df(df)
+        fallback_frame = candles_to_df(df)
+        symbol_buffers = getattr(self.controller, "candle_buffers", {}).get(symbol, {})
 
         for chart in self._iter_chart_widgets():
-            if chart.symbol == symbol:
-                chart.update_candles(df)
+            if chart.symbol != symbol:
+                continue
+            chart_frame = symbol_buffers.get(chart.timeframe) if isinstance(symbol_buffers, dict) else None
+            if chart_frame is None:
+                chart_frame = fallback_frame
+            else:
+                chart_frame = candles_to_df(chart_frame)
+            chart.update_candles(chart_frame)
 
         self.heartbeat.setStyleSheet("color: green;")
         if getattr(self.controller, "news_draw_on_chart", False) and hasattr(self.controller, "request_news"):
@@ -2389,7 +2503,12 @@ class Terminal(QMainWindow):
         if getattr(self, "equity_summary_label", None) is not None:
             self.equity_summary_label.setText(f"Equity: {float(equity):,.2f}")
         if getattr(self, "equity_curve", None) is not None:
-            self.equity_curve.setData(self.controller.performance_engine.equity_history)
+            equity_series = list(self._performance_series())
+            equity_timestamps = list(self._performance_time_series())
+            if equity_timestamps and len(equity_timestamps) == len(equity_series):
+                self.equity_curve.setData(equity_timestamps, equity_series)
+            else:
+                self.equity_curve.setData(equity_series)
         self._refresh_performance_views()
 
     def _strategy_family_name(self, strategy_name):
@@ -3568,6 +3687,8 @@ class Terminal(QMainWindow):
 
     def _create_market_watch_panel(self):
         dock = QDockWidget("Market Watch", self)
+        dock.setObjectName("market_watch_dock")
+        self.market_watch_dock = dock
         self.symbols_table = QTableWidget()
         self._configure_market_watch_table()
         self.symbols_table.itemChanged.connect(self._handle_market_watch_item_changed)
@@ -3579,6 +3700,8 @@ class Terminal(QMainWindow):
         self.tick_prices = []
 
         tick_dock = QDockWidget("Tick Chart", self)
+        tick_dock.setObjectName("tick_chart_dock")
+        self.tick_chart_dock = tick_dock
         tick_dock.setWidget(self.tick_chart)
         self.addDockWidget(Qt.LeftDockWidgetArea, tick_dock)
 
@@ -3605,8 +3728,8 @@ class Terminal(QMainWindow):
         self.equity_summary_label.setStyleSheet("color: #dce7f8; font-size: 15px; font-weight: 700;")
         layout.addWidget(self.equity_summary_label)
 
-        self.equity_chart = pg.PlotWidget()
-        self._style_performance_plot(self.equity_chart, left_label="Equity")
+        self.equity_chart = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+        self._style_performance_plot(self.equity_chart, left_label="Equity", bottom_label="Time")
         self.equity_curve = self.equity_chart.plot(pen="g")
 
         layout.addWidget(self.equity_chart)
@@ -3657,8 +3780,8 @@ class Terminal(QMainWindow):
         metrics_grid, metric_labels = self._build_performance_metric_grid(metric_names, columns=2)
         layout.addLayout(metrics_grid)
 
-        plot = pg.PlotWidget()
-        self._style_performance_plot(plot, left_label="Equity")
+        plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+        self._style_performance_plot(plot, left_label="Equity", bottom_label="Time")
         plot.setMinimumHeight(180)
         curve = plot.plot(pen=pg.mkPen("#2a7fff", width=2.2))
         layout.addWidget(plot)
@@ -3716,7 +3839,7 @@ class Terminal(QMainWindow):
 
         return grid, labels
 
-    def _style_performance_plot(self, plot, left_label=None):
+    def _style_performance_plot(self, plot, left_label=None, bottom_label="Samples"):
         if plot is None:
             return
         plot.setBackground("#0b1220")
@@ -3731,7 +3854,7 @@ class Terminal(QMainWindow):
             axis.setTextPen(text_pen)
         if left_label:
             plot.setLabel("left", left_label, color="#8fa7c6")
-        plot.setLabel("bottom", "Samples", color="#8fa7c6")
+        plot.setLabel("bottom", bottom_label, color="#8fa7c6")
 
     def _safe_float(self, value, default=None):
         try:
@@ -3963,11 +4086,89 @@ class Terminal(QMainWindow):
         if geometry:
             self.restoreGeometry(geometry)
 
+        restored_state = False
         state = self.settings.value("windowState")
         if state:
-            self.restoreState(state)
+            try:
+                restored_state = bool(self.restoreState(state))
+            except Exception:
+                restored_state = False
+
+        if restored_state:
+            self._queue_terminal_layout_fit()
+        else:
+            QTimer.singleShot(0, self._apply_default_dock_layout)
 
         self._apply_candle_colors_to_all_charts()
+
+    def _queue_terminal_layout_fit(self):
+        QTimer.singleShot(0, self._apply_terminal_table_sizing)
+
+    def _apply_terminal_table_sizing(self):
+        market_watch = getattr(self, "symbols_table", None)
+        if market_watch is not None:
+            market_watch.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+            market_watch.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+            market_watch.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            header = market_watch.horizontalHeader()
+            header.setMinimumSectionSize(40)
+            header.setSectionResizeMode(self._market_watch_watch_column(), QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(self._market_watch_symbol_column(), QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(self._market_watch_bid_column(), QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(self._market_watch_ask_column(), QHeaderView.ResizeMode.ResizeToContents)
+            usd_column = self._market_watch_usd_column()
+            if usd_column is not None:
+                header.setSectionResizeMode(usd_column, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(self._market_watch_status_column(), QHeaderView.ResizeMode.ResizeToContents)
+
+        for table_name in (
+            "positions_table",
+            "open_orders_table",
+            "trade_log",
+            "strategy_table",
+            "debug_table",
+            "ai_table",
+        ):
+            table = getattr(self, table_name, None)
+            if table is None:
+                continue
+            table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+            table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            table.setWordWrap(False)
+            table.horizontalHeader().setStretchLastSection(True)
+
+    def _safe_tabify_docks(self, primary, secondary):
+        if primary is None or secondary is None or primary is secondary:
+            return False
+        try:
+            self.tabifyDockWidget(primary, secondary)
+        except RuntimeError:
+            return False
+        return True
+
+    def _apply_default_dock_layout(self):
+        self._safe_tabify_docks(self.positions_dock, self.open_orders_dock)
+        self._safe_tabify_docks(self.positions_dock, self.strategy_scorecard_dock)
+        self._safe_tabify_docks(self.trade_log_dock, self.orderbook_dock)
+        self._safe_tabify_docks(self.trade_log_dock, self.strategy_debug_dock)
+        self._safe_tabify_docks(self.trade_log_dock, self.risk_heatmap_dock)
+        self._safe_tabify_docks(self.trade_log_dock, self.ai_signal_dock)
+
+        if self.trade_log_dock is not None:
+            self.trade_log_dock.raise_()
+        if self.positions_dock is not None:
+            self.positions_dock.raise_()
+        if self.market_watch_dock is not None:
+            self.market_watch_dock.raise_()
+
+        try:
+            self.resizeDocks([dock for dock in (self.market_watch_dock, self.trade_log_dock) if dock is not None], [320, 420], Qt.Orientation.Horizontal)
+            self.resizeDocks([dock for dock in (self.positions_dock, self.system_console_dock) if dock is not None], [250, 180], Qt.Orientation.Vertical)
+        except Exception:
+            pass
+
+        self._queue_terminal_layout_fit()
 
     def _apply_candle_colors_to_all_charts(self):
         for chart in self._iter_chart_widgets():
@@ -5162,14 +5363,14 @@ class Terminal(QMainWindow):
             stats_grid, metric_labels = self._build_performance_metric_grid(metric_names, columns=4)
             layout.addLayout(stats_grid)
 
-            equity_plot = pg.PlotWidget()
-            self._style_performance_plot(equity_plot, left_label="Equity")
+            equity_plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+            self._style_performance_plot(equity_plot, left_label="Equity", bottom_label="Time")
             equity_plot.setMinimumHeight(230)
             curve = equity_plot.plot(pen=pg.mkPen("#2a7fff", width=2.4))
             layout.addWidget(equity_plot)
 
-            drawdown_plot = pg.PlotWidget()
-            self._style_performance_plot(drawdown_plot, left_label="Drawdown")
+            drawdown_plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")})
+            self._style_performance_plot(drawdown_plot, left_label="Drawdown", bottom_label="Time")
             drawdown_plot.setMinimumHeight(170)
             drawdown_curve = drawdown_plot.plot(
                 pen=pg.mkPen("#ef5350", width=1.8),
@@ -6964,6 +7165,18 @@ class Terminal(QMainWindow):
             return []
 
         for attr in ("equity_history", "equity_curve"):
+            series = getattr(perf, attr, None)
+            if isinstance(series, list):
+                return series
+
+        return []
+
+    def _performance_time_series(self):
+        perf = getattr(self.controller, "performance_engine", None)
+        if perf is None:
+            return []
+
+        for attr in ("equity_time_history", "equity_timestamps"):
             series = getattr(perf, attr, None)
             if isinstance(series, list):
                 return series
@@ -9963,6 +10176,10 @@ async def _hotfix_run_strategy_ranking(self):
 
 def _hotfix_assign_ranked_strategies_to_symbol(self):
     try:
+        lock_message = _hotfix_strategy_assignment_lock_message(self)
+        if lock_message:
+            raise RuntimeError(lock_message)
+
         results = getattr(self, "strategy_ranking_results", None)
         if results is None or getattr(results, "empty", True):
             raise RuntimeError("Run strategy ranking before assigning strategies to a symbol")
@@ -9997,6 +10214,48 @@ def _hotfix_apply_best_optimization_params(self):
 
 def _hotfix_optimize_strategy(self):
     optimize_strategy(self)
+
+
+def _hotfix_strategy_assignment_auto_status(self):
+    controller = getattr(self, "controller", None)
+    resolver = getattr(controller, "strategy_auto_assignment_status", None) if controller is not None else None
+    if callable(resolver):
+        try:
+            status = dict(resolver() or {})
+        except Exception:
+            status = {}
+    else:
+        enabled = bool(getattr(controller, "strategy_auto_assignment_enabled", False)) if controller is not None else False
+        status = {
+            "enabled": enabled,
+            "ready": not enabled or bool(getattr(controller, "strategy_auto_assignment_ready", False)),
+            "running": bool(getattr(controller, "strategy_auto_assignment_in_progress", False)) if controller is not None else False,
+            "completed": 0,
+            "total": 0,
+            "current_symbol": "",
+            "message": "",
+        }
+    return status
+
+
+def _hotfix_strategy_assignment_lock_message(self):
+    status = _hotfix_strategy_assignment_auto_status(self)
+    enabled = bool(status.get("enabled", False))
+    ready = bool(status.get("ready", not enabled))
+    if (not enabled) or ready:
+        return ""
+
+    custom_message = str(status.get("message") or "").strip()
+    if custom_message:
+        return custom_message
+
+    completed = int(status.get("completed", 0) or 0)
+    total = int(status.get("total", 0) or 0)
+    current_symbol = str(status.get("current_symbol") or "").strip()
+    if total > 0:
+        suffix = f" Current symbol: {current_symbol}." if current_symbol else ""
+        return f"Automatic strategy assignment is still scanning symbols ({completed}/{total}).{suffix}"
+    return "Automatic strategy assignment is still scanning symbols."
 
 
 def _hotfix_strategy_assignment_mode_label(mode):
@@ -10082,6 +10341,10 @@ def _hotfix_refresh_strategy_assignment_window(self, window=None, message=None):
     if controller is None:
         return
 
+    auto_status = _hotfix_strategy_assignment_auto_status(self)
+    lock_message = _hotfix_strategy_assignment_lock_message(self)
+    edits_locked = bool(lock_message)
+
     rows = _hotfix_strategy_assignment_rows(self)
     selected_symbol = str(
         getattr(window, "_strategy_assignment_selected_symbol", "")
@@ -10136,7 +10399,7 @@ def _hotfix_refresh_strategy_assignment_window(self, window=None, message=None):
         setattr(self, "_strategy_assignment_bootstrapping", False)
 
     window._strategy_assignment_selected_symbol = selected_symbol
-    status.setText(message or "Assign a symbol to the default strategy, one strategy, or a ranked mix.")
+    status.setText(message or lock_message or "Assign a symbol to the default strategy, one strategy, or a ranked mix.")
 
     mode_label = _hotfix_strategy_assignment_mode_label(state.get("mode"))
     active_text = ", ".join(
@@ -10146,10 +10409,31 @@ def _hotfix_refresh_strategy_assignment_window(self, window=None, message=None):
     ) or default_strategy
     if len(active_rows) > 3:
         active_text = f"{active_text}, +{len(active_rows) - 3} more"
+    auto_suffix = ""
+    if bool(auto_status.get("enabled", False)):
+        if edits_locked:
+            completed = int(auto_status.get("completed", 0) or 0)
+            total = int(auto_status.get("total", 0) or 0)
+            auto_suffix = f" | Auto Scan: {completed}/{total}"
+        else:
+            auto_suffix = " | Auto Scan: Ready"
     summary.setText(
         f"Selected Symbol: {selected_symbol or '-'} | Mode: {mode_label} | "
-        f"Trading With: {active_text} | Ranked Candidates: {len(ranked_rows)}"
+        f"Trading With: {active_text} | Ranked Candidates: {len(ranked_rows)}{auto_suffix}"
     )
+
+    use_default_btn = getattr(window, "_strategy_assignment_use_default_btn", None)
+    assign_single_btn = getattr(window, "_strategy_assignment_assign_single_btn", None)
+    assign_ranked_btn = getattr(window, "_strategy_assignment_assign_ranked_btn", None)
+    strategy_picker.setEnabled(not edits_locked)
+    timeframe_picker.setEnabled(not edits_locked)
+    top_n.setEnabled(not edits_locked)
+    if use_default_btn is not None:
+        use_default_btn.setEnabled(not edits_locked)
+    if assign_single_btn is not None:
+        assign_single_btn.setEnabled(not edits_locked)
+    if assign_ranked_btn is not None:
+        assign_ranked_btn.setEnabled(not edits_locked)
 
     table.setColumnCount(6)
     table.setHorizontalHeaderLabels(["Symbol", "Mode", "Strategies", "Timeframe", "Ranked", "Live"])
@@ -10211,6 +10495,11 @@ def _hotfix_apply_default_strategy_assignment(self):
     controller = getattr(self, "controller", None)
     if window is None or controller is None:
         return
+    lock_message = _hotfix_strategy_assignment_lock_message(self)
+    if lock_message:
+        self.system_console.log(lock_message, "WARN")
+        _hotfix_refresh_strategy_assignment_window(self, window=window, message=lock_message)
+        return
     symbol_picker = getattr(window, "_strategy_assignment_symbol_picker", None)
     symbol = str(symbol_picker.currentText() if symbol_picker is not None else "").strip()
     if not symbol:
@@ -10228,6 +10517,11 @@ def _hotfix_apply_single_strategy_assignment(self):
     window = getattr(self, "detached_tool_windows", {}).get("strategy_assignments")
     controller = getattr(self, "controller", None)
     if window is None or controller is None:
+        return
+    lock_message = _hotfix_strategy_assignment_lock_message(self)
+    if lock_message:
+        self.system_console.log(lock_message, "WARN")
+        _hotfix_refresh_strategy_assignment_window(self, window=window, message=lock_message)
         return
     symbol_picker = getattr(window, "_strategy_assignment_symbol_picker", None)
     strategy_picker = getattr(window, "_strategy_assignment_strategy_picker", None)
@@ -10255,6 +10549,11 @@ def _hotfix_apply_ranked_strategy_assignment_from_window(self):
     window = getattr(self, "detached_tool_windows", {}).get("strategy_assignments")
     controller = getattr(self, "controller", None)
     if window is None or controller is None:
+        return
+    lock_message = _hotfix_strategy_assignment_lock_message(self)
+    if lock_message:
+        self.system_console.log(lock_message, "WARN")
+        _hotfix_refresh_strategy_assignment_window(self, window=window, message=lock_message)
         return
     symbol_picker = getattr(window, "_strategy_assignment_symbol_picker", None)
     timeframe_picker = getattr(window, "_strategy_assignment_timeframe_picker", None)
@@ -10373,6 +10672,10 @@ def _hotfix_show_strategy_assignment_window(self):
         window._strategy_assignment_timeframe_picker = timeframe_picker
         window._strategy_assignment_top_n = top_n
         window._strategy_assignment_table = table
+        window._strategy_assignment_use_default_btn = use_default_btn
+        window._strategy_assignment_assign_single_btn = assign_single_btn
+        window._strategy_assignment_assign_ranked_btn = assign_ranked_btn
+        window._strategy_assignment_open_optimization_btn = open_optimization_btn
 
     _hotfix_refresh_strategy_assignment_window(self, window=window)
     window.show()
@@ -12419,3 +12722,7 @@ Terminal.save_settings = _hotfix_save_settings
 
 
 
+
+from frontend.ui.actions.operator_features import install_terminal_operator_features
+
+install_terminal_operator_features(Terminal)

@@ -31,6 +31,8 @@ STRATEGY_DEBUG_HEADERS = [
 
 def create_orderbook_panel(terminal):
     dock = QDockWidget("Orderbook", terminal)
+    dock.setObjectName("orderbook_dock")
+    terminal.orderbook_dock = dock
     terminal.orderbook_panel = OrderBookPanel()
     dock.setWidget(terminal.orderbook_panel)
     terminal.addDockWidget(Qt.RightDockWidgetArea, dock)
@@ -39,6 +41,8 @@ def create_orderbook_panel(terminal):
 
 def create_strategy_scorecard_panel(terminal):
     dock = QDockWidget("Strategy Scorecard", terminal)
+    dock.setObjectName("strategy_scorecard_dock")
+    terminal.strategy_scorecard_dock = dock
     terminal.strategy_table = QTableWidget()
     terminal.strategy_table.setColumnCount(len(STRATEGY_SCORECARD_HEADERS))
     terminal.strategy_table.setHorizontalHeaderLabels(STRATEGY_SCORECARD_HEADERS)
@@ -49,6 +53,8 @@ def create_strategy_scorecard_panel(terminal):
 
 def create_strategy_debug_panel(terminal):
     dock = QDockWidget("Strategy Debug", terminal)
+    dock.setObjectName("strategy_debug_dock")
+    terminal.strategy_debug_dock = dock
     terminal.debug_table = QTableWidget()
     terminal.debug_table.setColumnCount(len(STRATEGY_DEBUG_HEADERS))
     terminal.debug_table.setHorizontalHeaderLabels(STRATEGY_DEBUG_HEADERS)
@@ -59,6 +65,8 @@ def create_strategy_debug_panel(terminal):
 
 def create_risk_heatmap_panel(terminal):
     dock = QDockWidget("Risk Heatmap", terminal)
+    dock.setObjectName("risk_heatmap_dock")
+    terminal.risk_heatmap_dock = dock
 
     terminal.risk_map = pg.ImageItem()
 

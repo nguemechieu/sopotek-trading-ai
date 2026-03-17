@@ -48,5 +48,6 @@ class Metrics:
         negative_returns = returns[returns < 0]
 
         downside_std = np.std(negative_returns)
-
+        if downside_std == 0:
+            return np.inf
         return np.mean(returns) / downside_std

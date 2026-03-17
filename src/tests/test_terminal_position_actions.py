@@ -392,3 +392,90 @@ def test_refresh_stellar_asset_explorer_window_filters_screened_assets_for_trust
     assert window._stellar_asset_picker.currentData() == "AQUA:GAQUAISSUER"
     assert window._stellar_asset_trustline_btn.isEnabled() is True
     assert "Loaded 1 Stellar assets (4 total)." in window._stellar_asset_status.text()
+
+
+def test_refresh_strategy_assignment_window_disables_manual_controls_until_auto_scan_finishes():
+    _app()
+    window = SimpleNamespace(
+        _strategy_assignment_status=QLabel(),
+        _strategy_assignment_summary=QLabel(),
+        _strategy_assignment_symbol_picker=QComboBox(),
+        _strategy_assignment_strategy_picker=QComboBox(),
+        _strategy_assignment_timeframe_picker=QComboBox(),
+        _strategy_assignment_top_n=QSpinBox(),
+        _strategy_assignment_table=QTableWidget(),
+        _strategy_assignment_use_default_btn=QPushButton(),
+        _strategy_assignment_assign_single_btn=QPushButton(),
+        _strategy_assignment_assign_ranked_btn=QPushButton(),
+    )
+    controller = SimpleNamespace(
+        symbols=["EUR/USD"],
+        strategy_name="Trend Following",
+        max_symbol_strategies=3,
+        time_frame="1h",
+        symbol_strategy_assignments={},
+        symbol_strategy_rankings={},
+        strategy_auto_assignment_status=lambda: {
+            "enabled": True,
+            "ready": False,
+            "running": True,
+            "completed": 1,
+            "total": 4,
+            "current_symbol": "BTC/USDT",
+            "message": "Scanning all symbols.",
+            "failed_symbols": [],
+        },
+    )
+
+    def strategy_assignment_state_for_symbol(symbol):
+        normalized = str(symbol or "").strip().upper().replace("-", "/").replace("_", "/")
+        return {
+            "symbol": normalized,
+            "mode": "default",
+            "explicit_rows": [],
+            "active_rows": [
+                {
+                    "strategy_name": controller.strategy_name,
+                    "timeframe": controller.time_frame,
+                    "weight": 1.0,
+                }
+            ],
+            "ranked_rows": [],
+        }
+
+    controller.strategy_assignment_state_for_symbol = strategy_assignment_state_for_symbol
+    fake = SimpleNamespace(
+        controller=controller,
+        current_timeframe="1h",
+        detached_tool_windows={"strategy_assignments": window},
+        _current_chart_symbol=lambda: "",
+        _strategy_family_name=lambda name: Terminal._strategy_family_name(SimpleNamespace(), name),
+    )
+    fake._grouped_strategy_names = lambda selected_strategy=None: Terminal._grouped_strategy_names(
+        fake, selected_strategy=selected_strategy
+    )
+    fake._populate_strategy_picker = lambda picker, selected_strategy=None: Terminal._populate_strategy_picker(
+        fake, picker, selected_strategy=selected_strategy
+    )
+
+    Terminal._refresh_strategy_assignment_window(fake, window=window)
+
+    assert window._strategy_assignment_status.text() == "Scanning all symbols."
+    assert "Auto Scan: 1/4" in window._strategy_assignment_summary.text()
+    assert window._strategy_assignment_use_default_btn.isEnabled() is False
+    assert window._strategy_assignment_assign_single_btn.isEnabled() is False
+    assert window._strategy_assignment_assign_ranked_btn.isEnabled() is False
+    assert window._strategy_assignment_strategy_picker.isEnabled() is False
+    assert window._strategy_assignment_timeframe_picker.isEnabled() is False
+    assert window._strategy_assignment_top_n.isEnabled() is False
+
+
+def test_live_trading_bar_style_uses_valid_qt_selectors():
+    style = Terminal._live_trading_bar_style(SimpleNamespace(), armed=True)
+
+    assert "QFrame {" in style
+    assert "QLabel {" in style
+    assert "QProgressBar {" in style
+    assert "QProgressBar::chunk {" in style
+    assert "{{" not in style
+    assert "selection-background-color" not in style

@@ -1,9 +1,12 @@
 import os
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from PySide6.QtWidgets import QApplication
 
 from frontend.ui.dashboard import Dashboard
 
@@ -46,3 +49,64 @@ def test_coinbase_validation_rejects_passphrase_usage():
     )
 
     assert "does not use the passphrase field" in error
+
+
+class _Settings:
+    def __init__(self):
+        self.store = {}
+
+    def value(self, key, default=None):
+        return self.store.get(key, default)
+
+    def setValue(self, key, value):
+        self.store[key] = value
+
+
+def _get_app():
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
+def _make_controller():
+    return SimpleNamespace(
+        settings=_Settings(),
+        strategy_name="EMA Cross",
+        get_license_status=lambda: {"badge": "FREE", "plan_name": "Free", "summary": "Ready"},
+        license_allows=lambda _feature: True,
+        set_language=lambda _code: None,
+        show_license_dialog=lambda *_args, **_kwargs: None,
+    )
+
+
+def test_dashboard_strategy_is_terminal_or_auto_managed(monkeypatch):
+    _get_app()
+    monkeypatch.setattr("frontend.ui.dashboard.CredentialManager.list_accounts", lambda: [])
+    controller = _make_controller()
+
+    dashboard = Dashboard(controller)
+
+    assert not hasattr(dashboard, "strategy_box")
+    assert "auto" in dashboard.market_secondary.body_label.text().lower()
+    assert "terminal" in dashboard.market_secondary.body_label.text().lower()
+    assert "auto" in dashboard.check_strategy.state_label.text().lower()
+    assert "auto per symbol" in dashboard.summary_meta.text().lower()
+
+
+def test_dashboard_connect_emits_controller_strategy_without_dashboard_override(monkeypatch):
+    _get_app()
+    monkeypatch.setattr("frontend.ui.dashboard.CredentialManager.list_accounts", lambda: [])
+    controller = _make_controller()
+    emitted = []
+
+    dashboard = Dashboard(controller)
+    dashboard.login_requested.connect(emitted.append)
+    dashboard.exchange_type_box.setCurrentText("paper")
+    dashboard.exchange_box.setCurrentText("paper")
+    dashboard.mode_box.setCurrentText("paper")
+
+    dashboard._on_connect()
+
+    assert len(emitted) == 1
+    assert emitted[0].strategy == "EMA Cross"

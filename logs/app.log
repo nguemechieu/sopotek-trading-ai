@@ -4,3 +4,150 @@ Broker <broker.ccxt_broker.CCXTBroker object at 0x000001EF0A0F5940> connected
 Initializing broker binanceus
 Initializing broker binanceus
 Broker <broker.ccxt_broker.CCXTBroker object at 0x000001EF0A04B110> connected
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Not enough data for AUD_JPY (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Using polling market data for Oanda
+Not enough data for USD_JPY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUD_JPY (1d): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for GBP_NZD (1d): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for GBP_NZD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUD_NZD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_JPY (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_CAD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for NZD_SGD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Not enough data for HKD_JPY (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR_TRY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_JPY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for GBP_NZD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR_SGD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_SEK (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for HKD_JPY (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Not enough data for EUR_ZAR (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR_TRY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_JPY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+1006634332
+1006634332
+1006634332
+788529924
+788529924
+788529924
+788529924
+788529924
+788529924
+788529924
+788529924
+788529924
+788529924
+Not enough data for AUD_HKD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUD_NZD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Not enough data for USD_HUF (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_JPY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR_TRY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for NZD_SGD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR_GBP (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR_NOK (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_HUF (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Not enough data for USD_HUF (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Using polling market data for Oanda
+Not enough data for USD_JPY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR_TRY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_HUF (30m): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_HUF (4h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_JPY (4h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_JPY (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for NZD_SGD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR_TRY (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR_CZK (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Not enough data for USD_HUF (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Using polling market data for Oanda
+Not enough data for USD/JPY (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_JPY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR/CZK (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Not enough data for USD/JPY (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Using polling market data for Oanda
+Not enough data for USD_JPY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_CNH (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR/CZK (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR/GBP (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CAD/JPY (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR/NOK (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD/HUF (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for SGD_CHF (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for NZD/SGD (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUD/USD (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for NZD/CAD (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_JPY (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR/SEK (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD/SGD (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUD/CAD (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for GBP/NZD (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for GBP/SGD (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD/SEK (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR/SGD (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD/HKD (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR/PLN (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for HKD/JPY (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CHF/ZAR (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ZAR/JPY (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUD/CHF (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD_CNH (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for NZD_SGD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR/CHF (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD/MXN (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for GBP/USD (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for GBP/ZAR (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for SGD/JPY (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Not enough data for NZD_SGD (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for USD/JPY (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Using polling market data for Oanda
+Not enough data for USD_JPY (1h): received 179 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR/CZK (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR/GBP (1h): received 239 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Not enough data for EUR_NOK (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Using polling market data for Oanda
+Not enough data for USD_SGD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for GBP_USD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EUR_JPY (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for NZD_SGD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Not enough data for GBP_NZD (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Using polling market data for Oanda
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Not enough data for HKD_JPY (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Using polling market data for Oanda
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Not enough data for USD_ZAR (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Not enough data for AUD_USD (1h): received 4999 of 50000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUD_USD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CHF_HKD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for GBP_CAD (1h): received 4999 of 10000 requested candles. Indicators, AI signals, and backtests may be limited.

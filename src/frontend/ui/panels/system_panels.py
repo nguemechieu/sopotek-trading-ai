@@ -19,6 +19,8 @@ def create_system_console_panel(terminal):
     terminal.system_console.screenshot_requested.connect(terminal.take_screen_shot)
 
     dock = QDockWidget("System Console", terminal)
+    dock.setObjectName("system_console_dock")
+    terminal.system_console_dock = dock
     dock.setWidget(terminal.system_console)
 
     terminal.addDockWidget(Qt.BottomDockWidgetArea, dock)
@@ -27,6 +29,7 @@ def create_system_console_panel(terminal):
 
 def create_system_status_panel(terminal):
     dock = QDockWidget("System Status", terminal)
+    dock.setObjectName("system_status_dock")
     dock.setMinimumWidth(250)
     dock.setMaximumWidth(320)
     terminal.system_status_dock = dock
@@ -91,6 +94,7 @@ def create_system_status_panel(terminal):
 
 def create_ai_signal_panel(terminal):
     dock = QDockWidget("AI Signal Monitor", terminal)
+    dock.setObjectName("ai_signal_dock")
     terminal.ai_signal_dock = dock
 
     terminal.ai_table = QTableWidget()

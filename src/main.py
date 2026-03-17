@@ -1,111 +1,80 @@
+"""Desktop entrypoint for the Sopotek Trading AI application."""
+# cspell:words qasync sopotek timerid getpid gaierror clientconnectordnserror
+
+from __future__ import annotations
+
 import asyncio
 import faulthandler
+import importlib
 import os
 import socket
 import sys
 from pathlib import Path
+from typing import Any, TextIO
 
-import qasync
-from PySide6.QtCore import QSize
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication
-from qasync import QEventLoop
-
-from frontend.ui.app_controller import AppController
+from PySide6 import QtCore, QtGui, QtWidgets
 
 
-def _patch_qasync_timer_cleanup():
-    simple_timer = getattr(qasync, "_SimpleTimer", None)
-    if simple_timer is None or getattr(simple_timer, "_sopotek_safe_timer_patch", False):
-        return
-
-    def timer_event(self, event):  # noqa: N802
-        timerid = event.timerId()
-        self._SimpleTimer__log_debug("Timer event on id %s", timerid)
-        callbacks = self._SimpleTimer__callbacks
-
-        if self._stopped:
-            self._SimpleTimer__log_debug("Timer stopped, killing %s", timerid)
-            self.killTimer(timerid)
-            callbacks.pop(timerid, None)
-            return
-
-        handle = callbacks.get(timerid)
-        if handle is None:
-            self._SimpleTimer__log_debug("Timer %s already cleared", timerid)
-            self.killTimer(timerid)
-            return
-
-        try:
-            if handle._cancelled:
-                self._SimpleTimer__log_debug("Handle %s cancelled", handle)
-            else:
-                if self._SimpleTimer__debug_enabled:
-                    import time
-                    from asyncio.events import _format_handle
-
-                    loop = asyncio.get_event_loop()
-                    try:
-                        loop._current_handle = handle
-                        self._logger.debug("Calling handle %s", handle)
-                        t0 = time.time()
-                        handle._run()
-                        dt = time.time() - t0
-                        if dt >= loop.slow_callback_duration:
-                            self._logger.warning(
-                                "Executing %s took %.3f seconds",
-                                _format_handle(handle),
-                                dt,
-                            )
-                    finally:
-                        loop._current_handle = None
-                else:
-                    handle._run()
-        finally:
-            callbacks.pop(timerid, None)
-            self.killTimer(timerid)
-
-    simple_timer.timerEvent = timer_event
-    simple_timer._sopotek_safe_timer_patch = True
+_FAULTHANDLER_STATE: dict[str, TextIO | None] = {"stream": None}
 
 
-_patch_qasync_timer_cleanup()
+def _src_root() -> Path:
+    return Path(__file__).resolve().parent
 
-_FAULTHANDLER_STREAM = None
+
+def _ensure_src_on_path() -> None:
+    src_root = _src_root()
+    src_value = str(src_root)
+    if src_value not in sys.path:
+        sys.path.insert(0, src_value)
 
 
-def _install_faulthandler():
-    global _FAULTHANDLER_STREAM
+def _load_qeventloop() -> type[Any]:
+    qasync_module = importlib.import_module("qasync")
+    return qasync_module.QEventLoop
 
+
+def _load_app_controller() -> type[Any]:
+    _ensure_src_on_path()
+    module = importlib.import_module("frontend.ui.app_controller")
+    return module.AppController
+
+
+def _install_faulthandler() -> None:
     if faulthandler.is_enabled():
         return
 
     try:
-        log_dir = Path("logs")
+        log_dir = _src_root() / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        _FAULTHANDLER_STREAM = open(log_dir / "native_crash.log", "a", encoding="utf-8", buffering=1)
-        _FAULTHANDLER_STREAM.write(
-            f"\n=== Native crash trace session pid={os.getpid()} ===\n"
+        stream = (log_dir / "native_crash.log").open(  # pylint: disable=consider-using-with
+            "a",
+            encoding="utf-8",
+            buffering=1,
         )
-        faulthandler.enable(file=_FAULTHANDLER_STREAM, all_threads=True)
-    except Exception:
+        stream.write(f"\n=== Native crash trace session pid={os.getpid()} ===\n")
+        faulthandler.enable(file=stream, all_threads=True)
+        _FAULTHANDLER_STATE["stream"] = stream
+    except (OSError, RuntimeError, ValueError):
         try:
             faulthandler.enable(all_threads=True)
-        except Exception:
-            pass
+        except (OSError, RuntimeError, ValueError):
+            return
 
 
-_install_faulthandler()
-
-
-def _is_dns_resolution_noise(context):
-    message = str((context or {}).get("message") or "").lower()
-    exception = (context or {}).get("exception")
-    future = (context or {}).get("future")
+def _is_dns_resolution_noise(context: dict[str, Any] | None) -> bool:
+    payload = context or {}
+    message = str(payload.get("message") or "").lower()
+    exception = payload.get("exception")
+    future = payload.get("future")
     future_repr = str(future or "").lower()
 
-    details = []
-    for item in (exception, getattr(exception, "__cause__", None), getattr(exception, "__context__", None)):
+    details: list[str] = []
+    for item in (
+        exception,
+        getattr(exception, "__cause__", None),
+        getattr(exception, "__context__", None),
+    ):
         if item is not None:
             details.append(str(item).lower())
 
@@ -124,13 +93,16 @@ def _is_dns_resolution_noise(context):
     )
 
 
-def _install_asyncio_exception_filter(loop, logger=None):
+def _install_asyncio_exception_filter(loop: Any, logger: Any = None) -> None:
     previous_handler = loop.get_exception_handler()
 
-    def handler(active_loop, context):
+    def handler(active_loop: Any, context: dict[str, Any]) -> None:
         if _is_dns_resolution_noise(context):
             if logger is not None:
-                logger.debug("Suppressed transient DNS resolver noise: %s", context.get("message") or context.get("exception"))
+                logger.debug(
+                    "Suppressed transient DNS resolver noise: %s",
+                    context.get("message") or context.get("exception"),
+                )
             return
 
         if previous_handler is not None:
@@ -141,23 +113,36 @@ def _install_asyncio_exception_filter(loop, logger=None):
     loop.set_exception_handler(handler)
 
 
-def main(argv=None):
-    app = QApplication(sys.argv if argv is None else list(argv))
+def main(argv: list[str] | None = None) -> int:
+    """Start the Qt application and run the qasync event loop."""
 
-    loop = QEventLoop(app)
+    _install_faulthandler()
+
+    app = QtWidgets.QApplication(sys.argv if argv is None else list(argv))
+    app.setStyle("Fusion")
+    qeventloop_cls = _load_qeventloop()
+    loop = qeventloop_cls(app)
     asyncio.set_event_loop(loop)
 
-    def _stop_loop():
+    def _stop_loop() -> None:
         if loop.is_running():
             loop.stop()
 
-    window = AppController()
+    app_controller_cls = _load_app_controller()
+    window = app_controller_cls()
     _install_asyncio_exception_filter(loop, logger=getattr(window, "logger", None))
-    window.setIconSize(QSize(48, 48))
-    app.aboutToQuit.connect(_stop_loop)
-    window.setWindowIcon(QIcon("./assets/logo.ico"))
+    window.setIconSize(QtCore.QSize(48, 48))
+
+    icon_path = _src_root() / "assets" / "logo.ico"
+    if icon_path.exists():
+        window.setWindowIcon(QtGui.QIcon(str(icon_path)))
+
     window.setWindowIconText("Sopotek Trading AI Platform")
     window.setWindowTitle("Sopotek Trading AI")
+    quit_signal = getattr(app, "aboutToQuit", None)
+    connect = getattr(quit_signal, "connect", None)
+    if connect is not None:
+        connect(_stop_loop)  # pylint: disable=not-callable
     window.show()
 
     try:
@@ -171,4 +156,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

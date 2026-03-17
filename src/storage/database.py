@@ -92,9 +92,19 @@ def _migrate_sqlite_schema():
     _ensure_sqlite_column("trades", "outcome", "outcome TEXT")
     _ensure_sqlite_column("trades", "lessons", "lessons TEXT")
 
+    _ensure_sqlite_column("equity_snapshots", "exchange", "exchange VARCHAR")
+    _ensure_sqlite_column("equity_snapshots", "account_label", "account_label VARCHAR")
+    _ensure_sqlite_column("equity_snapshots", "equity", "equity FLOAT")
+    _ensure_sqlite_column("equity_snapshots", "balance", "balance FLOAT")
+    _ensure_sqlite_column("equity_snapshots", "free_margin", "free_margin FLOAT")
+    _ensure_sqlite_column("equity_snapshots", "used_margin", "used_margin FLOAT")
+    _ensure_sqlite_column("equity_snapshots", "payload_json", "payload_json TEXT")
+    _ensure_sqlite_column("equity_snapshots", "timestamp", "timestamp DATETIME")
+
 
 def init_database():
     # Import models before create_all so SQLAlchemy sees the mapped tables.
+    from storage import equity_repository  # noqa: F401
     from storage import market_data_repository  # noqa: F401
     from storage import trade_repository  # noqa: F401
 

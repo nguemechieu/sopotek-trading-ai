@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from frontend.ui.app_controller import AppController
+from frontend.ui.app_controller import AppController, _bounded_window_extent
 
 
 class _SignalRecorder:
@@ -23,6 +23,17 @@ class _BufferRecorder:
 
     def update(self, symbol, row):
         self.calls.append((symbol, dict(row)))
+
+
+class _SettingsRecorder:
+    def __init__(self, initial=None):
+        self._values = dict(initial or {})
+
+    def value(self, key, default=None):
+        return self._values.get(key, default)
+
+    def setValue(self, key, value):
+        self._values[key] = value
 
 
 def _make_controller(candles):
@@ -45,6 +56,21 @@ def _make_controller(candles):
     controller._safe_fetch_ohlcv = fake_fetch
     return controller, logs
 
+
+
+
+def test_bounded_window_extent_clamps_to_small_screen():
+    size, minimum = _bounded_window_extent(1600, 900, margin=24, minimum=960)
+
+    assert size == 876
+    assert minimum == 876
+
+
+def test_bounded_window_extent_preserves_requested_size_when_it_fits():
+    size, minimum = _bounded_window_extent(1200, 1920, margin=24, minimum=960)
+
+    assert size == 1200
+    assert minimum == 960
 
 def test_request_candle_data_warns_when_history_is_short():
     candles = [
@@ -118,3 +144,33 @@ def test_update_balance_records_equity_and_emits_signal():
     assert recorded_equity == [10250.5]
     assert controller.equity_signal.calls == [(10250.5,)]
     assert behavior_guard_updates == [{"raw": {"NAV": "10250.50"}}]
+
+def test_performance_history_persists_timestamp_payload():
+    controller = AppController.__new__(AppController)
+    controller.settings = _SettingsRecorder()
+    controller.performance_engine = SimpleNamespace(
+        equity_curve=[1000.0, 1010.5],
+        equity_timestamps=[1710000000.0, 1710003600.0],
+    )
+
+    controller._persist_performance_history()
+    restored = controller._load_persisted_performance_history()
+
+    assert restored == [
+        {"equity": 1000.0, "timestamp": 1710000000.0},
+        {"equity": 1010.5, "timestamp": 1710003600.0},
+    ]
+
+
+
+def test_request_candle_data_does_not_warn_when_only_one_bar_is_missing():
+    candles = [
+        [index, 100.0, 101.0, 99.0, 100.5, 10.0]
+        for index in range(1, 180)
+    ]
+    controller, logs = _make_controller(candles)
+
+    df = asyncio.run(controller.request_candle_data("USD/JPY", timeframe="1h", limit=180))
+
+    assert df is not None
+    assert logs == []

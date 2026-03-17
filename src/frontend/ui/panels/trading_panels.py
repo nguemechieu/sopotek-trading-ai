@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDockWidget, QHBoxLayout, QPushButton, QTableWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDockWidget, QHBoxLayout, QPushButton, QTableWidget, QTabWidget, QVBoxLayout, QWidget
 
 
 POSITION_HEADERS = ["Symbol", "Side", "Amount", "Entry", "Mark", "Value", "PnL", "Action"]
@@ -30,8 +30,7 @@ TRADE_LOG_HEADERS = [
 ]
 
 
-def create_positions_panel(terminal):
-    dock = QDockWidget("Positions", terminal)
+def _build_positions_tab(terminal):
     container = QWidget()
     layout = QVBoxLayout(container)
     layout.setContentsMargins(8, 8, 8, 8)
@@ -50,24 +49,48 @@ def create_positions_panel(terminal):
     terminal.positions_table.setColumnCount(len(POSITION_HEADERS))
     terminal.positions_table.setHorizontalHeaderLabels(POSITION_HEADERS)
     layout.addWidget(terminal.positions_table)
-    dock.setWidget(container)
     terminal.positions_close_all_button = close_all_btn
+    return container
+
+
+def _build_open_orders_tab(terminal):
+    terminal.open_orders_table = QTableWidget()
+    terminal.open_orders_table.setColumnCount(len(OPEN_ORDER_HEADERS))
+    terminal.open_orders_table.setHorizontalHeaderLabels(OPEN_ORDER_HEADERS)
+    return terminal.open_orders_table
+
+
+def create_positions_panel(terminal):
+    dock = QDockWidget("Positions & Orders", terminal)
+    dock.setObjectName("positions_dock")
+    terminal.positions_dock = dock
+    terminal.open_orders_dock = dock
+
+    tabs = QTabWidget()
+    tabs.setObjectName("positions_orders_tabs")
+    tabs.setDocumentMode(True)
+    tabs.setUsesScrollButtons(True)
+    tabs.addTab(_build_positions_tab(terminal), "Positions")
+    tabs.addTab(_build_open_orders_tab(terminal), "Open Orders")
+
+    terminal.positions_orders_tabs = tabs
+    dock.setWidget(tabs)
     terminal.addDockWidget(Qt.BottomDockWidgetArea, dock)
     return dock
 
 
 def create_open_orders_panel(terminal):
-    dock = QDockWidget("Open Orders", terminal)
-    terminal.open_orders_table = QTableWidget()
-    terminal.open_orders_table.setColumnCount(len(OPEN_ORDER_HEADERS))
-    terminal.open_orders_table.setHorizontalHeaderLabels(OPEN_ORDER_HEADERS)
-    dock.setWidget(terminal.open_orders_table)
-    terminal.addDockWidget(Qt.BottomDockWidgetArea, dock)
+    dock = getattr(terminal, "positions_dock", None)
+    if dock is None:
+        dock = create_positions_panel(terminal)
+    terminal.open_orders_dock = dock
     return dock
 
 
 def create_trade_log_panel(terminal):
     dock = QDockWidget("Trade Log", terminal)
+    dock.setObjectName("trade_log_dock")
+    terminal.trade_log_dock = dock
     terminal.trade_log = QTableWidget()
     terminal.trade_log.setColumnCount(len(TRADE_LOG_HEADERS))
     terminal.trade_log.setHorizontalHeaderLabels(TRADE_LOG_HEADERS)
