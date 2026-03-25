@@ -886,6 +886,27 @@ class ChartWidget(QWidget):
             status_detail = f"No candle history was returned for {self.symbol.upper()} ({self.timeframe})."
         self._set_chart_status("error", "No data received.", status_detail)
 
+    def _clear_primary_chart_data(self):
+        self._last_candles = None
+        self._last_df = None
+        self._last_x = None
+        self._last_candle_stats = None
+        self._visible_news_events = []
+        self.candle_item.setData([])
+        self.ema_curve.setData([], [])
+        self.signal_markers.setData([], [])
+        self.news_markers.setData([], [])
+        self.trade_scatter.setData([], [])
+        self.volume_bars.setOpts(
+            x=[],
+            height=[],
+            width=max(float(getattr(self.candle_item, "body_width", 60.0) or 60.0), 1e-6),
+            brushes=[],
+        )
+        self.last_line.setVisible(False)
+        if hasattr(self, "clear_news_events"):
+            self.clear_news_events()
+
     def set_history_notice(self, received_bars: int, requested_bars: int):
         try:
             received = max(0, int(received_bars))
@@ -1967,7 +1988,16 @@ class ChartWidget(QWidget):
                 return x
 
             dt = pd.to_datetime(ts, errors="coerce", utc=True)
-            x = (dt.astype("int64") / 1e9).to_numpy(dtype=float)
+            valid_mask = (~dt.isna()).to_numpy(dtype=bool)
+            if not valid_mask.any():
+                return np.arange(len(df), dtype=float)
+
+            # Normalize to nanosecond precision before converting to epoch seconds.
+            # Pandas may otherwise keep second-based datetime units, which would turn
+            # valid epoch timestamps such as 1700000000 into 1.7 after / 1e9.
+            x = np.full(len(df), np.nan, dtype=float)
+            valid_datetimes = dt.loc[valid_mask].astype("datetime64[ns, UTC]")
+            x[valid_mask] = valid_datetimes.astype("int64").to_numpy(dtype=float) / 1e9
             if np.isnan(x).all():
                 return np.arange(len(df), dtype=float)
             return x
@@ -2008,6 +2038,9 @@ class ChartWidget(QWidget):
         if not finite_mask.all():
             x = x[finite_mask]
         if len(x) < 2:
+            return x
+
+        if str(self.timeframe or "").strip().lower() == "tick":
             return x
 
         expected_step = self._timeframe_seconds()
@@ -3044,15 +3077,33 @@ class ChartWidget(QWidget):
         frame = df.copy()
         if "timestamp" in frame.columns:
             timestamp_series = frame["timestamp"]
-            numeric_timestamps = pd.to_numeric(timestamp_series, errors="coerce")
-            if int(numeric_timestamps.notna().sum()) >= max(1, len(frame.index) // 2):
-                normalized_seconds = numeric_timestamps.where(
-                    numeric_timestamps.abs() <= 1e11,
-                    numeric_timestamps / 1000.0,
-                )
-                frame["timestamp"] = pd.to_datetime(normalized_seconds, unit="s", errors="coerce", utc=True)
-            else:
+            timestamp_inference = ""
+            try:
+                non_null_timestamps = timestamp_series.dropna()
+                if len(non_null_timestamps) > 0:
+                    timestamp_inference = pd.api.types.infer_dtype(non_null_timestamps, skipna=True)
+            except Exception:
+                timestamp_inference = ""
+
+            if pd.api.types.is_datetime64_any_dtype(timestamp_series) or timestamp_inference in {"datetime", "datetime64", "date"}:
                 frame["timestamp"] = pd.to_datetime(timestamp_series, errors="coerce", utc=True)
+            else:
+                numeric_timestamps = pd.to_numeric(timestamp_series, errors="coerce")
+                if int(numeric_timestamps.notna().sum()) >= max(1, len(frame.index) // 2):
+                    normalized_seconds = numeric_timestamps.where(
+                        numeric_timestamps.abs() <= 1e11,
+                        numeric_timestamps / 1000.0,
+                    )
+                    frame["timestamp"] = pd.to_datetime(normalized_seconds, unit="s", errors="coerce", utc=True)
+                else:
+                    frame["timestamp"] = pd.to_datetime(timestamp_series, errors="coerce", utc=True)
+
+            min_timestamp = pd.Timestamp("1990-01-01T00:00:00+00:00")
+            max_timestamp = pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=365 * 5)
+            frame = frame[
+                frame["timestamp"].isna()
+                | ((frame["timestamp"] >= min_timestamp) & (frame["timestamp"] <= max_timestamp))
+            ]
         for column in ["open", "high", "low", "close", "volume"]:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
         frame.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -3061,6 +3112,8 @@ class ChartWidget(QWidget):
             drop_columns.append("timestamp")
         frame.dropna(subset=drop_columns, inplace=True)
         if frame.empty:
+            self._clear_primary_chart_data()
+            self.set_no_data_state("No valid candle timestamps were returned for this chart.")
             return
 
         frame = frame[(frame["open"] > 0) & (frame["high"] > 0) & (frame["low"] > 0) & (frame["close"] > 0)]

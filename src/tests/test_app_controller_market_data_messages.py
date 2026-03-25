@@ -79,10 +79,11 @@ def test_bounded_window_extent_preserves_requested_size_when_it_fits():
     assert minimum == 960
 
 def test_request_candle_data_warns_when_history_is_short():
+    base_timestamp_ms = 1710000000000
     candles = [
-        [1, 100.0, 101.0, 99.0, 100.5, 10.0],
-        [2, 100.5, 101.5, 100.0, 101.0, 12.0],
-        [3, 101.0, 102.0, 100.5, 101.2, 11.0],
+        [base_timestamp_ms, 100.0, 101.0, 99.0, 100.5, 10.0],
+        [base_timestamp_ms + 3600000, 100.5, 101.5, 100.0, 101.0, 12.0],
+        [base_timestamp_ms + 7200000, 101.0, 102.0, 100.5, 101.2, 11.0],
     ]
     controller, logs = _make_controller(candles)
 
@@ -122,6 +123,22 @@ def test_request_candle_data_sanitizes_malformed_ohlcv_rows_before_emitting():
     assert float(df.iloc[1]["volume"]) == 0.0
     assert any("Sanitized OHLCV data for BTC/USDT (1h) from runtime" in message for message, _level in logs)
     assert controller.candle_buffer.calls[-1][1]["close"] == 108.0
+
+
+def test_request_candle_data_rejects_epoch_placeholder_timestamps():
+    candles = [
+        [1, 100.0, 101.0, 99.0, 100.5, 10.0],
+        [2, 100.5, 101.5, 100.0, 101.0, 12.0],
+        [3, 101.0, 102.0, 100.5, 101.2, 11.0],
+    ]
+    controller, logs = _make_controller(candles)
+
+    df = asyncio.run(controller.request_candle_data("BTC/USDT", timeframe="1h", limit=6))
+
+    assert df is None
+    assert any("Sanitized OHLCV data for BTC/USDT (1h) from runtime" in message for message, _level in logs)
+    assert any("no candles were returned" in message for message, _level in logs)
+    assert controller.candle_signal.calls == []
 
 
 def test_request_candle_data_warns_when_no_history_is_available():
@@ -418,8 +435,9 @@ def test_safe_fetch_ohlcv_returns_live_broker_rows_for_non_range_requests():
 
 
 def test_request_candle_data_does_not_warn_when_only_one_bar_is_missing():
+    base_timestamp_ms = 1710000000000
     candles = [
-        [index, 100.0, 101.0, 99.0, 100.5, 10.0]
+        [base_timestamp_ms + ((index - 1) * 3600000), 100.0, 101.0, 99.0, 100.5, 10.0]
         for index in range(1, 180)
     ]
     controller, logs = _make_controller(candles)

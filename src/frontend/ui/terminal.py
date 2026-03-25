@@ -35,8 +35,8 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem,
     QAbstractItemView,
     QPushButton, QLabel, QComboBox, QProgressBar,
-    QTabWidget, QToolBar, QDialog, QGridLayout, QDoubleSpinBox, QMessageBox, QFormLayout, QInputDialog, QColorDialog, 
-    QFrame, QHeaderView,
+    QTabWidget, QToolBar, QDialog, QGridLayout, QDoubleSpinBox, QMessageBox, QFormLayout, QInputDialog, QColorDialog,
+    QFrame, QHeaderView, QMenu,
     QHBoxLayout, QSizePolicy, QTextEdit, QTextBrowser, QApplication, QLineEdit, QSlider, QCheckBox, QScrollArea
 )
 
@@ -983,9 +983,9 @@ class Terminal(QMainWindow):
                 candle_up_color=self.candle_up_color,
                 candle_down_color=self.candle_down_color,
                 show_volume_panel=getattr(self, "show_chart_volume", False),
-                chart_background=self.chart_background_color,
-                grid_color=self.chart_grid_color,
-                axis_color=self.chart_axis_color,
+                chart_background=getattr(self, "chart_background_color", "#11161f"),
+                grid_color=getattr(self, "chart_grid_color", "#8290a0"),
+                axis_color=getattr(self, "chart_axis_color", "#9aa4b2"),
             )
             self._configure_chart_widget(chart)
             chart.setMinimumHeight(300)
@@ -1641,130 +1641,140 @@ class Terminal(QMainWindow):
 
     def _create_menu_bar(self):
         menu_bar = self.menuBar()
+        menu_bar.clear()
+        menu_bar.setStyleSheet(
+            """
+            QMenuBar {
+                background-color: #0b1220;
+                border-bottom: 1px solid #1e2a3f;
+                padding: 4px 10px;
+                color: #dce7f8;
+                spacing: 6px;
+                font-weight: 600;
+            }
+            QMenuBar::item {
+                background: transparent;
+                padding: 6px 10px;
+                margin: 0 2px;
+                border-radius: 8px;
+            }
+            QMenuBar::item:selected {
+                background-color: #132033;
+            }
+            QMenuBar::item:pressed {
+                background-color: #17304f;
+            }
+            QMenu {
+                background-color: #101827;
+                border: 1px solid #24324a;
+                padding: 6px;
+                color: #dce7f8;
+            }
+            QMenu::item {
+                padding: 7px 28px 7px 12px;
+                border-radius: 6px;
+            }
+            QMenu::item:selected {
+                background-color: #17304f;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #24324a;
+                margin: 6px 8px;
+            }
+            """
+        )
 
         self.file_menu = menu_bar.addMenu("")
+        self.trading_menu = menu_bar.addMenu("")
+        self.strategy_menu = menu_bar.addMenu("")
+        self.charts_menu = menu_bar.addMenu("")
+        self.data_menu = menu_bar.addMenu("")
+        self.risk_menu = menu_bar.addMenu("")
+        self.review_menu = menu_bar.addMenu("")
+        self.research_menu = menu_bar.addMenu("")
+        self.tools_menu = menu_bar.addMenu("")
+        self.help_menu = menu_bar.addMenu("")
+
+        self.settings_menu = QMenu(self)
+        self.language_menu = QMenu(self.settings_menu)
+        self.backtest_menu = QMenu(self.strategy_menu)
+
         self.action_generate_report = QAction(self)
         self.action_generate_report.triggered.connect(self._generate_report)
-        self.file_menu.addAction(self.action_generate_report)
         self.action_export_trades = QAction(self)
         self.action_export_trades.triggered.connect(self._export_trades)
-        self.file_menu.addAction(self.action_export_trades)
-        self.file_menu.addSeparator()
         self.action_exit = QAction(self)
         self.action_exit.triggered.connect(self.close)
-        self.file_menu.addAction(self.action_exit)
 
-        self.trading_menu = menu_bar.addMenu("")
         self.action_start_trading = QAction(self)
         self.action_start_trading.triggered.connect(lambda: self._set_autotrading_enabled(True))
         self.action_start_trading.setShortcut("Ctrl+T")
-        self.trading_menu.addAction(self.action_start_trading)
         self.action_stop_trading = QAction(self)
         self.action_stop_trading.triggered.connect(lambda: self._set_autotrading_enabled(False))
-        self.trading_menu.addAction(self.action_stop_trading)
         self.action_manual_trade = QAction(self)
         self.action_manual_trade.triggered.connect(self._open_manual_trade)
-        self.trading_menu.addAction(self.action_manual_trade)
-        self.trading_menu.addSeparator()
         self.action_close_all = QAction(self)
         self.action_close_all.triggered.connect(self._close_all_positions)
-        self.trading_menu.addAction(self.action_close_all)
         self.action_cancel_orders = QAction(self)
         self.action_cancel_orders.triggered.connect(self._cancel_all_orders)
-        self.trading_menu.addAction(self.action_cancel_orders)
         self.action_kill_switch = QAction("Emergency Kill Switch", self)
         self.action_kill_switch.triggered.connect(self._toggle_emergency_stop)
-        self.trading_menu.addAction(self.action_kill_switch)
 
-        self.backtest_menu = menu_bar.addMenu("")
         self.action_run_backtest = QAction(self)
         self.action_run_backtest.triggered.connect(
             lambda: asyncio.get_event_loop().create_task(self.run_backtest_clicked())
         )
         self.action_run_backtest.setShortcut("Ctrl+B")
-        self.backtest_menu.addAction(self.action_run_backtest)
-        self.action_optimize_strategy = QAction(self)
-        self.action_optimize_strategy.triggered.connect(self._optimize_strategy)
-        self.action_optimize_strategy.setShortcut("Ctrl+Shift+O")
-        self.backtest_menu.addAction(self.action_optimize_strategy)
-
-        self.strategy_menu = menu_bar.addMenu("")
-
-        self.charts_menu = menu_bar.addMenu("")
         self.action_new_chart = QAction(self)
         self.action_new_chart.setShortcut("Ctrl+N")
         self.action_new_chart.triggered.connect(self._add_new_chart)
-        self.charts_menu.addAction(self.action_new_chart)
         self.action_multi_chart = QAction(self)
         self.action_multi_chart.triggered.connect(self._multi_chart_layout)
-        self.charts_menu.addAction(self.action_multi_chart)
         self.action_detach_chart = QAction("Detach Current Tab", self)
         self.action_detach_chart.setShortcut("Ctrl+Shift+D")
         self.action_detach_chart.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.action_detach_chart.triggered.connect(self._detach_current_chart_tab)
-        self.charts_menu.addAction(self.action_detach_chart)
         self.action_reattach_chart = QAction("Reattach Active Chart", self)
         self.action_reattach_chart.setShortcut("Ctrl+Shift+R")
         self.action_reattach_chart.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.action_reattach_chart.triggered.connect(self._reattach_active_chart_window)
-        self.charts_menu.addAction(self.action_reattach_chart)
         self.action_tile_chart_windows = QAction("Tile Chart Windows", self)
         self.action_tile_chart_windows.setShortcut("Ctrl+Shift+T")
         self.action_tile_chart_windows.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.action_tile_chart_windows.triggered.connect(self._tile_chart_windows)
-        self.charts_menu.addAction(self.action_tile_chart_windows)
         self.action_cascade_chart_windows = QAction("Cascade Chart Windows", self)
         self.action_cascade_chart_windows.setShortcut("Ctrl+Shift+C")
         self.action_cascade_chart_windows.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.action_cascade_chart_windows.triggered.connect(self._cascade_chart_windows)
-        self.charts_menu.addAction(self.action_cascade_chart_windows)
         self.action_candle_colors = QAction(self)
         self.action_candle_colors.triggered.connect(self._choose_candle_colors)
-        self.charts_menu.addAction(self.action_candle_colors)
         self.action_add_indicator = QAction(self)
         self.action_add_indicator.triggered.connect(self._add_indicator_to_current_chart)
-        self.charts_menu.addAction(self.action_add_indicator)
         self.action_remove_indicator = QAction(self)
         self.action_remove_indicator.triggered.connect(self._remove_indicator_from_current_chart)
-        self.charts_menu.addAction(self.action_remove_indicator)
         self.toggle_bid_ask_lines_action = QAction(self)
         self.toggle_bid_ask_lines_action.setCheckable(True)
         self.toggle_bid_ask_lines_action.setChecked(self.show_bid_ask_lines)
         self.toggle_bid_ask_lines_action.triggered.connect(self._toggle_bid_ask_lines)
-        self.charts_menu.addAction(self.toggle_bid_ask_lines_action)
         self.toggle_volume_bar_action = QAction(self)
         self.toggle_volume_bar_action.setCheckable(True)
         self.toggle_volume_bar_action.setChecked(getattr(self, "show_chart_volume", False))
         self.toggle_volume_bar_action.triggered.connect(self._toggle_chart_volume)
-        self.charts_menu.addAction(self.toggle_volume_bar_action)
-
-        self.data_menu = menu_bar.addMenu("")
         self.action_refresh_markets = QAction(self)
         self.action_refresh_markets.triggered.connect(self._refresh_markets)
-        self.data_menu.addAction(self.action_refresh_markets)
         self.action_refresh_chart = QAction(self)
         self.action_refresh_chart.triggered.connect(self._refresh_active_chart_data)
-        self.data_menu.addAction(self.action_refresh_chart)
         self.action_refresh_orderbook = QAction(self)
         self.action_refresh_orderbook.triggered.connect(self._refresh_active_orderbook)
-        self.data_menu.addAction(self.action_refresh_orderbook)
-        self.data_menu.addSeparator()
         self.action_reload_balance = QAction(self)
         self.action_reload_balance.triggered.connect(self._reload_balance)
-        self.data_menu.addAction(self.action_reload_balance)
-
-        self.settings_menu = menu_bar.addMenu("")
         self.action_app_settings = QAction(self)
         self.action_app_settings.triggered.connect(self._open_settings)
-        self.settings_menu.addAction(self.action_app_settings)
         self.action_risk_settings = QAction("Risk Settings", self)
         self.action_risk_settings.triggered.connect(self._open_risk_settings)
-        self.settings_menu.addAction(self.action_risk_settings)
         self.action_portfolio_view = QAction(self)
         self.action_portfolio_view.triggered.connect(self._show_portfolio_exposure)
-        self.settings_menu.addAction(self.action_portfolio_view)
-
-        self.language_menu = menu_bar.addMenu("")
         self.language_actions = {}
         for code, label in iter_supported_languages():
             action = QAction(label, self)
@@ -1802,6 +1812,7 @@ class Terminal(QMainWindow):
         self.action_position_analysis.setShortcut("Ctrl+Shift+I")
         self.action_strategy_optimization = QAction("Strategy Optimization", self)
         self.action_strategy_optimization.triggered.connect(self._optimize_strategy)
+        self.action_strategy_optimization.setShortcut("Ctrl+Shift+O")
         self.action_strategy_assigner = QAction("Strategy Assigner", self)
         self.action_strategy_assigner.triggered.connect(self._open_strategy_assignment_window)
         self.action_strategy_scorecard = QAction("Strategy Scorecard", self)
@@ -1815,22 +1826,56 @@ class Terminal(QMainWindow):
         self.action_stellar_asset_explorer = QAction("Stellar Asset Explorer", self)
         self.action_stellar_asset_explorer.triggered.connect(self._open_stellar_asset_explorer_window)
 
-        self.strategy_menu.addAction(self.action_strategy_optimization)
-        self.strategy_menu.addAction(self.action_strategy_assigner)
+        self.settings_menu.addAction(self.action_app_settings)
+        self.settings_menu.addMenu(self.language_menu)
+        self.file_menu.addMenu(self.settings_menu)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.action_exit)
+
+        self.trading_menu.addAction(self.action_start_trading)
+        self.trading_menu.addAction(self.action_stop_trading)
+        self.trading_menu.addAction(self.action_manual_trade)
+        self.trading_menu.addSeparator()
+        self.trading_menu.addAction(self.action_close_all)
+        self.trading_menu.addAction(self.action_cancel_orders)
+        self.trading_menu.addSeparator()
+        self.trading_menu.addAction(self.action_kill_switch)
+
+        self.backtest_menu.addAction(self.action_run_backtest)
+        self.backtest_menu.addAction(self.action_strategy_optimization)
+        self.strategy_menu.addMenu(self.backtest_menu)
         self.strategy_menu.addSeparator()
+        self.strategy_menu.addAction(self.action_strategy_assigner)
         self.strategy_menu.addAction(self.action_strategy_scorecard)
         self.strategy_menu.addAction(self.action_strategy_debug)
 
-        self.risk_menu = menu_bar.addMenu("")
+        self.charts_menu.addAction(self.action_new_chart)
+        self.charts_menu.addAction(self.action_multi_chart)
+        self.charts_menu.addSeparator()
+        self.charts_menu.addAction(self.action_detach_chart)
+        self.charts_menu.addAction(self.action_reattach_chart)
+        self.charts_menu.addAction(self.action_tile_chart_windows)
+        self.charts_menu.addAction(self.action_cascade_chart_windows)
+        self.charts_menu.addSeparator()
+        self.charts_menu.addAction(self.action_candle_colors)
+        self.charts_menu.addAction(self.action_add_indicator)
+        self.charts_menu.addAction(self.action_remove_indicator)
+        self.charts_menu.addSeparator()
+        self.charts_menu.addAction(self.toggle_bid_ask_lines_action)
+        self.charts_menu.addAction(self.toggle_volume_bar_action)
+
+        self.data_menu.addAction(self.action_refresh_markets)
+        self.data_menu.addAction(self.action_refresh_chart)
+        self.data_menu.addAction(self.action_refresh_orderbook)
+        self.data_menu.addSeparator()
+        self.data_menu.addAction(self.action_reload_balance)
+
         self.risk_menu.addAction(self.action_risk_settings)
         self.risk_menu.addAction(self.action_portfolio_view)
         self.risk_menu.addAction(self.action_position_analysis)
         self.risk_menu.addAction(self.action_trade_checklist)
         self.risk_menu.addSeparator()
         self.risk_menu.addAction(self.action_system_health)
-        self.risk_menu.addAction(self.action_kill_switch)
-
-        self.review_menu = menu_bar.addMenu("")
         self.review_menu.addAction(self.action_performance)
         self.review_menu.addAction(self.action_recommendations)
         self.review_menu.addAction(self.action_closed_journal)
@@ -1839,37 +1884,17 @@ class Terminal(QMainWindow):
         self.review_menu.addAction(self.action_generate_report)
         self.review_menu.addAction(self.action_export_trades)
 
-        self.research_menu = menu_bar.addMenu("")
         self.research_menu.addAction(self.action_market_chat)
         self.research_menu.addAction(self.action_quant_pm)
         self.research_menu.addAction(self.action_ml_monitor)
         self.research_menu.addAction(self.action_ml_research)
         self.research_menu.addSeparator()
-        self.research_menu.addAction(self.action_strategy_optimization)
-        self.research_menu.addAction(self.action_strategy_assigner)
-        self.research_menu.addAction(self.action_run_backtest)
         self.research_menu.addAction(self.action_stellar_asset_explorer)
 
-        self.tools_menu = menu_bar.addMenu("")
-        self.tools_menu.addAction(self.action_market_chat)
-        self.tools_menu.addAction(self.action_recommendations)
-        self.tools_menu.addAction(self.action_ml_monitor)
         self.tools_menu.addAction(self.action_logs)
+        self.tools_menu.addSeparator()
         self.tools_menu.addAction(self.action_system_console)
         self.tools_menu.addAction(self.action_system_status)
-        self.tools_menu.addAction(self.action_performance)
-        self.tools_menu.addAction(self.action_closed_journal)
-        self.tools_menu.addAction(self.action_trade_checklist)
-        self.tools_menu.addAction(self.action_journal_review)
-        self.tools_menu.addAction(self.action_system_health)
-        self.tools_menu.addAction(self.action_quant_pm)
-        self.tools_menu.addAction(self.action_ml_research)
-        self.tools_menu.addAction(self.action_position_analysis)
-        self.tools_menu.addAction(self.action_strategy_optimization)
-        self.tools_menu.addAction(self.action_strategy_assigner)
-        self.tools_menu.addAction(self.action_stellar_asset_explorer)
-
-        self.help_menu = menu_bar.addMenu("")
         self.action_documentation = QAction(self)
         self.action_documentation.triggered.connect(self._open_docs)
         self.help_menu.addAction(self.action_documentation)
@@ -1912,8 +1937,8 @@ class Terminal(QMainWindow):
         if hasattr(self, "file_menu"):
             self.file_menu.setTitle(self._tr("terminal.menu.file"))
             self.trading_menu.setTitle(self._tr("terminal.menu.trading"))
+            self.strategy_menu.setTitle(self._tr("terminal.menu.strategy"))
             self.backtest_menu.setTitle(self._tr("terminal.menu.backtesting"))
-            self.strategy_menu.setTitle("Strategy")
             self.charts_menu.setTitle(self._tr("terminal.menu.charts"))
             self.data_menu.setTitle(self._tr("terminal.menu.data"))
             self.settings_menu.setTitle(self._tr("terminal.menu.settings"))
@@ -1934,18 +1959,18 @@ class Terminal(QMainWindow):
             self.action_cancel_orders.setText(self._tr("terminal.action.cancel_all"))
             self.action_kill_switch.setText("Emergency Kill Switch")
             self.action_run_backtest.setText(self._tr("terminal.action.run_backtest"))
-            self.action_optimize_strategy.setText("Strategy Optimization")
+            self.action_strategy_optimization.setText("Strategy Optimization")
             self.action_new_chart.setText(self._tr("terminal.action.new_chart"))
             self.action_multi_chart.setText(self._tr("terminal.action.multi_chart"))
-            self.action_detach_chart.setText("Detach Current Tab")
-            self.action_reattach_chart.setText("Reattach Active Chart")
+            self.action_detach_chart.setText("Detach Chart")
+            self.action_reattach_chart.setText("Reattach Chart")
             self.action_tile_chart_windows.setText("Tile Chart Windows")
             self.action_cascade_chart_windows.setText("Cascade Chart Windows")
             self.action_candle_colors.setText(self._tr("terminal.action.candle_colors"))
             self.action_add_indicator.setText(self._tr("terminal.action.add_indicator"))
             self.action_remove_indicator.setText("Remove Indicator")
             self.toggle_bid_ask_lines_action.setText(self._tr("terminal.action.toggle_bid_ask"))
-            self.toggle_volume_bar_action.setText("Volume Bar")
+            self.toggle_volume_bar_action.setText("Show Volume")
             self.action_refresh_markets.setText(self._tr("terminal.action.refresh_markets"))
             self.action_refresh_chart.setText(self._tr("terminal.action.refresh_chart"))
             self.action_refresh_orderbook.setText(self._tr("terminal.action.refresh_orderbook"))
@@ -2353,9 +2378,10 @@ class Terminal(QMainWindow):
             self.controller,
             candle_up_color=self.candle_up_color,
             candle_down_color=self.candle_down_color,
-            chart_background=self.chart_background_color,
-            grid_color=self.chart_grid_color,
-            axis_color=self.chart_axis_color,
+            show_volume_panel=getattr(self, "show_chart_volume", False),
+            chart_background=getattr(self, "chart_background_color", "#11161f"),
+            grid_color=getattr(self, "chart_grid_color", "#8290a0"),
+            axis_color=getattr(self, "chart_axis_color", "#9aa4b2"),
         )
         self._configure_chart_widget(chart)
 
@@ -2693,9 +2719,10 @@ class Terminal(QMainWindow):
             self.controller,
             candle_up_color=self.candle_up_color,
             candle_down_color=self.candle_down_color,
-            chart_background=self.chart_background_color,
-            grid_color=self.chart_grid_color,
-            axis_color=self.chart_axis_color,
+            show_volume_panel=getattr(self, "show_chart_volume", False),
+            chart_background=getattr(self, "chart_background_color", "#11161f"),
+            grid_color=getattr(self, "chart_grid_color", "#8290a0"),
+            axis_color=getattr(self, "chart_axis_color", "#9aa4b2"),
         )
         self._configure_chart_widget(chart)
         if hasattr(chart, "set_compact_view_mode"):
@@ -4793,6 +4820,18 @@ class Terminal(QMainWindow):
         return True
 
     def _apply_default_dock_layout(self):
+        for dock in (
+            self.market_watch_dock,
+            self.positions_dock,
+            self.open_orders_dock,
+            self.trade_log_dock,
+            self.orderbook_dock,
+            self.risk_heatmap_dock,
+            self.ai_signal_dock,
+        ):
+            if dock is not None:
+                dock.show()
+
         self._safe_tabify_docks(self.positions_dock, self.open_orders_dock)
         self._safe_tabify_docks(self.trade_log_dock, self.orderbook_dock)
         self._safe_tabify_docks(self.trade_log_dock, self.risk_heatmap_dock)
@@ -4816,8 +4855,62 @@ class Terminal(QMainWindow):
     def _show_workspace_dock(self, dock):
         if not self._is_qt_object_alive(dock):
             return
+        dock_name = ""
+        try:
+            dock_name = str(dock.objectName() or "").strip()
+        except Exception:
+            dock_name = ""
+
+        default_areas = {
+            "market_watch_dock": Qt.DockWidgetArea.LeftDockWidgetArea,
+            "tick_chart_dock": Qt.DockWidgetArea.LeftDockWidgetArea,
+            "positions_dock": Qt.DockWidgetArea.RightDockWidgetArea,
+            "open_orders_dock": Qt.DockWidgetArea.RightDockWidgetArea,
+            "trade_log_dock": Qt.DockWidgetArea.RightDockWidgetArea,
+            "orderbook_dock": Qt.DockWidgetArea.BottomDockWidgetArea,
+            "risk_heatmap_dock": Qt.DockWidgetArea.BottomDockWidgetArea,
+            "ai_signal_dock": Qt.DockWidgetArea.BottomDockWidgetArea,
+            "strategy_scorecard_dock": Qt.DockWidgetArea.BottomDockWidgetArea,
+            "strategy_debug_dock": Qt.DockWidgetArea.BottomDockWidgetArea,
+            "system_console_dock": Qt.DockWidgetArea.BottomDockWidgetArea,
+            "system_status_dock": Qt.DockWidgetArea.RightDockWidgetArea,
+        }
+
+        try:
+            if dock.isFloating():
+                dock.setFloating(False)
+        except Exception:
+            pass
+
+        target_area = default_areas.get(dock_name)
+        if target_area is not None:
+            try:
+                self.addDockWidget(target_area, dock)
+            except Exception:
+                pass
+
         dock.show()
-        dock.raise_()
+        try:
+            dock.raise_()
+        except Exception:
+            pass
+
+        try:
+            self.resizeDocks(
+                [candidate for candidate in (self.market_watch_dock, self.trade_log_dock) if candidate is not None],
+                [320, 420],
+                Qt.Orientation.Horizontal,
+            )
+            self.resizeDocks(
+                [candidate for candidate in (self.positions_dock, self.open_orders_dock) if candidate is not None],
+                [280, 220],
+                Qt.Orientation.Vertical,
+            )
+        except Exception:
+            pass
+
+        if hasattr(self, "_queue_terminal_layout_fit"):
+            self._queue_terminal_layout_fit()
 
     def _open_strategy_scorecard_dock(self):
         self._show_workspace_dock(getattr(self, "strategy_scorecard_dock", None))

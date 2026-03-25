@@ -19,10 +19,21 @@ _FAULTHANDLER_STATE: dict[str, TextIO | None] = {"stream": None}
 
 
 def _src_root() -> Path:
+    """Get the absolute path to the src directory.
+
+    Returns
+    -------
+    Path
+        The directory containing this script.
+    """
     return Path(__file__).resolve().parent
 
 
 def _ensure_src_on_path() -> None:
+    """Add the src directory to Python's module search path.
+
+    This enables importing of local modules from the src directory.
+    """
     src_root = _src_root()
     src_value = str(src_root)
     if src_value not in sys.path:
@@ -30,17 +41,36 @@ def _ensure_src_on_path() -> None:
 
 
 def _load_qeventloop() -> type[Any]:
+    """Load and return the qasync QEventLoop class.
+
+    Returns
+    -------
+    type[Any]
+        The QEventLoop class from the qasync module.
+    """
     qasync_module = importlib.import_module("qasync")
     return qasync_module.QEventLoop
 
 
 def _load_app_controller() -> type[Any]:
+    """Load and return the AppController class from the frontend module.
+
+    Returns
+    -------
+    type[Any]
+        The AppController class.
+    """
     _ensure_src_on_path()
     module = importlib.import_module("frontend.ui.app_controller")
     return module.AppController
 
 
 def _install_faulthandler() -> None:
+    """Install Python's faulthandler to capture native crashes and core dumps.
+
+    Attempts to write crash traces to a log file. Falls back to stderr if file
+    logging fails.
+    """
     if faulthandler.is_enabled():
         return
 
@@ -63,6 +93,18 @@ def _install_faulthandler() -> None:
 
 
 def _is_dns_resolution_noise(context: dict[str, Any] | None) -> bool:
+    """Check if an asyncio exception is transient DNS resolution noise.
+
+    Parameters
+    ----------
+    context : dict[str, Any] | None
+        The asyncio exception handler context.
+
+    Returns
+    -------
+    bool
+        True if the exception is DNS-related transient noise, False otherwise.
+    """
     payload = context or {}
     message = str(payload.get("message") or "").lower()
     exception = payload.get("exception")
@@ -94,6 +136,18 @@ def _is_dns_resolution_noise(context: dict[str, Any] | None) -> bool:
 
 
 def _install_asyncio_exception_filter(loop: Any, logger: Any = None) -> None:
+    """Install a custom asyncio exception handler to filter DNS resolution noise.
+
+    Suppresses transient DNS resolution errors while preserving meaningful
+    exceptions for proper logging and debugging.
+
+    Parameters
+    ----------
+    loop : Any
+        The asyncio event loop.
+    logger : Any, optional
+        Logger instance for debug messages, by default None.
+    """
     previous_handler = loop.get_exception_handler()
 
     def handler(active_loop: Any, context: dict[str, Any]) -> None:
@@ -114,6 +168,18 @@ def _install_asyncio_exception_filter(loop: Any, logger: Any = None) -> None:
 
 
 def _is_qt_windows_noise(message: str | None) -> bool:
+    """Check if a Qt message is harmless Windows platform integration noise.
+
+    Parameters
+    ----------
+    message : str | None
+        The Qt message text.
+
+    Returns
+    -------
+    bool
+        True if the message is known harmless noise, False otherwise.
+    """
     text = str(message or "").strip()
     if not text:
         return False
@@ -128,6 +194,11 @@ def _is_qt_windows_noise(message: str | None) -> bool:
 
 
 def _install_qt_message_filter() -> None:
+    """Install a custom Qt message handler to filter Windows platform noise.
+
+    Suppresses known harmless Qt warnings on Windows while preserving meaningful
+    messages.
+    """
     previous_handler =  QtCore.qInstallMessageHandler(None)
 
     def handler(mode: Any, context: Any, message: str) -> None:
@@ -141,9 +212,7 @@ def _install_qt_message_filter() -> None:
     QtCore.qInstallMessageHandler(handler)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Start the Qt application and run the qasync event loop."""
-
+def main(argv: list[str] | None = None) -> int: 
     _install_faulthandler()
     _install_qt_message_filter()
 
@@ -185,8 +254,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-else:
-    # If this module is imported, ensure that faulthandler is enabled for the
-    # hosting process. This is especially important for test runs, which may not
-    # execute the main() function.
-    _install_faulthandler()

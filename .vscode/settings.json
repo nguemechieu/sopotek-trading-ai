@@ -10,6 +10,7 @@
         "clientconnectordnserror",
         "gaierror",
         "getpid",
+        "ndim",
         "qasync",
         "sopotek",
         "timerid"

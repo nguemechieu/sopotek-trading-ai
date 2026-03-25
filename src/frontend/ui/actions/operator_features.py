@@ -70,6 +70,20 @@ WORKSPACE_PRESETS = {
     },
 }
 
+PANEL_ACTION_SPECS = (
+    ("action_market_watch_panel", "Market Watch", "market_watch_dock"),
+    ("action_positions_panel", "Positions", "positions_dock"),
+    ("action_open_orders_panel", "Open Orders", "open_orders_dock"),
+    ("action_trade_log_panel", "Trade Log", "trade_log_dock"),
+    ("action_orderbook_panel", "Order Book", "orderbook_dock"),
+    ("action_ai_signal_panel", "AI Signal Monitor", "ai_signal_dock"),
+    ("action_risk_heatmap_panel", "Risk Heatmap", "risk_heatmap_dock"),
+    ("action_strategy_scorecard_panel", "Strategy Scorecard", "strategy_scorecard_dock"),
+    ("action_strategy_debug_panel", "Strategy Debug", "strategy_debug_dock"),
+    ("action_system_console_panel", "System Console", "system_console_dock"),
+    ("action_system_status_panel", "System Status", "system_status_dock"),
+)
+
 
 def install_terminal_operator_features(Terminal):
     if getattr(Terminal, "_operator_features_installed", False):
@@ -1425,6 +1439,8 @@ def install_terminal_operator_features(Terminal):
             {"title": "Review Workspace", "description": "Focus the terminal on journaling and performance review.", "keywords": "workspace preset review layout", "handler": lambda: self._apply_workspace_preset("review")},
             {"title": "Save Layout For Account", "description": "Save the current dock layout for this broker/account.", "keywords": "workspace layout save account", "handler": self._save_current_workspace_layout},
             {"title": "Restore Saved Layout", "description": "Restore the saved dock layout for this broker/account.", "keywords": "workspace layout restore account", "handler": self._restore_saved_workspace_layout},
+            {"title": "Reset Dock Layout", "description": "Restore the main trading panels and default dock arrangement.", "keywords": "workspace reset dock layout panels", "handler": self._apply_default_dock_layout},
+            {"title": "Show Market Watch", "description": "Bring back the Market Watch dock if it was hidden.", "keywords": "market watch watchlist symbols panel dock", "handler": lambda: self._show_workspace_dock(getattr(self, "market_watch_dock", None))},
             {"title": "Favorite Current Symbol", "description": "Pin the active symbol to the top of selectors.", "keywords": "favorite symbol watchlist", "handler": self._toggle_current_symbol_favorite},
             {"title": "Refresh Markets", "description": "Reload available symbols and market state.", "keywords": "refresh markets symbols", "handler": self._refresh_markets},
             {"title": "Refresh Chart", "description": "Reload the active chart candles.", "keywords": "refresh chart candles", "handler": self._refresh_active_chart_data},
@@ -1556,6 +1572,15 @@ def install_terminal_operator_features(Terminal):
             self.action_save_workspace_layout.triggered.connect(self._save_current_workspace_layout)
             self.action_restore_workspace_layout = QAction("Restore Saved Layout", self)
             self.action_restore_workspace_layout.triggered.connect(self._restore_saved_workspace_layout)
+            self.action_reset_dock_layout = QAction("Reset Dock Layout", self)
+            self.action_reset_dock_layout.triggered.connect(self._apply_default_dock_layout)
+            self.panels_menu = self.workspace_menu.addMenu("Panels")
+            for action_name, label, dock_attr in PANEL_ACTION_SPECS:
+                action = QAction(label, self)
+                action.triggered.connect(
+                    lambda _checked=False, attr_name=dock_attr: self._show_workspace_dock(getattr(self, attr_name, None))
+                )
+                setattr(self, action_name, action)
             for action in (
                 self.action_workspace_trading,
                 self.action_workspace_research,
@@ -1566,6 +1591,10 @@ def install_terminal_operator_features(Terminal):
             self.workspace_menu.addSeparator()
             self.workspace_menu.addAction(self.action_save_workspace_layout)
             self.workspace_menu.addAction(self.action_restore_workspace_layout)
+            self.workspace_menu.addAction(self.action_reset_dock_layout)
+            self.workspace_menu.addSeparator()
+            for action_name, _label, _dock_attr in PANEL_ACTION_SPECS:
+                self.panels_menu.addAction(getattr(self, action_name))
             self.action_notifications = QAction("Notification Center", self)
             self.action_notifications.setShortcut("Ctrl+Shift+N")
             self.action_notifications.triggered.connect(self._open_notification_center)

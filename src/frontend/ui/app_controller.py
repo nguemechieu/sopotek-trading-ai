@@ -6284,6 +6284,13 @@ class AppController(QMainWindow):
         if pd.isna(timestamp):
             return None, None
 
+        # Reject placeholder/index-style timestamps that would otherwise render
+        # charts around the Unix epoch (for example 1, 2, 3 => 1970-01-01).
+        min_timestamp = pd.Timestamp("1990-01-01T00:00:00+00:00")
+        max_timestamp = pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=365 * 5)
+        if timestamp < min_timestamp or timestamp > max_timestamp:
+            return None, None
+
         try:
             timestamp_ms = int(timestamp.timestamp() * 1000)
         except Exception:
@@ -6848,6 +6855,147 @@ class AppController(QMainWindow):
             f"Fees: <code>{snapshot.get('fees_label', '-')}</code>\n"
             f"Avg Slippage: <code>{snapshot.get('avg_slippage_label', '-')}</code>"
         )
+
+    async def telegram_settings_text(self, open_window=True):
+        opened_message = ""
+        if open_window:
+            try:
+                opened_message = str(self.market_chat_open_window("settings") or "").strip()
+            except Exception:
+                opened_message = ""
+
+        market_type = str(getattr(self, "market_trade_preference", "auto") or "auto").strip() or "auto"
+        timeframe = str(getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+        scope = str(getattr(self, "autotrade_scope", "all") or "all").strip().title() or "All"
+        broker_label = str(getattr(getattr(self, "broker", None), "exchange_name", "-") or "-").upper()
+        telegram_snapshot = self.telegram_status_snapshot()
+        lines = []
+        if opened_message:
+            lines.append(opened_message)
+        else:
+            lines.append("Settings summary loaded.")
+        lines.extend(
+            [
+                f"Broker: {broker_label}",
+                f"Timeframe: {timeframe}",
+                f"AI Scope: {scope}",
+                f"Market Venue: {market_type}",
+                f"Database Mode: {str(getattr(self, 'database_mode', 'local') or 'local').upper()}",
+                f"Risk Profile: {str(getattr(self, 'risk_profile_name', '-') or '-')}",
+                (
+                    f"News Feed: {'ON' if bool(getattr(self, 'news_enabled', False)) else 'OFF'}"
+                    f" | News AutoTrade: {'ON' if bool(getattr(self, 'news_autotrade_enabled', False)) else 'OFF'}"
+                ),
+                (
+                    f"Telegram: {'ON' if telegram_snapshot.get('enabled') else 'OFF'}"
+                    f" | Configured: {'YES' if telegram_snapshot.get('configured') else 'NO'}"
+                    f" | Can Send: {'YES' if telegram_snapshot.get('can_send') else 'NO'}"
+                ),
+            ]
+        )
+        return "\n".join(lines)
+
+    async def telegram_health_text(self, open_window=True):
+        summary = await self.market_chat_app_status_summary(show_panel=open_window)
+        return str(summary or "System health summary is not available right now.").strip()
+
+    async def telegram_quant_pm_text(self, open_window=True):
+        summary = await self.market_chat_quant_pm_summary(open_window=open_window)
+        return str(summary or "Quant PM summary is not available right now.").strip()
+
+    async def telegram_journal_text(self, open_window=True):
+        return await self.market_chat_trade_history_summary(limit=300, open_window=open_window)
+
+    async def telegram_journal_review_text(self, period="Weekly", open_window=True):
+        terminal = getattr(self, "terminal", None)
+        if terminal is None:
+            return "Journal review is not available right now."
+
+        if open_window and hasattr(terminal, "_open_trade_journal_review_window"):
+            try:
+                terminal._open_trade_journal_review_window()
+            except Exception:
+                pass
+
+        helpers = [
+            "_journal_review_bounds",
+            "_rows_for_journal_period",
+            "_journal_review_analysis_rows",
+            "_summarize_journal_rows",
+            "_journal_review_mistakes",
+            "_journal_review_edge_decay",
+        ]
+        if not all(hasattr(terminal, name) for name in helpers):
+            return await self.market_chat_trade_history_summary(limit=300, open_window=open_window)
+
+        try:
+            rows = await self.fetch_trade_history(limit=700)
+        except Exception:
+            rows = []
+        if not rows:
+            return "Journal review is not available yet because no closed trades were found."
+
+        mode, previous_start, current_start, now = terminal._journal_review_bounds(period)
+        current_rows = terminal._journal_review_analysis_rows(
+            terminal._rows_for_journal_period(rows, current_start, now)
+        )
+        previous_rows = terminal._journal_review_analysis_rows(
+            terminal._rows_for_journal_period(rows, previous_start, current_start)
+        )
+        current_stats = terminal._summarize_journal_rows(current_rows)
+        previous_stats = terminal._summarize_journal_rows(previous_rows)
+        mistakes = list(terminal._journal_review_mistakes(current_rows, current_stats) or [])
+        edge_decay = list(terminal._journal_review_edge_decay(current_stats, previous_stats) or [])
+
+        def fmt_money(value):
+            try:
+                return f"{float(value):.2f}"
+            except Exception:
+                return "-"
+
+        def fmt_pct(value):
+            try:
+                return f"{float(value) * 100.0:.1f}%"
+            except Exception:
+                return "-"
+
+        profit_factor = current_stats.get("profit_factor")
+        profit_factor_text = "-"
+        if profit_factor is not None:
+            try:
+                profit_factor_text = f"{float(profit_factor):.2f}"
+            except Exception:
+                profit_factor_text = "-"
+
+        lines = [
+            "Journal review loaded.",
+            (
+                f"Period: {mode}"
+                f" | Trades: {int(current_stats.get('trade_count') or 0)}"
+                f" | Net PnL: {fmt_money(current_stats.get('net_pnl'))}"
+                f" | Win rate: {fmt_pct(current_stats.get('win_rate'))}"
+            ),
+            (
+                f"Avg trade: {fmt_money(current_stats.get('avg_pnl'))}"
+                f" | Profit factor: {profit_factor_text}"
+                f" | Journal coverage: {fmt_pct(current_stats.get('journal_coverage'))}"
+            ),
+        ]
+        top_strategy = next(iter(current_stats.get("strategy_rows") or []), None)
+        if top_strategy is not None:
+            lines.append(
+                f"Top strategy: {top_strategy.get('strategy')} | Trades: {top_strategy.get('trades')} | "
+                f"Net PnL: {fmt_money(top_strategy.get('net_pnl'))}"
+            )
+        if mistakes:
+            lines.append("Review focus: " + " | ".join(str(item) for item in mistakes[:2]))
+        if edge_decay:
+            lines.append("Edge decay: " + " | ".join(str(item) for item in edge_decay[:2]))
+        lines.append("Use Tools -> Closed Journal and Journal Review for the full annotated breakdown.")
+        return "\n".join(lines)
+
+    async def telegram_logs_text(self, open_window=True):
+        return str(self.market_chat_error_log_summary(open_window=open_window) or "No log summary is available right now.").strip()
 
     async def telegram_position_analysis_text(self, open_window=True):
         summary = self.market_chat_position_summary(open_window=open_window)

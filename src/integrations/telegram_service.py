@@ -270,6 +270,10 @@ class TelegramService:
             else:
                 await self.send_message("Unable to open or capture that chart right now.")
             return
+        rich_action_answer = await self._handle_rich_action_command(command, incoming_chat_id)
+        if rich_action_answer is not None:
+            await self.send_message(rich_action_answer)
+            return
         action_commands = self._slash_action_commands()
         action_text = action_commands.get(command)
         if action_text:
@@ -477,6 +481,43 @@ class TelegramService:
             if result:
                 return str(result)
         return await self._ask_controller(action_text, chat_id)
+
+    async def _handle_rich_action_command(self, command, chat_id):
+        command_map = {
+            "/settings": ("telegram_settings_text", {"open_window": True}, "open settings"),
+            "/health": ("telegram_health_text", {"open_window": True}, "open system health"),
+            "/quantpm": ("telegram_quant_pm_text", {"open_window": True}, "open quant pm"),
+            "/journal": ("telegram_journal_text", {"open_window": True}, "open closed journal"),
+            "/review": ("telegram_journal_review_text", {"open_window": True}, "open journal review"),
+            "/logs": ("telegram_logs_text", {"open_window": True}, "open logs"),
+        }
+        config = command_map.get(str(command or "").strip().lower())
+        if config is None:
+            return None
+
+        method_name, kwargs, fallback_action = config
+        result = await self._call_controller_text_method(method_name, **kwargs)
+        if result:
+            return result
+        return await self._handle_direct_action(fallback_action, chat_id)
+
+    async def _call_controller_text_method(self, method_name, **kwargs):
+        method = getattr(self.controller, str(method_name or "").strip(), None)
+        if not callable(method):
+            return None
+        try:
+            result = method(**kwargs)
+        except TypeError:
+            result = method()
+        if asyncio.iscoroutine(result):
+            result = await result
+        if result is None:
+            return None
+        if isinstance(result, dict):
+            message = result.get("message")
+            if message not in (None, ""):
+                return str(message)
+        return str(result)
 
     async def _ask_controller(self, question, chat_id):
         history = list(self._chat_histories.get(chat_id, []) or [])

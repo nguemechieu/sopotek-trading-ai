@@ -55,22 +55,42 @@ class _FakeTerminal(QMainWindow):
         raise AttributeError(name)
 
 
-def test_create_menu_bar_adds_trader_focused_risk_review_and_research_menus():
+def test_create_menu_bar_groups_actions_into_single_clear_menus():
     _app()
     terminal = _FakeTerminal()
 
     Terminal._create_menu_bar(terminal)
 
+    file_actions = terminal.file_menu.actions()
+    strategy_actions = terminal.strategy_menu.actions()
+    backtest_actions = terminal.backtest_menu.actions()
     risk_actions = terminal.risk_menu.actions()
     review_actions = terminal.review_menu.actions()
     research_actions = terminal.research_menu.actions()
+    tools_actions = terminal.tools_menu.actions()
+    settings_actions = terminal.settings_menu.actions()
+
+    assert terminal.settings_menu.menuAction() in file_actions
+    assert terminal.action_exit in file_actions
+    assert terminal.action_generate_report not in file_actions
+    assert terminal.action_export_trades not in file_actions
+
+    assert terminal.action_app_settings in settings_actions
+    assert terminal.language_menu.menuAction() in settings_actions
+
+    assert terminal.backtest_menu.menuAction() in strategy_actions
+    assert terminal.action_strategy_assigner in strategy_actions
+    assert terminal.action_strategy_scorecard in strategy_actions
+    assert terminal.action_strategy_debug in strategy_actions
+    assert terminal.action_run_backtest in backtest_actions
+    assert terminal.action_strategy_optimization in backtest_actions
 
     assert terminal.action_risk_settings in risk_actions
     assert terminal.action_portfolio_view in risk_actions
     assert terminal.action_position_analysis in risk_actions
     assert terminal.action_trade_checklist in risk_actions
     assert terminal.action_system_health in risk_actions
-    assert terminal.action_kill_switch in risk_actions
+    assert terminal.action_kill_switch not in risk_actions
 
     assert terminal.action_performance in review_actions
     assert terminal.action_recommendations in review_actions
@@ -83,6 +103,14 @@ def test_create_menu_bar_adds_trader_focused_risk_review_and_research_menus():
     assert terminal.action_quant_pm in research_actions
     assert terminal.action_ml_monitor in research_actions
     assert terminal.action_ml_research in research_actions
-    assert terminal.action_strategy_optimization in research_actions
-    assert terminal.action_strategy_assigner in research_actions
-    assert terminal.action_run_backtest in research_actions
+    assert terminal.action_stellar_asset_explorer in research_actions
+    assert terminal.action_recommendations not in research_actions
+    assert terminal.action_strategy_optimization not in research_actions
+    assert terminal.action_strategy_assigner not in research_actions
+    assert terminal.action_run_backtest not in research_actions
+
+    assert terminal.action_logs in tools_actions
+    assert terminal.action_system_console in tools_actions
+    assert terminal.action_system_status in tools_actions
+    assert terminal.action_market_chat not in tools_actions
+    assert terminal.action_performance not in tools_actions

@@ -43,6 +43,24 @@ class DummyController:
     async def market_chat_trade_history_summary(self, limit=300, open_window=True):
         return f"history:{limit}:{open_window}"
 
+    async def telegram_settings_text(self, open_window=True):
+        return f"settings:{open_window}"
+
+    async def telegram_health_text(self, open_window=True):
+        return f"health:{open_window}"
+
+    async def telegram_quant_pm_text(self, open_window=True):
+        return f"quantpm:{open_window}"
+
+    async def telegram_journal_text(self, open_window=True):
+        return f"journal:{open_window}"
+
+    async def telegram_journal_review_text(self, open_window=True):
+        return f"review:{open_window}"
+
+    async def telegram_logs_text(self, open_window=True):
+        return f"logs:{open_window}"
+
     async def telegram_position_analysis_text(self, open_window=True):
         return f"analysis:{open_window}"
 
@@ -197,14 +215,74 @@ def test_history_command_returns_trade_history_summary():
     assert service.messages[-1] == ("history:300:True", False, None)
 
 
-def test_generic_action_command_routes_to_direct_action_handler():
+def test_settings_command_returns_rich_settings_response():
     controller = DummyController()
     service = RecordingTelegramService(controller)
 
     asyncio.run(service._handle_update(build_update("/settings")))
 
-    assert controller.direct_actions[-1] == "open settings"
-    assert service.messages[-1] == ("direct:open settings", False, None)
+    assert controller.direct_actions == []
+    assert service.messages[-1] == ("settings:True", False, None)
+
+
+def test_health_command_returns_rich_health_response():
+    controller = DummyController()
+    service = RecordingTelegramService(controller)
+
+    asyncio.run(service._handle_update(build_update("/health")))
+
+    assert controller.direct_actions == []
+    assert service.messages[-1] == ("health:True", False, None)
+
+
+def test_quantpm_command_returns_rich_quant_summary():
+    controller = DummyController()
+    service = RecordingTelegramService(controller)
+
+    asyncio.run(service._handle_update(build_update("/quantpm")))
+
+    assert controller.direct_actions == []
+    assert service.messages[-1] == ("quantpm:True", False, None)
+
+
+def test_journal_button_returns_journal_summary():
+    controller = DummyController()
+    service = RecordingTelegramService(controller)
+
+    asyncio.run(service._handle_update(build_update("/journal")))
+
+    assert controller.direct_actions == []
+    assert service.messages[-1] == ("journal:True", False, None)
+
+
+def test_review_button_returns_review_summary():
+    controller = DummyController()
+    service = RecordingTelegramService(controller)
+
+    asyncio.run(service._handle_update(build_update("/review")))
+
+    assert controller.direct_actions == []
+    assert service.messages[-1] == ("review:True", False, None)
+
+
+def test_logs_button_returns_log_summary():
+    controller = DummyController()
+    service = RecordingTelegramService(controller)
+
+    asyncio.run(service._handle_update(build_update("/logs")))
+
+    assert controller.direct_actions == []
+    assert service.messages[-1] == ("logs:True", False, None)
+
+
+def test_generic_refresh_action_still_routes_to_direct_action_handler():
+    controller = DummyController()
+    service = RecordingTelegramService(controller)
+
+    asyncio.run(service._handle_update(build_update("/refreshmarkets")))
+
+    assert controller.direct_actions[-1] == "refresh markets"
+    assert service.messages[-1] == ("direct:refresh markets", False, None)
 
 
 def test_plain_text_message_gets_sopotek_pilot_reply():

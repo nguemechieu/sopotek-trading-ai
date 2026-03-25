@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QComboBox, QDockWidget, QMainWindow
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -119,14 +120,21 @@ def test_create_menu_bar_adds_workspace_notifications_palette_and_favorite_actio
     Terminal._create_menu_bar(terminal)
 
     workspace_actions = terminal.workspace_menu.actions()
+    panels_actions = terminal.panels_menu.actions()
     strategy_actions = terminal.strategy_menu.actions()
+    backtest_actions = terminal.backtest_menu.actions()
     assert terminal.action_workspace_trading in workspace_actions
     assert terminal.action_workspace_research in workspace_actions
     assert terminal.action_workspace_risk in workspace_actions
     assert terminal.action_workspace_review in workspace_actions
     assert terminal.action_save_workspace_layout in workspace_actions
     assert terminal.action_restore_workspace_layout in workspace_actions
-    assert terminal.action_strategy_optimization in strategy_actions
+    assert terminal.action_reset_dock_layout in workspace_actions
+    assert terminal.panels_menu.menuAction() in workspace_actions
+    assert terminal.action_market_watch_panel in panels_actions
+    assert terminal.action_system_console_panel in panels_actions
+    assert terminal.backtest_menu.menuAction() in strategy_actions
+    assert terminal.action_strategy_optimization in backtest_actions
     assert terminal.action_strategy_assigner in strategy_actions
     assert terminal.action_strategy_scorecard in strategy_actions
     assert terminal.action_strategy_debug in strategy_actions
@@ -247,6 +255,9 @@ def test_command_palette_entries_include_operator_actions():
         _apply_workspace_preset=lambda _name: None,
         _save_current_workspace_layout=lambda: None,
         _restore_saved_workspace_layout=lambda: None,
+        _apply_default_dock_layout=lambda: None,
+        _show_workspace_dock=lambda _dock: None,
+        market_watch_dock=object(),
         _toggle_current_symbol_favorite=lambda: None,
         _refresh_markets=lambda: None,
         _refresh_active_chart_data=lambda: None,
@@ -254,13 +265,38 @@ def test_command_palette_entries_include_operator_actions():
         _reload_balance=lambda: None,
     )
 
-    entries = Terminal._command_palette_entries(fake, "workspace")
+    entries = Terminal._command_palette_entries(fake, "")
     titles = {entry["title"] for entry in entries}
 
     assert "Trading Workspace" in titles
     assert "Research Workspace" in titles
     assert "Risk Workspace" in titles
     assert "Review Workspace" in titles
+    assert "Reset Dock Layout" in titles
+    assert "Show Market Watch" in titles
+
+
+def test_market_watch_panel_action_shows_hidden_market_watch_dock():
+    _app()
+    terminal = _MenuTerminal()
+    Terminal._create_menu_bar(terminal)
+    _bind(terminal, "_show_workspace_dock")
+    terminal._is_qt_object_alive = lambda obj: obj is not None
+    terminal.show()
+    terminal.market_watch_dock = QDockWidget("Market Watch", terminal)
+    terminal.market_watch_dock.setObjectName("market_watch_dock")
+    terminal.addDockWidget(Qt.LeftDockWidgetArea, terminal.market_watch_dock)
+    terminal.trade_log_dock = QDockWidget("Trade Log", terminal)
+    terminal.trade_log_dock.setObjectName("trade_log_dock")
+    terminal.addDockWidget(Qt.RightDockWidgetArea, terminal.trade_log_dock)
+    terminal.market_watch_dock.setFloating(True)
+    terminal.market_watch_dock.hide()
+
+    terminal.action_market_watch_panel.trigger()
+
+    assert not terminal.market_watch_dock.isHidden()
+    assert terminal.market_watch_dock.isFloating() is False
+    assert terminal.dockWidgetArea(terminal.market_watch_dock) == Qt.LeftDockWidgetArea
 
 
 def test_open_agent_timeline_builds_runtime_table_from_controller_feed():
