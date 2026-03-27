@@ -1398,3 +1398,2137 @@ Skipping GBP_USD buy due to conflicting news bias (sell -0.409)
 Initializing broker oanda
 Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
 Using polling market data for Oanda
+Initializing broker stellar
+Connected to Stellar Horizon (https://horizon.stellar.org)
+Broker ready exchange=stellar type=crypto symbols=4 (raw=49 filtered=49)
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Not enough data for ZOOM/XLM (1h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ZOOM/XLM (1h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZOOM/XLM (1m) from broker: kept 0 row(s), dropped 26 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1m) from cache: kept 0 row(s), dropped 26 malformed row(s).
+Not enough data for ZOOM/XLM (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZOOM/XLM (5m) from broker: kept 0 row(s), dropped 21 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (5m) from cache: kept 0 row(s), dropped 21 malformed row(s).
+Not enough data for ZOOM/XLM (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZOOM/XLM (15m) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (15m) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Not enough data for ZOOM/XLM (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZOOM/XLM (30m) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (30m) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Not enough data for ZOOM/XLM (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Using polling market data for Stellar Horizon
+Not enough data for ZOOM/XLM (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZOOM/XLM (1d) from broker: kept 0 row(s), dropped 17 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1d) from cache: kept 0 row(s), dropped 17 malformed row(s).
+Not enough data for ZOOM/XLM (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for BTC/XLM (1h): received 180 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from broker: kept 0 row(s), dropped 20 malformed row(s).
+Sanitized OHLCV data for ZOOM/XLM (1h) from cache: kept 0 row(s), dropped 20 malformed row(s).
+Initializing broker stellar
+Initialization failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 1313, in handle_login
+    broker = BrokerFactory.create(config)
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\broker_factory.py", line 64, in create
+    return StellarBroker(broker_cfg)
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\stellar_broker.py", line 185, in __init__
+    raise ValueError(
+        "Invalid Stellar public key. It should start with 'G' and be a valid Stellar account address."
+    )
+ValueError: Invalid Stellar public key. It should start with 'G' and be a valid Stellar account address.
+Initializing broker stellar
+Connected to Stellar Horizon (https://horizon.stellar.org)
+Broker ready exchange=stellar type=crypto symbols=11 (raw=103 filtered=103)
+Not enough data for ZWC/USDC (1h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Using polling market data for Stellar Horizon
+Not enough data for AQUA/USDC (1h): received 50 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AQUA/USDC (1h): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AQUA/USDC (1h): received 200 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for BTCLN/USDC (1h): received 200 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for AQUA/USDC (1m): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ETH/USDC (1h): received 200 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for XLM/USDC (1h): received 200 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AQUA/USDC (5m): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for AQUA/USDC; using an empty candle set during cooldown.
+Not enough data for AQUA/USDC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for AQUA/USDC; using an empty candle set during cooldown.
+Not enough data for AQUA/USDC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for AQUA/USDC; using an empty candle set during cooldown.
+Not enough data for AQUA/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for AQUA/USDC; using an empty candle set during cooldown.
+Not enough data for AQUA/USDC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for BLND/USDC; using an empty candle set during cooldown.
+Not enough data for BLND/USDC (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for BLND/USDC; using an empty candle set during cooldown.
+Not enough data for BLND/USDC (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for BLND/USDC; using an empty candle set during cooldown.
+Not enough data for BLND/USDC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for BLND/USDC; using an empty candle set during cooldown.
+Not enough data for BLND/USDC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for BLND/USDC; using an empty candle set during cooldown.
+Not enough data for BLND/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for BLND/USDC; using an empty candle set during cooldown.
+Not enough data for BLND/USDC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for BTCLN/USDC; using an empty candle set during cooldown.
+Not enough data for BTCLN/USDC (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for BTCLN/USDC; using an empty candle set during cooldown.
+Not enough data for BTCLN/USDC (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for BTCLN/USDC; using an empty candle set during cooldown.
+Not enough data for BTCLN/USDC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for BTCLN/USDC; using an empty candle set during cooldown.
+Not enough data for BTCLN/USDC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for BTCLN/USDC; using an empty candle set during cooldown.
+Not enough data for BTCLN/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for BTCLN/USDC; using an empty candle set during cooldown.
+Not enough data for BTCLN/USDC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ETH/USDC; using an empty candle set during cooldown.
+Not enough data for ETH/USDC (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ETH/USDC; using an empty candle set during cooldown.
+Not enough data for ETH/USDC (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ETH/USDC; using an empty candle set during cooldown.
+Not enough data for ETH/USDC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ETH/USDC; using an empty candle set during cooldown.
+Not enough data for ETH/USDC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ETH/USDC; using an empty candle set during cooldown.
+Not enough data for ETH/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ETH/USDC; using an empty candle set during cooldown.
+Not enough data for ETH/USDC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Not enough data for PYUSD/USDC (1h): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for PYUSD/USDC; using an empty candle set during cooldown.
+Not enough data for PYUSD/USDC (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for PYUSD/USDC; using an empty candle set during cooldown.
+Not enough data for PYUSD/USDC (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for PYUSD/USDC; using an empty candle set during cooldown.
+Not enough data for PYUSD/USDC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for PYUSD/USDC; using an empty candle set during cooldown.
+Not enough data for PYUSD/USDC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for PYUSD/USDC; using an empty candle set during cooldown.
+Not enough data for PYUSD/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for PYUSD/USDC; using an empty candle set during cooldown.
+Not enough data for PYUSD/USDC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Not enough data for XLM/USDC (1m): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for XLM/USDC (5m): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for XLM/USDC (15m): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for XLM/USDC (30m): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for XLM/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for XLM/USDC (1d): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for ZSILV/USDC (1h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZSILV/USDC (1m) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for ZSILV/USDC (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZSILV/USDC (5m) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for ZSILV/USDC (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZSILV/USDC (15m) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for ZSILV/USDC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZSILV/USDC (30m) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for ZSILV/USDC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ZSILV/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZSILV/USDC (1d) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for ZSILV/USDC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ZUSD/USDC (1h): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for ZUSD/USDC (1m): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Not enough data for ZUSD/USDC (5m): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZUSD/USDC; using an empty candle set during cooldown.
+Not enough data for ZUSD/USDC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUSD/USDC; using an empty candle set during cooldown.
+Not enough data for ZUSD/USDC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUSD/USDC; using an empty candle set during cooldown.
+Not enough data for ZUSD/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUSD/USDC; using an empty candle set during cooldown.
+Not enough data for ZUSD/USDC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ZUY/USDC (1h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Not enough data for ZUY/USDC (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Not enough data for ZUY/USDC (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Not enough data for ZUY/USDC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Not enough data for ZUY/USDC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Not enough data for ZUY/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Not enough data for ZUY/USDC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ZWC/USDC (1h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Not enough data for ZWC/USDC (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Not enough data for ZWC/USDC (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Not enough data for ZWC/USDC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Not enough data for ZWC/USDC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Not enough data for ZWC/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Not enough data for ZWC/USDC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ZZB/USDC (1h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Not enough data for ZZB/USDC (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Not enough data for ZZB/USDC (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Not enough data for ZZB/USDC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Not enough data for ZZB/USDC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Not enough data for ZZB/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Not enough data for ZZB/USDC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Not enough data for XLM/USDC (1d): received 200 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited OHLCV for ZZB/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited OHLCV for ZWC/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Sanitized OHLCV data for ZSILV/USDC (1h) from broker: kept 0 row(s), dropped 3 malformed row(s).
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Stellar Horizon rate limited OHLCV for ZUY/USDC; using an empty candle set during cooldown.
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 1.5s (attempt 1/3)
+Stellar Horizon rate limited GET /trade_aggregations; retrying in 3.0s (attempt 2/3)
+Initializing broker coinbase
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Broker ready exchange=coinbase type=crypto symbols=0 (raw=893 filtered=0)
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+WebSocket market data enabled for coinbase
+Not enough data for 00/USD (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for APT/USDC (1m): received 194 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Broker ready exchange=coinbase type=crypto symbols=0 (raw=893 filtered=0)
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+WebSocket market data enabled for coinbase
+Not enough data for 00/USD (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for APT/USDC (1m): received 195 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for APT/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for APT/USDT (1h): received 7 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for APT/USDT (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for APT/USDT (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for APT/USDT (15m): received 2 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for APT/USDT (30m): received 5 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for APT/USDT (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for APT/USDT (1d): received 225 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ARB/USD (1m): received 167 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ARB/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ARB/USDC (1m): received 169 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ACH/USD (1h): received 299 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=893 filtered=795)
+WebSocket market data enabled for coinbase
+Not enough data for 00/USD (1h): received 76 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 76 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ARB/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ARKM/USD (1h): received 167 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ARKM/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ARKM/USDC (1h): received 167 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ARKM/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ARPA/USD (1h): received 145 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ARPA/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ARPA/USDC (1h): received 145 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 257, in execute
+    return await self.limit(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 165, in limit
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type="limit")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1991, in create_order
+    raise BadRequest(self.id + ' createOrder() has failed, check your arguments and parameters')
+ccxt.base.errors.BadRequest: coinbase createOrder() has failed, check your arguments and parameters
+Not enough data for ARPA/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ASM/USD (1h): received 226 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASM/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 255, in execute
+    return await self.market(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 161, in market
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type=order.get("type", "market"))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1948, in create_order
+    raise NotSupported(self.id + ' createOrder() only stop limit orders are supported')
+ccxt.base.errors.NotSupported: coinbase createOrder() only stop limit orders are supported
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 255, in execute
+    return await self.market(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 161, in market
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type=order.get("type", "market"))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1948, in create_order
+    raise NotSupported(self.id + ' createOrder() only stop limit orders are supported')
+ccxt.base.errors.NotSupported: coinbase createOrder() only stop limit orders are supported
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 259, in execute
+    return await self.stop_limit(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 169, in stop_limit
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type="stop_limit")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1948, in create_order
+    raise NotSupported(self.id + ' createOrder() only stop limit orders are supported')
+ccxt.base.errors.NotSupported: coinbase createOrder() only stop limit orders are supported
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 259, in execute
+    return await self.stop_limit(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 169, in stop_limit
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type="stop_limit")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1948, in create_order
+    raise NotSupported(self.id + ' createOrder() only stop limit orders are supported')
+ccxt.base.errors.NotSupported: coinbase createOrder() only stop limit orders are supported
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 259, in execute
+    return await self.stop_limit(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 169, in stop_limit
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type="stop_limit")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1948, in create_order
+    raise NotSupported(self.id + ' createOrder() only stop limit orders are supported')
+ccxt.base.errors.NotSupported: coinbase createOrder() only stop limit orders are supported
+Not enough data for CELR/USD (1h): received 227 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for DOT/USDT (1h): received 170 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Not enough data for DOOD/USD (1h): received 283 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Not enough data for DOT/BTC (1h): received 275 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Not enough data for ADA/BTC (1h): received 176 of 1000 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EGLD/USD (1h): received 281 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for EOS/USD (1h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ETC/USD (1h): received 299 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 257, in execute
+    return await self.limit(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 165, in limit
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type="limit")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1991, in create_order
+    raise BadRequest(self.id + ' createOrder() has failed, check your arguments and parameters')
+ccxt.base.errors.BadRequest: coinbase createOrder() has failed, check your arguments and parameters
+Not enough data for DOT/USDT (1h): received 169 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ETC/BTC (1h): received 107 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 257, in execute
+    return await self.limit(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 165, in limit
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type="limit")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1991, in create_order
+    raise BadRequest(self.id + ' createOrder() has failed, check your arguments and parameters')
+ccxt.base.errors.BadRequest: coinbase createOrder() has failed, check your arguments and parameters
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Initializing broker alpaca
+Initialization failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 1327, in handle_login
+    await self.broker.connect()
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\alpaca_broker.py", line 93, in connect
+    account = self.api.get_account()
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\alpaca_trade_api\rest.py", line 280, in get_account
+    resp = self.get('/account')
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\alpaca_trade_api\rest.py", line 254, in get
+    return self._request('GET', path, data)
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\alpaca_trade_api\rest.py", line 222, in _request
+    return self._one_request(method, url, opts, retry)
+           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\alpaca_trade_api\rest.py", line 248, in _one_request
+    raise_api_error(resp, http_error)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\alpaca_trade_api\rest.py", line 83, in raise_api_error
+    raise APIError(error, http_error) from None
+alpaca_trade_api.rest.APIError: unauthorized.
+Initializing broker coinbase
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Broker ready exchange=coinbase type=crypto symbols=0 (raw=893 filtered=0)
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+WebSocket market data enabled for coinbase
+Not enough data for ASM/USDC (1h): received 226 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USD (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASM/USDC (1m): received 33 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASM/USDC (5m): received 62 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASM/USDC (15m): received 137 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASM/USDC (30m): received 180 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASM/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AST/USD (1h): received 166 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AST/USD (1m): received 4 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AST/USD (5m): received 36 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AST/USD (15m): received 69 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AST/USD (30m): received 102 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AST/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2537, in submit_trade_with_preflight
+    preflight = await self._preflight_trade_submission(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<9 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2473, in _preflight_trade_submission
+    raise RuntimeError(str(ai_recommendation.get("reason") or "OpenAI sizing recommended skipping this trade."))
+RuntimeError: Invalid risk params: stop_loss (110.3) is greater than current price (0.2538) for a buy order — cannot size trade safely. Requested 111 exceeds hard_cap 2.0827252526240927.
+Not enough data for AST/USDC (1h): received 166 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AST/USDC (1m): received 4 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AST/USDC (5m): received 36 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AST/USDC (15m): received 69 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AST/USDC (30m): received 102 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AST/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 257, in execute
+    return await self.limit(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 165, in limit
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type="limit")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1991, in create_order
+    raise BadRequest(self.id + ' createOrder() has failed, check your arguments and parameters')
+ccxt.base.errors.BadRequest: coinbase createOrder() has failed, check your arguments and parameters
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 259, in execute
+    return await self.stop_limit(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 169, in stop_limit
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type="stop_limit")
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1948, in create_order
+    raise NotSupported(self.id + ' createOrder() only stop limit orders are supported')
+ccxt.base.errors.NotSupported: coinbase createOrder() only stop limit orders are supported
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 255, in execute
+    return await self.market(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 161, in market
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type=order.get("type", "market"))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1948, in create_order
+    raise NotSupported(self.id + ' createOrder() only stop limit orders are supported')
+ccxt.base.errors.NotSupported: coinbase createOrder() only stop limit orders are supported
+Not enough data for ASTER/USD (1m): received 28 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASTER/USD (5m): received 96 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2553, in submit_trade_with_preflight
+    order = await execution_manager.execute(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\execution_manager.py", line 746, in execute
+    execution = await self.router.route(prepared_order)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\order_router.py", line 12, in route
+    return await self.smart_execution.execute(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 255, in execute
+    return await self.market(order)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 161, in market
+    child = await self._submit_child(order, amount=order["amount"], price=order.get("price"), order_type=order.get("type", "market"))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\execution\smart_execution.py", line 39, in _submit_child
+    return await self.broker.create_order(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        **create_kwargs,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1276, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1948, in create_order
+    raise NotSupported(self.id + ' createOrder() only stop limit orders are supported')
+ccxt.base.errors.NotSupported: coinbase createOrder() only stop limit orders are supported
+Not enough data for ASTER/USD (15m): received 204 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASTER/USD (30m): received 237 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASTER/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ASTER/USD (1d): received 127 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASTER/USDC (1m): received 29 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASTER/USDC (5m): received 95 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASTER/USDC (15m): received 204 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASTER/USDC (30m): received 236 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ASTER/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ASTER/USDC (1d): received 127 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATH/USD (1m): received 39 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATH/USD (5m): received 164 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATH/USD (15m): received 236 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Not enough data for AGLD/USD (1h): received 289 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATH/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=893 filtered=795)
+Not enough data for RONIN/USD (1h): received 266 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+WebSocket market data enabled for coinbase
+Not enough data for 00/USD (1h): received 76 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 76 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATH/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ATOM/BTC (1h): received 75 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATOM/BTC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ATOM/EUR (1h): received 238 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATOM/EUR (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ATOM/GBP (1h): received 238 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATOM/GBP (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Not enough data for ATOM/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Not enough data for ATOM/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6007, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2584, in submit_trade_with_preflight
+    raise RuntimeError("The order was skipped by broker or safety checks.")
+RuntimeError: The order was skipped by broker or safety checks.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=893 filtered=795)
+Not enough data for CELO/USDC (1h): received 267 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+WebSocket market data enabled for coinbase
+Not enough data for ATOM/BTC (1h): received 75 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USD (1h): received 76 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 76 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATOM/BTC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for ATOM/USDT (1h): received 182 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATOM/USDT (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AUCTION/USD (1h): received 228 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUCTION/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AUCTION/USDC (1h): received 229 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUCTION/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AUDD/USDC (1h): received 128 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUDD/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AUDIO/USD (1h): received 186 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUDIO/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=893 filtered=795)
+Not enough data for CELO/USDC (1h): received 267 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATOM/BTC (1h): received 74 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+WebSocket market data enabled for coinbase
+Not enough data for ATOM/BTC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for 00/USD (1h): received 75 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 75 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUDIO/USDC (1h): received 185 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AUDIO/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AURORA/USD (1h): received 164 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AURORA/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AURORA/USDC (1h): received 164 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AURORA/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/BTC (1h): received 117 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/EUR (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Close-position request failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 3301, in _close_position_async
+    result = await controller.close_market_chat_position(symbol, amount=amount, position=position)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 4321, in close_market_chat_position
+    result = await broker.create_order(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1411, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1977, in create_order
+    response = await self.v3PrivatePostBrokerageOrders(self.extend(request, params))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\base\exchange.py", line 1544, in request
+    return await self.fetch2(path, api, method, params, headers, body, config, context)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\base\exchange.py", line 1541, in fetch2
+    return await self.fetch(request['url'], request['method'], request['headers'], request['body'])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\base\exchange.py", line 184, in fetch
+    self.handle_errors(http_status_code, http_status_text, url, method, headers, http_response, json_response, request_headers, request_body)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 2614, in handle_errors
+    feedback = self.id + ' ' + body
+               ~~~~~~~~^~~~~
+TypeError: unsupported operand type(s) for +: 'int' and 'str'
+Not enough data for CELO/USDC (1h): received 364 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=893 filtered=795)
+Not enough data for CELO/USD (1h): received 265 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATOM/BTC (1h): received 72 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+WebSocket market data enabled for coinbase
+Not enough data for ATOM/BTC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for 00/USD (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (1h): received 117 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Initialization failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 1331, in handle_login
+    self.balances = await self._fetch_balances(self.broker)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 1724, in _fetch_balances
+    balances = await broker.fetch_balance()
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\oanda_broker.py", line 719, in fetch_balance
+    payload = await self._request("GET", f"/v3/accounts/{self.account_id}/summary")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\oanda_broker.py", line 100, in _request
+    async with self.session.request(
+               ~~~~~~~~~~~~~~~~~~~~^
+        method,
+        ^^^^^^^
+    ...<3 lines>...
+        json=payload,
+        ^^^^^^^^^^^^^
+    ) as response:
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\aiohttp\client.py", line 1510, in __aenter__
+    self._resp: _RetType = await self._coro
+                           ^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\aiohttp\client.py", line 779, in _request
+    resp = await handler(req)
+           ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\aiohttp\client.py", line 755, in _connect_and_send_request
+    resp = await req.send(conn)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\aiohttp\client_reqrep.py", line 1470, in send
+    await writer.write_headers(status_line, self.headers)
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\aiohttp\http_writer.py", line 217, in write_headers
+    buf = _serialize_headers(status_line, headers)
+  File "aiohttp/_http_writer.pyx", line 148, in aiohttp._http_writer._serialize_headers
+  File "aiohttp/_http_writer.pyx", line 115, in aiohttp._http_writer._write_str_raise_on_nlcr
+    raise ValueError(
+ValueError: Newline or carriage return detected in headers. Potential header injection attack.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Initializing broker coinbase
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Broker ready exchange=coinbase type=crypto symbols=0 (raw=893 filtered=0)
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Not enough data for ATOM/BTC (1h): received 73 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+WebSocket market data enabled for coinbase
+Not enough data for ATOM/BTC (1m): received 1 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USD (1h): received 75 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 75 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATOM/BTC (5m): received 5 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATOM/BTC (15m): received 23 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATOM/BTC (30m): received 42 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for ATOM/BTC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AAVE/GBP (1h): received 297 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6106, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2708, in submit_trade_with_preflight
+    raise RuntimeError(skip_reason or "The order was skipped by broker or safety checks.")
+RuntimeError: insufficient USD balance
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6106, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2708, in submit_trade_with_preflight
+    raise RuntimeError(skip_reason or "The order was skipped by broker or safety checks.")
+RuntimeError: insufficient USD balance
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6106, in _submit_manual_trade
+    order = await self.controller.submit_trade_with_preflight(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<12 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2708, in submit_trade_with_preflight
+    raise RuntimeError(skip_reason or "The order was skipped by broker or safety checks.")
+RuntimeError: insufficient USD balance
+Close-position request failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 3374, in _close_position_async
+    result = await controller.close_market_chat_position(symbol, amount=amount, position=position)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 4409, in close_market_chat_position
+    result = await broker.create_order(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\broker\ccxt_broker.py", line 1411, in create_order
+    created = await self.exchange.create_order(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+    )
+    ^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 1981, in create_order
+    response = await self.v3PrivatePostBrokerageOrders(self.extend(request, params))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\base\exchange.py", line 1544, in request
+    return await self.fetch2(path, api, method, params, headers, body, config, context)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\base\exchange.py", line 1541, in fetch2
+    return await self.fetch(request['url'], request['method'], request['headers'], request['body'])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\base\exchange.py", line 184, in fetch
+    self.handle_errors(http_status_code, http_status_text, url, method, headers, http_response, json_response, request_headers, request_body)
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nguem\AppData\Roaming\Python\Python314\site-packages\ccxt\async_support\coinbase.py", line 2618, in handle_errors
+    feedback = self.id + ' ' + body
+               ~~~~~~~~^~~~~
+TypeError: unsupported operand type(s) for +: 'int' and 'str'
+Not enough data for AVAX/BTC (1h): received 118 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/BTC (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/BTC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/BTC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/BTC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/BTC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USD (1h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USD (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USD (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USD (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USD (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USD (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USDC (1h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USDC (1m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USDC (5m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USDC (15m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USDC (30m): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USDC (1d): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Initializing broker coinbase
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Broker ready exchange=coinbase type=crypto symbols=0 (raw=893 filtered=0)
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Not enough data for AVAX/BTC (1h): received 116 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+WebSocket market data enabled for coinbase
+Not enough data for AVAX/BTC (1m): received 2 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USD (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (5m): received 21 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (15m): received 51 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (30m): received 88 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for BNT/USD (1h): received 138 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Broker ready exchange=coinbase type=crypto symbols=0 (raw=893 filtered=0)
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+WebSocket market data enabled for coinbase
+Not enough data for AVAX/BTC (1h): received 116 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USD (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (1m): received 2 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (5m): received 21 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (15m): received 51 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (30m): received 88 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/BTC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Initializing broker coinbase
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Broker ready exchange=coinbase type=crypto symbols=0 (raw=893 filtered=0)
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+WebSocket market data enabled for coinbase
+Task ws_connect failed: timed out during opening handshake
+WebSocket stream failed: timed out during opening handshake
+Not enough data for 00/USD (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Not enough data for AVAX/USD (1m): received 149 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda

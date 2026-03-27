@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QDockWidget, QMainWindow
+from PySide6.QtWidgets import QApplication, QComboBox, QDockWidget, QMainWindow, QTableWidget
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -79,6 +79,23 @@ class _ChartRequestController:
         return self.frame
 
 
+class _DerivativeChartRequestController(_ChartRequestController):
+    def __init__(self, frame):
+        super().__init__(frame)
+        self.requested_symbols = []
+
+    @staticmethod
+    def _resolve_preferred_market_symbol(symbol, preference=None):
+        normalized = str(symbol or "").strip().upper()
+        if normalized == "BTC/USD":
+            return "BTC/USD:USD"
+        return normalized
+
+    async def request_candle_data(self, symbol, timeframe="1h", limit=None):
+        self.requested_symbols.append(symbol)
+        return self.frame
+
+
 class _ChartRequestTerminal(QMainWindow):
     def __init__(self, frame):
         super().__init__()
@@ -88,6 +105,10 @@ class _ChartRequestTerminal(QMainWindow):
         self.system_console = SimpleNamespace(log=lambda *args, **kwargs: None)
         self.heartbeat = SimpleNamespace(setStyleSheet=lambda *args, **kwargs: None)
         self._chart_request_tokens = {}
+        self.current_timeframe = "1h"
+        self._last_chart_request_key = None
+        self._active_chart_widget_ref = None
+        self.symbol_picker = None
         self.chart = ChartWidget("AAVE/USD", "1h", self.controller)
 
     def _history_request_limit(self):
@@ -848,6 +869,43 @@ def test_request_chart_data_for_widget_marks_empty_broker_history_on_chart():
     assert terminal.chart._chart_status_message == "No data received."
 
 
+def test_request_chart_data_for_widget_retargets_coinbase_derivative_symbol():
+    _app()
+    frame = pd.DataFrame(
+        {
+            "timestamp": [1700000000 + (index * 3600) for index in range(5)],
+            "open": [100.0 + index for index in range(5)],
+            "high": [101.0 + index for index in range(5)],
+            "low": [99.0 + index for index in range(5)],
+            "close": [100.4 + index for index in range(5)],
+            "volume": [1000.0 + (index * 20.0) for index in range(5)],
+        }
+    )
+    terminal = _ChartRequestTerminal(frame)
+    terminal.controller = _DerivativeChartRequestController(frame)
+    terminal.chart.controller = terminal.controller
+    terminal.chart.symbol = "BTC/USD"
+    terminal._active_chart_widget_ref = terminal.chart
+    terminal.symbol_picker = QComboBox()
+    terminal.symbol_picker.addItem("BTC/USD")
+    terminal.symbol_picker.setCurrentText("BTC/USD")
+    _bind(
+        terminal,
+        "_register_chart_request_token",
+        "_is_chart_request_current",
+        "_request_chart_data_for_widget",
+        "_update_chart",
+        "_retarget_chart_widget_symbol",
+    )
+
+    result = asyncio.run(Terminal._request_chart_data_for_widget(terminal, terminal.chart, limit=240))
+
+    assert result is not None
+    assert terminal.controller.requested_symbols == ["BTC/USD:USD"]
+    assert terminal.chart.symbol == "BTC/USD:USD"
+    assert terminal.symbol_picker.currentText() == "BTC/USD:USD"
+
+
 def test_request_chart_data_for_widget_marks_limited_history_after_loading():
     _app()
     frame = pd.DataFrame(
@@ -876,3 +934,39 @@ def test_request_chart_data_for_widget_marks_limited_history_after_loading():
     assert terminal.chart._chart_status_message == "Loaded 60 / 240 candles."
     assert terminal.chart._last_df is not None
     assert len(terminal.chart._last_df.index) == 60
+
+
+def test_update_symbols_retargets_coinbase_derivative_charts():
+    _app()
+    chart = ChartWidget("BTC/USD", "1h", SimpleNamespace(broker=None))
+    refreshed = []
+    symbol_picker = QComboBox()
+    symbol_picker.addItem("BTC/USD")
+    symbol_picker.setCurrentText("BTC/USD")
+    fake = SimpleNamespace(
+        controller=SimpleNamespace(
+            _resolve_preferred_market_symbol=lambda symbol, preference=None: "BTC/USD:USD" if str(symbol).upper() == "BTC/USD" else str(symbol).upper()
+        ),
+        symbols_table=QTableWidget(),
+        symbol_picker=symbol_picker,
+        chart=chart,
+        symbol="BTC/USD",
+        current_timeframe="1h",
+        _active_chart_widget_ref=chart,
+        _configure_market_watch_table=lambda: None,
+        _set_market_watch_row=lambda row, symbol, bid="-", ask="-", status="", usd_value="-": None,
+        _reorder_market_watch_rows=lambda: None,
+        _all_chart_widgets=lambda: [chart],
+        _schedule_chart_data_refresh=lambda chart_ref: refreshed.append(chart_ref.symbol),
+        _is_qt_object_alive=lambda obj: obj is not None,
+        _chart_tabs_ready=lambda: False,
+        _refresh_symbol_picker_favorites=lambda: None,
+        _update_favorite_action_text=lambda: None,
+    )
+    _bind(fake, "_retarget_chart_widget_symbol")
+
+    Terminal._update_symbols(fake, "coinbase", ["BTC/USD:USD"])
+
+    assert chart.symbol == "BTC/USD:USD"
+    assert symbol_picker.currentText() == "BTC/USD:USD"
+    assert refreshed == ["BTC/USD:USD"]

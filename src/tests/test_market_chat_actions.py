@@ -1,13 +1,18 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 import logging
 import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from frontend.ui.app_controller import AppController
+from market_data.candle_buffer import CandleBuffer
+from market_data.orderbook_buffer import OrderBookBuffer
 
 
 def _make_controller():
@@ -42,6 +47,89 @@ def _make_controller():
     controller._last_requested_symbol = None
     controller._last_requested_timeframe = None
     return controller
+
+
+def _utc_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _prime_trade_safety_buffers(controller, symbol, *, timestamp=None, include_orderbook=False):
+    ts = timestamp or _utc_now_iso()
+    controller.candle_buffers = {}
+    controller.candle_buffer = CandleBuffer()
+    controller.candle_buffer.update(
+        symbol,
+        {
+            "timestamp": ts,
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "close": 100.5,
+            "volume": 10.0,
+        },
+    )
+    controller.orderbook_buffer = OrderBookBuffer()
+    if include_orderbook:
+        controller.orderbook_buffer.update(
+            symbol,
+            bids=[[99.5, 1.0]],
+            asks=[[100.5, 1.0]],
+            updated_at=ts,
+        )
+    return ts
+
+
+def _configure_trade_preflight_controller(
+    controller,
+    *,
+    exchange_name,
+    mode,
+    preference,
+    markets,
+    balances,
+    supports_orderbook=False,
+):
+    async def fake_create_order(**kwargs):
+        return {"status": "submitted", "id": "cert-order-001", **kwargs}
+
+    async def fake_fetch_balance():
+        return balances
+
+    broker = SimpleNamespace(
+        exchange_name=exchange_name,
+        connected=(mode == "live"),
+        exchange=SimpleNamespace(markets=markets),
+        create_order=fake_create_order,
+        fetch_balance=fake_fetch_balance,
+        supported_market_venues=lambda: {
+            "coinbase": ["auto", "spot", "derivative"],
+            "oanda": ["auto", "otc"],
+            "alpaca": ["auto", "spot"],
+            "stellar": ["auto", "spot"],
+            "paper": ["auto", "spot", "derivative", "option", "otc"],
+        }.get(exchange_name, ["auto", "spot"]),
+    )
+    if supports_orderbook:
+        async def fake_fetch_orderbook(symbol, limit=None):
+            return {"symbol": symbol, "bids": [[99.5, 1.0]], "asks": [[100.5, 1.0]]}
+
+        broker.fetch_orderbook = fake_fetch_orderbook
+
+    controller.broker = broker
+    controller.is_live_mode = lambda: mode == "live"
+    controller.current_account_label = lambda: "Primary"
+    controller.market_trade_preference = preference
+    controller.balances = dict(balances)
+    controller.balance = dict(balances)
+    controller.normalize_trade_quantity = lambda symbol, amount, quantity_mode=None: {
+        "symbol": symbol,
+        "requested_mode": "units",
+        "requested_amount": float(amount),
+        "requested_amount_units": float(amount),
+        "amount_units": float(amount),
+    }
+    controller._display_trade_amount = lambda amount_units, quantity: float(amount_units)
+    return broker
 
 
 def test_handle_market_chat_action_returns_native_snapshot_for_symbol_request():
@@ -330,6 +418,398 @@ def test_submit_market_chat_trade_applies_smaller_openai_size_recommendation():
     assert order["ai_adjusted"] is True
     assert order["size_adjusted"] is True
     assert order["applied_requested_mode_amount"] == 0.4
+
+
+def test_submit_trade_with_preflight_skips_openai_sizing_for_manual_orders():
+    controller = _make_controller()
+    submitted = {}
+
+    async def fake_create_order(**kwargs):
+        submitted.update(kwargs)
+        return {"status": "submitted", "id": "manual-no-ai-001", "amount": kwargs["amount"]}
+
+    async def fail_openai_sizing(**_kwargs):
+        raise AssertionError("manual orders should not call OpenAI sizing")
+
+    controller.broker = SimpleNamespace(exchange_name="paper", create_order=fake_create_order)
+    controller.openai_api_key = "test-key"
+    controller._recommend_trade_size_with_openai = fail_openai_sizing
+
+    order = asyncio.run(
+        controller.submit_trade_with_preflight(
+            symbol="BTC/USDT",
+            side="buy",
+            amount=1.0,
+            source="manual",
+        )
+    )
+
+    assert submitted["amount"] == 1.0
+    assert order["ai_adjusted"] is False
+
+
+def test_submit_trade_with_preflight_resolves_coinbase_derivative_contract_symbol():
+    controller = _make_controller()
+    submitted = {}
+
+    async def fake_create_order(**kwargs):
+        submitted.update(kwargs)
+        return {"status": "submitted", "id": "coinbase-derivative-001", **kwargs}
+
+    markets = {
+        "BTC/USD": {
+            "symbol": "BTC/USD",
+            "base": "BTC",
+            "quote": "USD",
+            "spot": True,
+            "active": True,
+        },
+        "BTC/USD:USD": {
+            "symbol": "BTC/USD:USD",
+            "base": "BTC",
+            "quote": "USD",
+            "settle": "USD",
+            "contract": True,
+            "future": True,
+            "active": True,
+        },
+    }
+    controller.market_trade_preference = "derivative"
+    controller.broker = SimpleNamespace(
+        exchange_name="coinbase",
+        market_preference="derivative",
+        resolved_market_preference="derivative",
+        symbols=["BTC/USD:USD"],
+        exchange=SimpleNamespace(markets=markets),
+        create_order=fake_create_order,
+        supported_market_venues=lambda: ["auto", "spot", "derivative"],
+    )
+
+    order = asyncio.run(
+        controller.submit_trade_with_preflight(
+            symbol="BTC/USD",
+            side="buy",
+            amount=1.0,
+            source="manual",
+        )
+    )
+
+    assert submitted["symbol"] == "BTC/USD:USD"
+    assert order["symbol"] == "BTC/USD:USD"
+    assert order["requested_symbol"] == "BTC/USD"
+
+
+@pytest.mark.parametrize(
+    ("exchange_name", "mode", "preference", "request_symbol", "expected_symbol", "expected_venue", "markets", "balances"),
+    [
+        (
+            "paper",
+            "paper",
+            "spot",
+            "BTC/USDT",
+            "BTC/USDT",
+            "spot",
+            {"BTC/USDT": {"symbol": "BTC/USDT", "base": "BTC", "quote": "USDT", "spot": True, "active": True}},
+            {"free": {"USDT": 100000.0, "BTC": 5.0}, "cash": 100000.0, "equity": 100000.0},
+        ),
+        (
+            "paper",
+            "paper",
+            "derivative",
+            "BTC/USD:USD",
+            "BTC/USD:USD",
+            "derivative",
+            {"BTC/USD:USD": {"symbol": "BTC/USD:USD", "base": "BTC", "quote": "USD", "settle": "USD", "contract": True, "future": True, "active": True}},
+            {"free": {"USD": 100000.0, "BTC": 5.0}, "cash": 100000.0, "equity": 100000.0},
+        ),
+        (
+            "coinbase",
+            "live",
+            "spot",
+            "BTC/USD",
+            "BTC/USD",
+            "spot",
+            {
+                "BTC/USD": {"symbol": "BTC/USD", "base": "BTC", "quote": "USD", "spot": True, "active": True},
+                "BTC/USD:USD": {"symbol": "BTC/USD:USD", "base": "BTC", "quote": "USD", "settle": "USD", "contract": True, "future": True, "active": True},
+            },
+            {"free": {"USD": 100000.0, "BTC": 5.0}, "cash": 100000.0, "equity": 100000.0},
+        ),
+        (
+            "coinbase",
+            "live",
+            "derivative",
+            "BTC/USD",
+            "BTC/USD:USD",
+            "derivative",
+            {
+                "BTC/USD": {"symbol": "BTC/USD", "base": "BTC", "quote": "USD", "spot": True, "active": True},
+                "BTC/USD:USD": {"symbol": "BTC/USD:USD", "base": "BTC", "quote": "USD", "settle": "USD", "contract": True, "future": True, "active": True},
+            },
+            {"free": {"USD": 100000.0, "BTC": 5.0}, "cash": 100000.0, "equity": 100000.0},
+        ),
+        (
+            "oanda",
+            "live",
+            "otc",
+            "EUR/USD",
+            "EUR/USD",
+            "otc",
+            {"EUR/USD": {"symbol": "EUR/USD", "base": "EUR", "quote": "USD", "otc": True, "active": True}},
+            {"free": {"USD": 100000.0, "EUR": 50000.0}, "cash": 100000.0, "equity": 100000.0},
+        ),
+        (
+            "alpaca",
+            "live",
+            "spot",
+            "AAPL",
+            "AAPL",
+            "spot",
+            {"AAPL": {"symbol": "AAPL", "base": "AAPL", "quote": "USD", "spot": True, "active": True}},
+            {"free": {"USD": 100000.0, "AAPL": 50.0}, "cash": 100000.0, "equity": 100000.0},
+        ),
+        (
+            "stellar",
+            "live",
+            "spot",
+            "BTC/XLM",
+            "BTC/XLM",
+            "spot",
+            {"BTC/XLM": {"symbol": "BTC/XLM", "base": "BTC", "quote": "XLM", "spot": True, "active": True}},
+            {"free": {"XLM": 100000.0, "BTC": 5.0}, "cash": 100000.0, "equity": 100000.0},
+        ),
+    ],
+)
+def test_broker_certification_matrix_smoke_preflight(
+    exchange_name,
+    mode,
+    preference,
+    request_symbol,
+    expected_symbol,
+    expected_venue,
+    markets,
+    balances,
+):
+    controller = _make_controller()
+    fresh_timestamp = _prime_trade_safety_buffers(controller, expected_symbol)
+    _configure_trade_preflight_controller(
+        controller,
+        exchange_name=exchange_name,
+        mode=mode,
+        preference=preference,
+        markets=markets,
+        balances=balances,
+    )
+
+    async def fresh_ticker(symbol):
+        return {
+            "symbol": expected_symbol if preference == "derivative" else symbol,
+            "price": 105.0,
+            "last": 105.0,
+            "bid": 104.9,
+            "ask": 105.1,
+            "timestamp": fresh_timestamp,
+            "_received_at": fresh_timestamp,
+        }
+
+    controller._safe_fetch_ticker = fresh_ticker
+
+    preflight = asyncio.run(
+        controller.preview_trade_submission(
+            symbol=request_symbol,
+            side="buy",
+            amount=1.0,
+            source="manual",
+            timeframe="1h",
+        )
+    )
+
+    assert preflight["symbol"] == expected_symbol
+    assert preflight["resolved_venue"] == expected_venue
+    assert preflight["eligibility_check"]["ok"] is True
+    assert preflight["market_data_guard"]["blocked"] is False
+
+
+def test_assess_trade_market_data_guard_requires_fresh_orderbook_for_orderbook_brokers():
+    controller = _make_controller()
+    fresh_timestamp = _prime_trade_safety_buffers(controller, "BTC/USDT", include_orderbook=False)
+    _configure_trade_preflight_controller(
+        controller,
+        exchange_name="paper",
+        mode="live",
+        preference="spot",
+        markets={"BTC/USDT": {"symbol": "BTC/USDT", "base": "BTC", "quote": "USDT", "spot": True, "active": True}},
+        balances={"free": {"USDT": 100000.0, "BTC": 5.0}, "cash": 100000.0, "equity": 100000.0},
+        supports_orderbook=True,
+    )
+
+    guard = asyncio.run(
+        controller._assess_trade_market_data_guard(
+            "BTC/USDT",
+            timeframe="1h",
+            ticker={
+                "symbol": "BTC/USDT",
+                "price": 105.0,
+                "last": 105.0,
+                "bid": 104.9,
+                "ask": 105.1,
+                "timestamp": fresh_timestamp,
+                "_received_at": fresh_timestamp,
+            },
+        )
+    )
+
+    assert guard["blocked"] is True
+    assert "orderbook data" in guard["reasons"][0].lower()
+    assert guard["orderbook"]["supported"] is True
+    assert guard["orderbook"]["fresh"] is False
+
+
+def test_preview_trade_submission_blocks_live_trade_when_quote_is_stale():
+    controller = _make_controller()
+    _prime_trade_safety_buffers(controller, "BTC/USDT")
+    _configure_trade_preflight_controller(
+        controller,
+        exchange_name="paper",
+        mode="live",
+        preference="spot",
+        markets={"BTC/USDT": {"symbol": "BTC/USDT", "base": "BTC", "quote": "USDT", "spot": True, "active": True}},
+        balances={"free": {"USDT": 100000.0, "BTC": 5.0}, "cash": 100000.0, "equity": 100000.0},
+    )
+
+    stale_timestamp = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+
+    async def stale_ticker(symbol):
+        return {
+            "symbol": symbol,
+            "price": 105.0,
+            "last": 105.0,
+            "bid": 104.9,
+            "ask": 105.1,
+            "timestamp": stale_timestamp,
+            "_received_at": stale_timestamp,
+        }
+
+    controller._safe_fetch_ticker = stale_ticker
+
+    try:
+        asyncio.run(
+            controller.preview_trade_submission(
+                symbol="BTC/USDT",
+                side="buy",
+                amount=1.0,
+                source="manual",
+                timeframe="1h",
+            )
+        )
+    except RuntimeError as exc:
+        assert "quote data" in str(exc).lower()
+    else:
+        raise AssertionError("Expected stale live quote data to block the trade")
+
+
+def test_preview_trade_submission_rejects_unsupported_market_venue():
+    controller = _make_controller()
+    _prime_trade_safety_buffers(controller, "BTC/USDT")
+    _configure_trade_preflight_controller(
+        controller,
+        exchange_name="alpaca",
+        mode="live",
+        preference="derivative",
+        markets={"BTC/USDT": {"symbol": "BTC/USDT", "base": "BTC", "quote": "USDT", "spot": True, "active": True}},
+        balances={"free": {"USDT": 100000.0, "BTC": 5.0}, "cash": 100000.0, "equity": 100000.0},
+    )
+
+    try:
+        asyncio.run(
+            controller.preview_trade_submission(
+                symbol="BTC/USDT",
+                side="buy",
+                amount=1.0,
+                source="manual",
+                timeframe="1h",
+            )
+        )
+    except RuntimeError as exc:
+        assert "not supported by this broker profile" in str(exc).lower()
+    else:
+        raise AssertionError("Expected unsupported venue selection to fail preflight")
+
+
+def test_submit_market_chat_trade_ignores_invalid_ai_risk_param_rejection():
+    controller = _make_controller()
+    submitted = {}
+
+    async def fake_create_order(**kwargs):
+        submitted.update(kwargs)
+        return {"status": "submitted", "id": "ai-invalid-risk-001", "amount": kwargs["amount"]}
+
+    async def fake_recommend_trade_size_with_openai(**_kwargs):
+        return {
+            "recommended_units": 0.0,
+            "reason": "Invalid risk params: stop_loss is greater than current price for a buy order.",
+        }
+
+    controller.broker = SimpleNamespace(exchange_name="paper", create_order=fake_create_order)
+    controller._recommend_trade_size_with_openai = fake_recommend_trade_size_with_openai
+
+    order = asyncio.run(
+        controller.submit_market_chat_trade(
+            symbol="BTC/USDT",
+            side="buy",
+            amount=1.0,
+            stop_loss=999.0,
+        )
+    )
+
+    assert submitted["amount"] == 1.0
+    assert order["ai_adjusted"] is False
+
+
+def test_submit_trade_with_preflight_surfaces_execution_manager_skip_reason():
+    controller = _make_controller()
+
+    async def fake_preflight_trade_submission(**_kwargs):
+        return {
+            "requested_amount": 1.0,
+            "requested_mode": "units",
+            "requested_amount_units": 1.0,
+            "deterministic_amount_units": 1.0,
+            "amount_units": 1.0,
+            "applied_requested_mode_amount": 1.0,
+            "size_adjusted": False,
+            "ai_adjusted": False,
+            "sizing_summary": "Preflight kept the requested size.",
+            "sizing_notes": [],
+            "ai_sizing_reason": "",
+            "reference_price": 105.1,
+            "closeout_guard": {},
+        }
+
+    class FakeExecutionManager:
+        async def execute(self, **_kwargs):
+            return None
+
+        def last_skip_reason(self, _symbol):
+            return "No available USDT balance to buy BTC/USDT."
+
+    controller._preflight_trade_submission = fake_preflight_trade_submission
+    controller.trading_system = SimpleNamespace(execution_manager=FakeExecutionManager())
+    controller.broker = SimpleNamespace(exchange_name="paper")
+
+    try:
+        asyncio.run(
+            controller.submit_trade_with_preflight(
+                symbol="BTC/USDT",
+                side="buy",
+                amount=1.0,
+                source="manual",
+            )
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "No available USDT balance to buy BTC/USDT."
+    else:
+        raise AssertionError("Expected manual trade skip reason to be surfaced")
 
 
 def test_handle_market_chat_action_surfaces_chatgpt_size_note():

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -55,8 +56,10 @@ from storage.agent_decision_repository import AgentDecisionRepository
 from storage.database import configure_database, get_database_url, init_database
 from storage.equity_repository import EquitySnapshotRepository
 from storage.market_data_repository import MarketDataRepository
+from storage.trade_audit_repository import TradeAuditRepository
 from storage.trade_repository import TradeRepository
 from strategy.strategy import Strategy
+from frontend.ui.services.trade_safety import age_seconds, format_age_label, timeframe_seconds
 
 from frontend.ui.i18n import DEFAULT_LANGUAGE, apply_runtime_translations, normalize_language_code, translate
 from frontend.ui.terminal import Terminal
@@ -123,6 +126,7 @@ def _normalize_history_boundary(value, *, end_of_day=False):
 
 class AppController(QMainWindow):
     MAX_HISTORY_LIMIT = 50000
+    MAX_BACKTEST_HISTORY_LIMIT = 1000000
     FOREX_STANDARD_LOT_UNITS = 100000.0
     ORDER_SIZE_BUFFER = 0.98
     OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
@@ -174,6 +178,10 @@ class AppController(QMainWindow):
     COINBASE_AUTO_ASSIGN_SYMBOL_LIMIT = 6
     COINBASE_TICKER_POLL_LIMIT = 8
     COINBASE_TICKER_POLL_SECONDS = 2.0
+    QUOTE_STALE_SECONDS = 20.0
+    ORDERBOOK_STALE_SECONDS = 20.0
+    CANDLE_STALE_MIN_SECONDS = 60.0
+    CANDLE_STALE_MULTIPLIER = 3.0
     FOREX_SYMBOL_QUOTES = {
         "AED", "AUD", "CAD", "CHF", "CNH", "CZK", "DKK", "EUR", "GBP", "HKD",
         "HUF", "JPY", "MXN", "NOK", "NZD", "PLN", "SEK", "SGD", "THB", "TRY",
@@ -1194,6 +1202,7 @@ class AppController(QMainWindow):
         self.database_connection_url = configured_url or get_database_url()
         self.market_data_repository = MarketDataRepository()
         self.trade_repository = TradeRepository()
+        self.trade_audit_repository = TradeAuditRepository()
         self.equity_repository = EquitySnapshotRepository()
         self.agent_decision_repository = AgentDecisionRepository()
         self._rebind_storage_dependencies()
@@ -1455,6 +1464,88 @@ class AppController(QMainWindow):
 
         base, quote = normalized_symbol.split("/", 1)
         return base.strip(), quote.split(":", 1)[0].strip()
+
+    def _market_matches_trade_preference(self, symbol, market=None, preference=None):
+        normalized_preference = normalize_market_venue(
+            self._active_market_trade_preference_value() if preference is None else preference,
+            default="auto",
+        )
+        if normalized_preference == "auto":
+            return True
+
+        market = market if isinstance(market, dict) else self._broker_market_for_symbol(symbol)
+        if normalized_preference == "derivative":
+            return self._symbol_market_is_derivative(symbol, market=market)
+        if normalized_preference == "option":
+            return bool((market or {}).get("option"))
+        if normalized_preference == "otc":
+            return bool((market or {}).get("otc"))
+        if normalized_preference == "spot":
+            if bool((market or {}).get("option")) or bool((market or {}).get("otc")):
+                return False
+            return not self._symbol_market_is_derivative(symbol, market=market)
+        return True
+
+    def _resolve_preferred_market_symbol(self, symbol, preference=None):
+        normalized_symbol = self._normalize_market_data_symbol(symbol)
+        if not normalized_symbol:
+            return ""
+
+        exact_market = self._broker_market_for_symbol(normalized_symbol)
+        exact_symbol = str((exact_market or {}).get("symbol") or normalized_symbol).strip().upper() or normalized_symbol
+        normalized_preference = normalize_market_venue(
+            self._active_market_trade_preference_value() if preference is None else preference,
+            default="auto",
+        )
+        if self._market_matches_trade_preference(exact_symbol, market=exact_market, preference=normalized_preference):
+            return exact_symbol
+
+        markets = getattr(getattr(getattr(self, "broker", None), "exchange", None), "markets", None)
+        if not isinstance(markets, dict) or not markets:
+            return exact_symbol
+
+        base, quote = self._market_symbol_base_quote(normalized_symbol, market=exact_market)
+        if not base or not quote:
+            return exact_symbol
+
+        candidates = []
+        for market_symbol, market in markets.items():
+            if not isinstance(market, dict):
+                continue
+
+            declared_symbol = str(market.get("symbol") or market_symbol or "").strip().upper()
+            if not declared_symbol:
+                continue
+
+            candidate_base, candidate_quote = self._market_symbol_base_quote(declared_symbol, market=market)
+            if candidate_base != base or candidate_quote != quote:
+                continue
+            if not self._market_matches_trade_preference(declared_symbol, market=market, preference=normalized_preference):
+                continue
+
+            score = 0
+            if declared_symbol == normalized_symbol:
+                score += 1000
+            if bool(market.get("active", True)):
+                score += 100
+            if normalized_preference == "derivative":
+                settle_currency = str(market.get("settle") or "").upper().strip()
+                if settle_currency == quote:
+                    score += 20
+                if bool(market.get("future")):
+                    score += 10
+                if bool(market.get("swap")):
+                    score += 5
+            elif normalized_preference == "spot" and bool(market.get("spot")):
+                score += 10
+
+            candidates.append((score, declared_symbol))
+
+        if candidates:
+            candidates.sort(key=lambda item: (-item[0], item[1]))
+            return candidates[0][1]
+
+        return exact_symbol
 
     def _filter_symbols_for_trading(self, symbols, broker_type, exchange=None):
         exchange_code = self._active_exchange_code(exchange=exchange)
@@ -2094,7 +2185,7 @@ class AppController(QMainWindow):
         if "/" not in normalized_symbol:
             return None, None
         base_currency, quote_currency = normalized_symbol.split("/", 1)
-        return base_currency or None, quote_currency or None
+        return base_currency or None, quote_currency.split(":", 1)[0] or None
 
     def _display_trade_amount(self, amount_units, quantity):
         try:
@@ -2150,6 +2241,7 @@ class AppController(QMainWindow):
                 ticker = None
 
         if isinstance(ticker, dict):
+            ticker = self._prepare_ticker_snapshot(symbol, ticker)
             price_keys = ("ask", "price", "last", "close", "mid") if str(side or "").lower() == "buy" else (
                 "bid",
                 "price",
@@ -2181,6 +2273,227 @@ class AppController(QMainWindow):
             if numeric is not None and numeric > 0:
                 return float(numeric)
         return None
+
+    def _market_venue_for_symbol(self, symbol, market=None):
+        market = market if isinstance(market, dict) else self._broker_market_for_symbol(symbol)
+        if isinstance(market, dict):
+            if bool(market.get("option")):
+                return "option"
+            if bool(market.get("otc")):
+                return "otc"
+            if self._symbol_market_is_derivative(symbol, market=market):
+                return "derivative"
+        return "spot"
+
+    def _prepare_ticker_snapshot(self, symbol, ticker):
+        if not isinstance(ticker, dict):
+            return ticker
+        snapshot = dict(ticker)
+        normalized_symbol = self._normalize_market_data_symbol(snapshot.get("symbol") or symbol) or str(symbol or "").strip().upper()
+        received_at = snapshot.get("_received_at") or snapshot.get("timestamp") or datetime.now(timezone.utc).isoformat()
+        snapshot["symbol"] = normalized_symbol
+        snapshot.setdefault("timestamp", received_at)
+        snapshot["_received_at"] = received_at
+        return snapshot
+
+    def _latest_cached_candle_timestamp(self, symbol, timeframe=None):
+        normalized_symbol = self._normalize_market_data_symbol(symbol) or str(symbol or "").strip().upper()
+        timeframe_value = str(timeframe or getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+        symbol_candidates = [normalized_symbol]
+        resolved_symbol = self._resolve_preferred_market_symbol(normalized_symbol)
+        if resolved_symbol and resolved_symbol not in symbol_candidates:
+            symbol_candidates.append(resolved_symbol)
+
+        caches = getattr(self, "candle_buffers", {})
+        for candidate in symbol_candidates:
+            symbol_cache = caches.get(candidate, {}) if isinstance(caches, dict) else {}
+            frame = symbol_cache.get(timeframe_value) if isinstance(symbol_cache, dict) else None
+            if frame is None or getattr(frame, "empty", True):
+                continue
+            try:
+                timestamp_value = frame["timestamp"].iloc[-1]
+            except Exception:
+                timestamp_value = None
+            if timestamp_value is not None:
+                return timestamp_value
+
+        candle_buffer = getattr(self, "candle_buffer", None)
+        if candle_buffer is not None and hasattr(candle_buffer, "latest"):
+            for candidate in symbol_candidates:
+                try:
+                    latest = candle_buffer.latest(candidate)
+                except Exception:
+                    latest = None
+                if isinstance(latest, dict):
+                    timestamp_value = latest.get("timestamp")
+                    if timestamp_value is not None:
+                        return timestamp_value
+        return None
+
+    async def _assess_trade_market_data_guard(self, symbol, *, timeframe=None, ticker=None):
+        normalized_symbol = self._resolve_preferred_market_symbol(symbol) or self._normalize_market_data_symbol(symbol) or str(symbol or "").strip().upper()
+        timeframe_value = str(timeframe or getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+        quote_threshold = max(1.0, float(getattr(self, "QUOTE_STALE_SECONDS", 20.0) or 20.0))
+        candle_threshold_seconds = max(
+            float(getattr(self, "CANDLE_STALE_MIN_SECONDS", 60.0) or 60.0),
+            float(timeframe_seconds(timeframe_value, default=60))
+            * float(getattr(self, "CANDLE_STALE_MULTIPLIER", 3.0) or 3.0),
+        )
+        orderbook_threshold = max(1.0, float(getattr(self, "ORDERBOOK_STALE_SECONDS", 20.0) or 20.0))
+
+        ticker_snapshot = self._prepare_ticker_snapshot(
+            normalized_symbol,
+            ticker or self._cached_ticker_snapshot(normalized_symbol),
+        )
+        quote_age_seconds = age_seconds(
+            (ticker_snapshot or {}).get("_received_at") or (ticker_snapshot or {}).get("timestamp")
+        )
+        quote_fresh = quote_age_seconds is not None and quote_age_seconds <= quote_threshold
+
+        candle_timestamp = self._latest_cached_candle_timestamp(normalized_symbol, timeframe=timeframe_value)
+        candle_age_seconds = age_seconds(candle_timestamp)
+        candle_fresh = candle_age_seconds is not None and candle_age_seconds <= candle_threshold_seconds
+
+        orderbook_supported = bool(self.get_broker_capabilities().get("orderbook"))
+        book_snapshot = getattr(self, "orderbook_buffer", None)
+        if book_snapshot is not None and hasattr(book_snapshot, "get"):
+            try:
+                book_snapshot = book_snapshot.get(normalized_symbol)
+            except Exception:
+                book_snapshot = None
+        else:
+            book_snapshot = None
+        orderbook_age_seconds = age_seconds((book_snapshot or {}).get("updated_at"))
+        orderbook_fresh = orderbook_age_seconds is not None and orderbook_age_seconds <= orderbook_threshold
+
+        blocked_reasons = []
+        if not quote_fresh:
+            blocked_reasons.append(
+                f"Live trade blocked: quote data for {normalized_symbol} is stale ({format_age_label(quote_age_seconds)} old)."
+            )
+        if not candle_fresh:
+            blocked_reasons.append(
+                f"Live trade blocked: candle data for {normalized_symbol} {timeframe_value} is stale ({format_age_label(candle_age_seconds)} old)."
+            )
+        if orderbook_supported and not orderbook_fresh:
+            blocked_reasons.append(
+                f"Live trade blocked: orderbook data for {normalized_symbol} is stale ({format_age_label(orderbook_age_seconds)} old)."
+            )
+
+        return {
+            "blocked": bool(blocked_reasons),
+            "reasons": blocked_reasons,
+            "quote": {
+                "supported": True,
+                "fresh": quote_fresh,
+                "age_seconds": quote_age_seconds,
+                "age_label": format_age_label(quote_age_seconds),
+                "threshold_seconds": quote_threshold,
+                "threshold_label": format_age_label(quote_threshold),
+            },
+            "candles": {
+                "supported": True,
+                "fresh": candle_fresh,
+                "age_seconds": candle_age_seconds,
+                "age_label": format_age_label(candle_age_seconds),
+                "threshold_seconds": candle_threshold_seconds,
+                "threshold_label": format_age_label(candle_threshold_seconds),
+                "timeframe": timeframe_value,
+            },
+            "orderbook": {
+                "supported": orderbook_supported,
+                "fresh": orderbook_fresh if orderbook_supported else None,
+                "age_seconds": orderbook_age_seconds,
+                "age_label": format_age_label(orderbook_age_seconds),
+                "threshold_seconds": orderbook_threshold if orderbook_supported else None,
+                "threshold_label": format_age_label(orderbook_threshold) if orderbook_supported else "",
+            },
+        }
+
+    def _evaluate_trade_eligibility(self, symbol):
+        broker = getattr(self, "broker", None)
+        market = self._broker_market_for_symbol(symbol)
+        resolved_venue = self._market_venue_for_symbol(symbol, market=market)
+        active_preference = self._active_market_trade_preference_value()
+        supported_venues = self.supported_market_venues()
+        capabilities = self.get_broker_capabilities()
+        issues = []
+        warnings = []
+
+        if broker is None:
+            issues.append("Connect a broker before submitting a trade.")
+        if not capabilities.get("trading"):
+            issues.append("The connected broker does not expose order submission.")
+        if active_preference != "auto" and active_preference not in supported_venues:
+            issues.append(f"The active market venue '{active_preference}' is not supported by this broker profile.")
+        if active_preference != "auto" and resolved_venue != active_preference:
+            issues.append(
+                f"{symbol} resolves to the {resolved_venue} venue while the active session is set to {active_preference}."
+            )
+        if self.is_live_mode() and not self._broker_is_connected(broker):
+            issues.append("The live broker session is not connected.")
+        if self.is_live_mode() and self.current_account_label() == "Not set":
+            warnings.append("The broker did not expose an account id. Verify you are on the intended live account.")
+
+        return {
+            "ok": not issues,
+            "issues": issues,
+            "warnings": warnings,
+            "resolved_venue": resolved_venue,
+            "supported_market_venues": supported_venues,
+            "active_market_preference": active_preference,
+        }
+
+    async def _record_trade_audit(
+        self,
+        action,
+        *,
+        status=None,
+        symbol=None,
+        requested_symbol=None,
+        side=None,
+        order_type=None,
+        source=None,
+        order_id=None,
+        message=None,
+        payload=None,
+        venue=None,
+    ):
+        repository = getattr(self, "trade_audit_repository", None)
+        if repository is None:
+            return None
+        exchange_name = str(getattr(getattr(self, "broker", None), "exchange_name", "") or "").strip().lower() or None
+        account_label = str(self.current_account_label() or "").strip() or None
+        resolved_symbol = str(symbol or "").strip().upper() or None
+        requested_symbol_value = str(requested_symbol or resolved_symbol or "").strip().upper() or None
+        resolved_venue = str(venue or self._market_venue_for_symbol(resolved_symbol or requested_symbol_value)).strip().lower() or None
+        try:
+            return await asyncio.to_thread(
+                repository.record_event,
+                action=action,
+                status=status,
+                exchange=exchange_name,
+                account_label=account_label,
+                symbol=resolved_symbol,
+                requested_symbol=requested_symbol_value,
+                side=side,
+                order_type=order_type,
+                venue=resolved_venue,
+                source=source,
+                order_id=order_id,
+                message=message,
+                payload=payload,
+            )
+        except Exception:
+            self.logger.debug("Trade audit persistence failed for %s", action, exc_info=True)
+            return None
+
+    def queue_trade_audit(self, action, **payload):
+        try:
+            loop = asyncio.get_event_loop()
+        except Exception:
+            return None
+        return loop.create_task(self._record_trade_audit(action, **payload))
 
     def _extract_json_object(self, text):
         payload_text = str(text or "").strip()
@@ -2313,6 +2626,23 @@ class AppController(QMainWindow):
             "reason": str(recommendation.get("reason") or "").strip(),
         }
 
+    @staticmethod
+    def _should_ignore_ai_size_rejection(reason):
+        lowered = str(reason or "").strip().lower()
+        if not lowered:
+            return False
+        return any(
+            token in lowered
+            for token in (
+                "invalid risk params",
+                "cannot size trade safely",
+                "stop_loss",
+                "take_profit",
+                "stop loss",
+                "take profit",
+            )
+        )
+
     async def _preflight_trade_submission(
         self,
         *,
@@ -2325,14 +2655,21 @@ class AppController(QMainWindow):
         stop_price=None,
         stop_loss=None,
         take_profit=None,
+        source=None,
+        timeframe=None,
     ):
         broker = getattr(self, "broker", None)
         if broker is None:
             raise RuntimeError("Connect a broker before placing an order.")
 
-        quantity = self.normalize_trade_quantity(symbol, amount, quantity_mode=quantity_mode)
+        resolved_symbol = self._resolve_preferred_market_symbol(symbol) or self._normalize_market_data_symbol(symbol) or str(symbol or "").strip().upper()
+        timeframe_value = str(timeframe or getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+        quantity = self.normalize_trade_quantity(resolved_symbol, amount, quantity_mode=quantity_mode)
         requested_units = float(quantity["amount_units"])
         exchange_name = str(getattr(broker, "exchange_name", "") or "").strip().lower()
+        eligibility = self._evaluate_trade_eligibility(resolved_symbol)
+        if not eligibility.get("ok"):
+            raise RuntimeError(" ".join(str(item).strip() for item in eligibility.get("issues", []) if str(item).strip()))
 
         live_balances = {}
         if hasattr(broker, "fetch_balance"):
@@ -2351,13 +2688,20 @@ class AppController(QMainWindow):
             raise RuntimeError(str(closeout_guard.get("reason") or "Margin closeout guard blocked the trade."))
 
         reference_price, _ticker = await self._resolve_trade_reference_price(
-            symbol,
+            resolved_symbol,
             side,
             order_type=order_type,
             price=price,
             stop_price=stop_price,
         )
-        base_currency, quote_currency = self._trade_symbol_parts(symbol)
+        market_data_guard = await self._assess_trade_market_data_guard(
+            resolved_symbol,
+            timeframe=timeframe_value,
+            ticker=_ticker,
+        )
+        if self.is_live_mode() and market_data_guard.get("blocked"):
+            raise RuntimeError(" ".join(str(item).strip() for item in market_data_guard.get("reasons", []) if str(item).strip()))
+        base_currency, quote_currency = self._trade_symbol_parts(resolved_symbol)
         free_margin = self._balance_metric_value(
             balances,
             "free_margin",
@@ -2385,14 +2729,14 @@ class AppController(QMainWindow):
             free_base_balance = self._balance_bucket_currency_value(balances, "free", base_currency)
             if side_value == "buy" and free_quote_balance is not None and reference_price and reference_price > 0:
                 if free_quote_balance <= 0:
-                    raise RuntimeError(f"No available {quote_currency} balance to buy {symbol}.")
+                    raise RuntimeError(f"No available {quote_currency} balance to buy {resolved_symbol}.")
                 quote_cap = max(0.0, float(free_quote_balance) * self.ORDER_SIZE_BUFFER / float(reference_price))
                 hard_caps.append(quote_cap)
                 if quote_cap + 1e-12 < requested_units:
                     sizing_notes.append(f"Available {quote_currency} balance reduced the order size.")
             if side_value == "sell" and free_base_balance is not None:
                 if free_base_balance <= 0:
-                    raise RuntimeError(f"No available {base_currency} balance to sell {symbol}.")
+                    raise RuntimeError(f"No available {base_currency} balance to sell {resolved_symbol}.")
                 base_cap = max(0.0, float(free_base_balance) * self.ORDER_SIZE_BUFFER)
                 hard_caps.append(base_cap)
                 if base_cap + 1e-12 < requested_units:
@@ -2405,7 +2749,7 @@ class AppController(QMainWindow):
             if cash_cap + 1e-12 < requested_units:
                 sizing_notes.append("Available cash balance reduced the order size.")
 
-        margin_rate = await self._instrument_margin_rate(symbol, broker=broker)
+        margin_rate = await self._instrument_margin_rate(resolved_symbol, broker=broker)
         if reference_price and reference_price > 0 and free_margin is not None and margin_rate is not None and margin_rate > 0:
             if free_margin <= 0:
                 raise RuntimeError("No free margin is available for a new leveraged trade.")
@@ -2450,27 +2794,34 @@ class AppController(QMainWindow):
         if deterministic_units <= 0:
             raise RuntimeError("No safe order size is available with the current balance, margin, and risk settings.")
 
-        ai_recommendation = await self._recommend_trade_size_with_openai(
-            symbol=symbol,
-            side=side_value,
-            quantity=quantity,
-            requested_units=requested_units,
-            deterministic_units=deterministic_units,
-            reference_price=reference_price,
-            balances=balances,
-            closeout_guard=closeout_guard,
-            order_type=order_type,
-            price=price,
-            stop_price=stop_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-        )
+        normalized_source = str(source or "").strip().lower()
+        ai_recommendation = None
+        if normalized_source != "manual":
+            ai_recommendation = await self._recommend_trade_size_with_openai(
+                symbol=resolved_symbol,
+                side=side_value,
+                quantity=quantity,
+                requested_units=requested_units,
+                deterministic_units=deterministic_units,
+                reference_price=reference_price,
+                balances=balances,
+                closeout_guard=closeout_guard,
+                order_type=order_type,
+                price=price,
+                stop_price=stop_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+            )
         final_units = deterministic_units
         ai_adjusted = False
         if isinstance(ai_recommendation, dict):
             ai_units = max(0.0, float(ai_recommendation.get("recommended_units", deterministic_units) or 0.0))
             if ai_units <= 0:
-                raise RuntimeError(str(ai_recommendation.get("reason") or "OpenAI sizing recommended skipping this trade."))
+                ai_reason = str(ai_recommendation.get("reason") or "").strip()
+                if self._should_ignore_ai_size_rejection(ai_reason):
+                    ai_units = final_units
+                else:
+                    raise RuntimeError(ai_reason or "OpenAI sizing recommended skipping this trade.")
             if ai_units + 1e-12 < final_units:
                 final_units = ai_units
                 ai_adjusted = True
@@ -2498,21 +2849,61 @@ class AppController(QMainWindow):
         prepared = dict(quantity)
         prepared.update(
             {
+                "symbol": resolved_symbol,
+                "requested_symbol": self._normalize_market_data_symbol(symbol) or resolved_symbol,
                 "requested_amount_units": requested_units,
                 "amount_units": float(final_units),
                 "deterministic_amount_units": float(deterministic_units),
                 "reference_price": float(reference_price) if reference_price is not None else None,
                 "balances": balances,
+                "trade_timeframe": timeframe_value,
                 "closeout_guard": closeout_guard,
+                "market_data_guard": market_data_guard,
+                "eligibility_check": eligibility,
+                "resolved_venue": eligibility.get("resolved_venue"),
+                "supported_market_venues": eligibility.get("supported_market_venues"),
                 "size_adjusted": size_adjusted,
                 "ai_adjusted": ai_adjusted,
                 "applied_requested_mode_amount": applied_display_amount,
                 "sizing_summary": " ".join(part for part in summary_parts if part).strip(),
                 "sizing_notes": [note for note in sizing_notes if note],
-                "ai_sizing_reason": str((ai_recommendation or {}).get("reason") or "").strip(),
+                "ai_sizing_reason": (
+                    ""
+                    if self._should_ignore_ai_size_rejection((ai_recommendation or {}).get("reason"))
+                    else str((ai_recommendation or {}).get("reason") or "").strip()
+                ),
             }
         )
         return prepared
+
+    async def preview_trade_submission(
+        self,
+        *,
+        symbol,
+        side,
+        amount,
+        quantity_mode=None,
+        order_type="market",
+        price=None,
+        stop_price=None,
+        stop_loss=None,
+        take_profit=None,
+        source="manual",
+        timeframe=None,
+    ):
+        return await self._preflight_trade_submission(
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            quantity_mode=quantity_mode,
+            order_type=order_type,
+            price=price,
+            stop_price=stop_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            source=source,
+            timeframe=timeframe,
+        )
 
     async def submit_trade_with_preflight(
         self,
@@ -2529,61 +2920,116 @@ class AppController(QMainWindow):
         source="manual",
         strategy_name="Manual",
         reason="Manual order",
+        preflight=None,
+        timeframe=None,
     ):
         broker = getattr(self, "broker", None)
         if broker is None:
             raise RuntimeError("Connect a broker before placing an order.")
 
-        preflight = await self._preflight_trade_submission(
-            symbol=symbol,
-            side=side,
-            amount=amount,
-            quantity_mode=quantity_mode,
-            order_type=order_type,
-            price=price,
-            stop_price=stop_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-        )
-        amount_units = float(preflight["amount_units"])
-
-        trading_system = getattr(self, "trading_system", None)
-        execution_manager = getattr(trading_system, "execution_manager", None)
-        if execution_manager is not None:
-            order = await execution_manager.execute(
+        if not isinstance(preflight, dict):
+            preflight = await self._preflight_trade_submission(
                 symbol=symbol,
                 side=side,
-                amount=amount_units,
-                type=order_type,
+                amount=amount,
+                quantity_mode=quantity_mode,
+                order_type=order_type,
                 price=price,
                 stop_price=stop_price,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 source=source,
-                strategy_name=strategy_name,
-                reason=reason,
-                confidence=1.0,
+                timeframe=timeframe,
             )
-        else:
-            order = await broker.create_order(
-                symbol=symbol,
+        order_symbol = str(preflight.get("symbol") or symbol).strip().upper() or str(symbol or "").strip().upper()
+        amount_units = float(preflight["amount_units"])
+        requested_symbol = str(preflight.get("requested_symbol") or symbol).strip().upper()
+
+        await self._record_trade_audit(
+            "submit_attempt",
+            status="pending",
+            symbol=order_symbol,
+            requested_symbol=requested_symbol,
+            side=side,
+            order_type=order_type,
+            source=source,
+            venue=preflight.get("resolved_venue"),
+            message="Trade preflight approved and order submission started.",
+            payload={"preflight": dict(preflight)},
+        )
+
+        trading_system = getattr(self, "trading_system", None)
+        execution_manager = getattr(trading_system, "execution_manager", None)
+        try:
+            if execution_manager is not None:
+                order = await execution_manager.execute(
+                    symbol=order_symbol,
+                    side=side,
+                    amount=amount_units,
+                    type=order_type,
+                    price=price,
+                    stop_price=stop_price,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    source=source,
+                    strategy_name=strategy_name,
+                    reason=reason,
+                    confidence=1.0,
+                )
+            else:
+                order = await broker.create_order(
+                    symbol=order_symbol,
+                    side=side,
+                    amount=amount_units,
+                    type=order_type,
+                    price=price,
+                    stop_price=stop_price,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                )
+                if isinstance(order, dict):
+                    order.setdefault("source", source)
+                    order.setdefault("strategy_name", strategy_name)
+                    order.setdefault("reason", reason)
+        except Exception as exc:
+            await self._record_trade_audit(
+                "submit_error",
+                status="error",
+                symbol=order_symbol,
+                requested_symbol=requested_symbol,
                 side=side,
-                amount=amount_units,
-                type=order_type,
-                price=price,
-                stop_price=stop_price,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
+                order_type=order_type,
+                source=source,
+                venue=preflight.get("resolved_venue"),
+                message=str(exc),
+                payload={"preflight": dict(preflight)},
             )
-            if isinstance(order, dict):
-                order.setdefault("source", source)
-                order.setdefault("strategy_name", strategy_name)
-                order.setdefault("reason", reason)
+            raise
 
         if not order:
-            raise RuntimeError("The order was skipped by broker or safety checks.")
+            skip_reason = None
+            if execution_manager is not None and hasattr(execution_manager, "last_skip_reason"):
+                try:
+                    skip_reason = execution_manager.last_skip_reason(order_symbol)
+                except Exception:
+                    skip_reason = None
+            await self._record_trade_audit(
+                "submit_skipped",
+                status="skipped",
+                symbol=order_symbol,
+                requested_symbol=requested_symbol,
+                side=side,
+                order_type=order_type,
+                source=source,
+                venue=preflight.get("resolved_venue"),
+                message=skip_reason or "The order was skipped by broker or safety checks.",
+                payload={"preflight": dict(preflight)},
+            )
+            raise RuntimeError(skip_reason or "The order was skipped by broker or safety checks.")
 
         if isinstance(order, dict):
+            order.setdefault("symbol", order_symbol)
+            order["requested_symbol"] = requested_symbol
             actual_amount_units = self._safe_balance_metric(order.get("amount"))
             if actual_amount_units is None:
                 actual_amount_units = amount_units
@@ -2598,6 +3044,24 @@ class AppController(QMainWindow):
             order["sizing_notes"] = list(preflight.get("sizing_notes", []) or [])
             order["ai_sizing_reason"] = preflight.get("ai_sizing_reason")
             order["closeout_guard"] = dict(preflight.get("closeout_guard") or {})
+            order["trade_timeframe"] = preflight.get("trade_timeframe")
+            order["market_data_guard"] = dict(preflight.get("market_data_guard") or {})
+            order["eligibility_check"] = dict(preflight.get("eligibility_check") or {})
+            order["resolved_venue"] = preflight.get("resolved_venue")
+
+        await self._record_trade_audit(
+            "submit_success",
+            status=str((order or {}).get("status") or "submitted"),
+            symbol=order_symbol,
+            requested_symbol=requested_symbol,
+            side=side,
+            order_type=order_type,
+            source=source,
+            order_id=(order or {}).get("id") if isinstance(order, dict) else None,
+            venue=preflight.get("resolved_venue"),
+            message="Order submission completed.",
+            payload={"preflight": dict(preflight), "order": dict(order) if isinstance(order, dict) else order},
+        )
         return order
 
     def _normalize_strategy_symbol_key(self, symbol):
@@ -5175,6 +5639,7 @@ class AppController(QMainWindow):
             if not symbol:
                 return
 
+            data = self._prepare_ticker_snapshot(symbol, data)
             bid = float(data.get("bid") or data.get("bp") or 0)
             ask = float(data.get("ask") or data.get("ap") or 0)
             last = float(data.get("price") or data.get("last") or 0)
@@ -5233,6 +5698,7 @@ class AppController(QMainWindow):
                     ticker = await self._safe_fetch_ticker(symbol)
                     if not isinstance(ticker, dict):
                         continue
+                    ticker = self._prepare_ticker_snapshot(symbol, ticker)
 
                     bid = float(ticker.get("bid") or ticker.get("bidPrice") or ticker.get("bp") or 0)
                     ask = float(ticker.get("ask") or ticker.get("askPrice") or ticker.get("ap") or 0)
@@ -5392,7 +5858,8 @@ class AppController(QMainWindow):
         if not self.broker:
             return None
 
-        normalized_symbol = self._normalize_market_data_symbol(symbol)
+        requested_symbol = self._normalize_market_data_symbol(symbol)
+        normalized_symbol = self._resolve_preferred_market_symbol(requested_symbol) or requested_symbol
         if not normalized_symbol:
             return None
 
@@ -5408,10 +5875,10 @@ class AppController(QMainWindow):
             try:
                 tick = await self.broker.fetch_ticker(normalized_symbol)
                 if isinstance(tick, dict):
-                    return tick
+                    return self._prepare_ticker_snapshot(normalized_symbol, tick)
             except (TypeError, ValueError, RuntimeError, AttributeError, aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 if self._is_transient_market_data_error(exc):
-                    cached_tick = self._cached_ticker_snapshot(symbol)
+                    cached_tick = self._cached_ticker_snapshot(normalized_symbol) or self._cached_ticker_snapshot(symbol)
                     if isinstance(cached_tick, dict):
                         self._log_market_data_warning_once(
                             f"ticker-cache:{broker_name}:{str(symbol or '').upper().strip()}",
@@ -5446,6 +5913,7 @@ class AppController(QMainWindow):
                     "bid": price * 0.9998,
                     "ask": price * 1.0002,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "_received_at": datetime.now(timezone.utc).isoformat(),
                 }
             except Exception as exc:
                 if self._is_unsupported_market_symbol_error(exc):
@@ -5507,17 +5975,18 @@ class AppController(QMainWindow):
         if not symbol:
             return []
 
+        resolved_symbol = self._resolve_preferred_market_symbol(symbol) or self._normalize_market_data_symbol(symbol) or str(symbol or "").strip().upper()
         broker = getattr(self, "broker", None)
         if broker is not None and hasattr(broker, "fetch_trades"):
             try:
-                rows = await broker.fetch_trades(symbol, limit=limit)
-                normalized = self._normalize_public_trade_rows(symbol, rows, limit=limit)
+                rows = await broker.fetch_trades(resolved_symbol, limit=limit)
+                normalized = self._normalize_public_trade_rows(resolved_symbol, rows, limit=limit)
                 if normalized:
                     return normalized
             except TypeError:
                 try:
-                    rows = await broker.fetch_trades(symbol)
-                    normalized = self._normalize_public_trade_rows(symbol, rows, limit=limit)
+                    rows = await broker.fetch_trades(resolved_symbol)
+                    normalized = self._normalize_public_trade_rows(resolved_symbol, rows, limit=limit)
                     if normalized:
                         return normalized
                 except Exception as exc:
@@ -5525,7 +5994,7 @@ class AppController(QMainWindow):
             except Exception as exc:
                 self.logger.debug("Recent trade fetch failed for %s: %s", symbol, exc)
 
-        tick = await self._safe_fetch_ticker(symbol)
+        tick = await self._safe_fetch_ticker(resolved_symbol)
         if not isinstance(tick, dict):
             return []
 
@@ -5673,6 +6142,15 @@ class AppController(QMainWindow):
             resolved = self.MAX_HISTORY_LIMIT
 
         return min(resolved, self.MAX_HISTORY_LIMIT)
+
+    def _resolve_backtest_history_limit(self, limit=None):
+        value = limit if limit is not None else getattr(self, "limit", self.MAX_HISTORY_LIMIT)
+        try:
+            resolved = max(100, int(value))
+        except Exception:
+            resolved = self.MAX_BACKTEST_HISTORY_LIMIT
+
+        return min(resolved, self.MAX_BACKTEST_HISTORY_LIMIT)
 
     def handle_trade_execution(self, trade):
         if not isinstance(trade, dict):
@@ -7722,12 +8200,16 @@ class AppController(QMainWindow):
             return {"ok": True, "message": "\n".join(parts)}
         return {"ok": False, "message": "OpenAI returned no text."}
 
-    async def _safe_fetch_ohlcv(self, symbol, timeframe="1h", limit=200, start_time=None, end_time=None):
-        normalized_symbol = self._normalize_market_data_symbol(symbol)
+    async def _safe_fetch_ohlcv(self, symbol, timeframe="1h", limit=200, start_time=None, end_time=None, history_scope="runtime"):
+        requested_symbol = self._normalize_market_data_symbol(symbol)
+        normalized_symbol = self._resolve_preferred_market_symbol(requested_symbol) or requested_symbol
         if not normalized_symbol:
             return []
 
-        limit = self._resolve_history_limit(limit)
+        if str(history_scope or "runtime").strip().lower() == "backtest":
+            limit = self._resolve_backtest_history_limit(limit)
+        else:
+            limit = self._resolve_history_limit(limit)
         range_requested = start_time is not None or end_time is not None
         broker_name = str(getattr(getattr(self, "broker", None), "exchange_name", "") or "").strip().lower()
         if self.broker and not self._broker_supports_market_symbol(normalized_symbol):
@@ -7809,15 +8291,16 @@ class AppController(QMainWindow):
         return []
 
     async def _safe_fetch_orderbook(self, symbol, limit=20):
+        resolved_symbol = self._resolve_preferred_market_symbol(symbol) or self._normalize_market_data_symbol(symbol) or str(symbol or "").strip().upper()
         if self.broker and hasattr(self.broker, "fetch_orderbook"):
             try:
-                book = await self.broker.fetch_orderbook(symbol, limit=limit)
+                book = await self.broker.fetch_orderbook(resolved_symbol, limit=limit)
                 if isinstance(book, dict):
                     return book
             except Exception as exc:
                 self.logger.debug("Orderbook fetch failed for %s: %s", symbol, exc)
 
-        tick = await self._safe_fetch_ticker(symbol)
+        tick = await self._safe_fetch_ticker(resolved_symbol)
         if not isinstance(tick, dict):
             return {"bids": [], "asks": []}
 
@@ -8010,26 +8493,50 @@ class AppController(QMainWindow):
 
         self.strategy_debug_signal.emit(payload)
 
-    async def request_candle_data(self, symbol, timeframe="1h", limit=None, start_time=None, end_time=None):
+    async def request_candle_data(self, symbol, timeframe="1h", limit=None, start_time=None, end_time=None, history_scope="runtime"):
         if not symbol:
             return
 
-        limit = self._resolve_history_limit(limit)
+        requested_symbol = self._normalize_market_data_symbol(symbol) or str(symbol or "").strip().upper()
+        resolved_symbol = self._resolve_preferred_market_symbol(requested_symbol) or requested_symbol
+        if str(history_scope or "runtime").strip().lower() == "backtest":
+            limit = self._resolve_backtest_history_limit(limit)
+        else:
+            limit = self._resolve_history_limit(limit)
+        fetcher = getattr(self, "_safe_fetch_ohlcv")
+        fetch_kwargs = {
+            "timeframe": timeframe,
+            "limit": limit,
+            "start_time": start_time,
+            "end_time": end_time,
+            "history_scope": history_scope,
+        }
         try:
-            candles = await self._safe_fetch_ohlcv(
-                symbol,
-                timeframe=timeframe,
-                limit=limit,
-                start_time=start_time,
-                end_time=end_time,
+            signature = inspect.signature(fetcher)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None:
+            accepts_var_kwargs = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
             )
-        except TypeError as exc:
-            message = str(exc)
-            if "start_time" not in message and "end_time" not in message:
-                raise
-            candles = await self._safe_fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            if not accepts_var_kwargs:
+                supported = {
+                    name
+                    for name, parameter in signature.parameters.items()
+                    if parameter.kind in (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    )
+                }
+                fetch_kwargs = {
+                    name: value
+                    for name, value in fetch_kwargs.items()
+                    if name in supported
+                }
+        candles = await fetcher(resolved_symbol, **fetch_kwargs)
         candles = self._sanitize_ohlcv_rows(
-            symbol,
+            resolved_symbol,
             timeframe,
             candles,
             requested_limit=limit,
@@ -8037,7 +8544,7 @@ class AppController(QMainWindow):
         )
         received_count = len(candles) if isinstance(candles, list) else 0
         if start_time is None and end_time is None:
-            self._notify_market_data_shortfall(symbol, timeframe, received_count, limit)
+            self._notify_market_data_shortfall(resolved_symbol, timeframe, received_count, limit)
         if not candles:
             return
 
@@ -8047,24 +8554,34 @@ class AppController(QMainWindow):
             df.columns = ["timestamp", "open", "high", "low", "close", "volume"]
 
         # Keep nested cache for symbol/timeframe lookups.
-        symbol_cache = self.candle_buffers.setdefault(symbol, {})
-        symbol_cache[timeframe] = df
+        cache_symbols = [resolved_symbol]
+        if requested_symbol and requested_symbol != resolved_symbol:
+            cache_symbols.append(requested_symbol)
+        for cache_symbol in cache_symbols:
+            symbol_cache = self.candle_buffers.setdefault(cache_symbol, {})
+            symbol_cache[timeframe] = df
 
         # Keep legacy buffer path updated with latest close candle rows.
-        for _, row in df.tail(200).iterrows():
-            self.candle_buffer.update(
-                symbol,
-                {
-                    "timestamp": row["timestamp"],
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": float(row["volume"]),
-                },
-            )
+        for cache_symbol in cache_symbols:
+            for _, row in df.tail(200).iterrows():
+                self.candle_buffer.update(
+                    cache_symbol,
+                    {
+                        "timestamp": row["timestamp"],
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                        "volume": float(row["volume"]),
+                    },
+                )
 
-        self.candle_signal.emit(symbol, df)
+        candle_signal = getattr(self, "candle_signal", None)
+        if candle_signal is not None:
+            try:
+                candle_signal.emit(resolved_symbol, df)
+            except RuntimeError:
+                pass
         return df
 
     def _notify_market_data_shortfall(self, symbol, timeframe, received_count, requested_count):

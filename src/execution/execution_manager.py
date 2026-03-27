@@ -31,6 +31,7 @@ class ExecutionManager:
 
         self.running = False
         self._symbol_cooldowns = {}
+        self._symbol_skip_reasons = {}
         self._execution_lock = asyncio.Lock()
         self._balance_buffer = 0.98
         self._order_tracking_tasks = {}
@@ -79,12 +80,16 @@ class ExecutionManager:
 
     def _set_cooldown(self, symbol, seconds, reason):
         self._symbol_cooldowns[symbol] = time.monotonic() + seconds
+        self._symbol_skip_reasons[symbol] = str(reason or "").strip() or None
         self.logger.warning(
             "Skipping %s for %.0fs: %s",
             symbol,
             seconds,
             reason,
         )
+
+    def last_skip_reason(self, symbol):
+        return self._symbol_skip_reasons.get(symbol)
 
     async def _fetch_reference_price(self, symbol, side, requested_price=None):
         if requested_price is not None:
@@ -783,5 +788,6 @@ class ExecutionManager:
             if isinstance(execution, dict):
                 execution.setdefault("source", prepared_order.get("source", normalized_order.get("source", "bot")))
             await self._handle_order_update(execution, prepared_order)
+            self._symbol_skip_reasons.pop(symbol, None)
 
         return execution

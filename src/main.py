@@ -199,20 +199,20 @@ def _install_qt_message_filter() -> None:
     Suppresses known harmless Qt warnings on Windows while preserving meaningful
     messages.
     """
-    previous_handler =  QtCore.qInstallMessageHandler(None)
+    previous_handler = QtCore.qInstallMessageHandler(None)
 
     def handler(mode: Any, context: Any, message: str) -> None:
         if _is_qt_windows_noise(message):
             return
-        if previous_handler is not None:
-            previous_handler(mode, context, message) # type: ignore
+        if callable(previous_handler):
+            previous_handler(mode, context, message)
         else:
             sys.stderr.write(f"{message}\n")
 
     QtCore.qInstallMessageHandler(handler)
 
 
-def main(argv: list[str] | None = None) -> int: 
+def main(argv: list[str] | None = None) -> int:
     _install_faulthandler()
     _install_qt_message_filter()
 

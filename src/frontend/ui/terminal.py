@@ -71,6 +71,7 @@ from frontend.ui.actions.trading_actions import (
     export_trades,
     show_async_message,
 )
+from frontend.ui.actions.live_trade_actions import submit_manual_trade as submit_live_manual_trade
 from frontend.ui.actions.optimization_actions import (
     apply_best_optimization_params,
     optimize_strategy,
@@ -136,6 +137,9 @@ from frontend.ui.panels.trading_panels import (
     create_trade_log_panel,
 )
 from frontend.ui.panels.trading_updates import (
+    apply_open_orders_filter,
+    apply_positions_filter,
+    apply_trade_log_filter,
     format_trade_log_value,
     format_trade_source_label,
     normalize_open_order_entry,
@@ -2489,6 +2493,17 @@ class Terminal(QMainWindow):
         if not symbol:
             return None
 
+        resolver = getattr(self.controller, "_resolve_preferred_market_symbol", None)
+        resolved_symbol = symbol
+        if callable(resolver):
+            try:
+                resolved_symbol = str(resolver(symbol) or symbol).strip().upper() or symbol
+            except Exception:
+                resolved_symbol = symbol
+        if resolved_symbol and resolved_symbol != symbol:
+            self._retarget_chart_widget_symbol(chart, resolved_symbol)
+            symbol = resolved_symbol
+
         try:
             requested_limit = int(limit if limit is not None else self._history_request_limit())
         except Exception:
@@ -2532,6 +2547,68 @@ class Terminal(QMainWindow):
         elif hasattr(chart, "clear_data_status"):
             chart.clear_data_status()
         return frame
+
+    def _retarget_chart_widget_symbol(self, chart, symbol):
+        if not isinstance(chart, ChartWidget) or not self._is_qt_object_alive(chart):
+            return None
+
+        target_symbol = str(symbol or "").strip().upper()
+        current_symbol = str(getattr(chart, "symbol", "") or "").strip().upper()
+        if not target_symbol:
+            return current_symbol or None
+        if target_symbol == current_symbol:
+            return target_symbol
+
+        chart.symbol = target_symbol
+        if getattr(self, "symbol", None) == current_symbol:
+            self.symbol = target_symbol
+
+        if hasattr(chart, "refresh_context_display"):
+            try:
+                chart.refresh_context_display()
+            except (RuntimeError, AttributeError, TypeError):
+                pass
+
+        page = None
+        chart_page_for_widget = getattr(self, "_chart_page_for_widget", None)
+        if callable(chart_page_for_widget):
+            try:
+                page = chart_page_for_widget(chart)
+            except Exception:
+                page = None
+
+        chart_tabs_ready = getattr(self, "_chart_tabs_ready", None)
+        if callable(chart_tabs_ready):
+            try:
+                if chart_tabs_ready() and page is not None:
+                    index = self.chart_tabs.indexOf(page)
+                    if index >= 0:
+                        self.chart_tabs.setTabText(index, self._chart_page_title(page, fallback_index=index))
+            except Exception:
+                pass
+
+        try:
+            window = page.window() if page is not None and hasattr(page, "window") else None
+        except Exception:
+            window = None
+        if window is not None and window is not self and getattr(window, "_contains_chart_page", False):
+            try:
+                window.setWindowTitle(self._chart_page_title(page))
+            except Exception:
+                pass
+
+        active_chart = getattr(self, "_active_chart_widget_ref", None)
+        if active_chart is chart and self.symbol_picker is not None:
+            try:
+                if self.symbol_picker.findText(target_symbol) < 0:
+                    self.symbol_picker.addItem(target_symbol)
+                self.symbol_picker.setCurrentText(target_symbol)
+            except Exception:
+                pass
+            current_timeframe = str(getattr(self, "current_timeframe", "1h") or "1h")
+            self._last_chart_request_key = (target_symbol, str(getattr(chart, "timeframe", current_timeframe) or current_timeframe))
+
+        return target_symbol
 
     def _chart_page_title(self, page, fallback_index=None):
         charts = self._chart_widgets_in_page(page)
@@ -3243,6 +3320,9 @@ class Terminal(QMainWindow):
     def _populate_positions_table(self, positions):
         populate_positions_table(self, positions)
 
+    def _apply_positions_filter(self):
+        apply_positions_filter(self)
+
     def _build_position_close_button(self, position, compact=False):
         button = QPushButton("->" if compact else "-> Close")
         button.setStyleSheet(self._action_button_style())
@@ -3309,6 +3389,18 @@ class Terminal(QMainWindow):
                 if resolved_side:
                     side_text = f" [{resolved_side}]"
             self.system_console.log(f"Close position {status_text}: {symbol}{side_text}{amount_text}", "INFO")
+            if hasattr(controller, "queue_trade_audit"):
+                controller.queue_trade_audit(
+                    "close_position_success",
+                    status=str((result or {}).get("status") or "submitted"),
+                    symbol=symbol,
+                    side="sell" if str((position or {}).get("position_side") or (position or {}).get("side") or "").strip().lower() != "short" else "buy",
+                    order_type="market",
+                    source="terminal",
+                    order_id=(result or {}).get("order_id") if isinstance(result, dict) else None,
+                    payload={"amount": amount, "position": dict(position or {}) if isinstance(position, dict) else position},
+                    message=f"Submitted close-position order for {symbol}.",
+                )
             self._schedule_positions_refresh()
             self._refresh_position_analysis_window()
             if show_dialog:
@@ -3320,6 +3412,16 @@ class Terminal(QMainWindow):
         except Exception as exc:
             self.logger.exception("Close-position request failed")
             self.system_console.log(f"Close position failed for {symbol}: {exc}", "ERROR")
+            if hasattr(controller, "queue_trade_audit"):
+                controller.queue_trade_audit(
+                    "close_position_error",
+                    status="error",
+                    symbol=symbol,
+                    order_type="market",
+                    source="terminal",
+                    message=str(exc),
+                    payload={"amount": amount, "position": dict(position or {}) if isinstance(position, dict) else position},
+                )
             if show_dialog:
                 self._show_async_message("Close Position Failed", str(exc), QMessageBox.Icon.Critical)
 
@@ -3328,6 +3430,9 @@ class Terminal(QMainWindow):
 
     def _populate_open_orders_table(self, orders):
         populate_open_orders_table(self, orders)
+
+    def _apply_open_orders_filter(self):
+        apply_open_orders_filter(self)
 
     async def _refresh_positions_async(self):
         await refresh_positions_async(self)
@@ -4270,6 +4375,9 @@ class Terminal(QMainWindow):
 
     def _update_trade_log(self, trade):
         update_trade_log(self, trade)
+
+    def _apply_trade_log_filter(self):
+        apply_trade_log_filter(self)
 
     def _handle_agent_runtime_event(self, payload):
         if getattr(self, "_ui_shutting_down", False) or not isinstance(payload, dict):
@@ -5346,28 +5454,54 @@ class Terminal(QMainWindow):
         self.spinner_timer.start(500)
 
     def _update_symbols(self, exchange, symbols):
-
+        normalized_symbols = [str(symbol or "").strip().upper() for symbol in symbols or [] if str(symbol or "").strip()]
+        supported_symbols = set(normalized_symbols)
+        resolver = getattr(getattr(self, "controller", None), "_resolve_preferred_market_symbol", None)
         blocked = self.symbols_table.blockSignals(True)
         self.symbols_table.setRowCount(0)
         self.symbols_table.setAccessibleName(exchange)
         self._configure_market_watch_table()
         if self.symbol_picker is not None:
-            current_symbol = self.symbol_picker.currentText()
+            current_symbol = str(self.symbol_picker.currentText() or "").strip().upper()
+            resolved_current_symbol = current_symbol
+            if callable(resolver) and current_symbol:
+                try:
+                    resolved_current_symbol = str(resolver(current_symbol) or current_symbol).strip().upper() or current_symbol
+                except Exception:
+                    resolved_current_symbol = current_symbol
             self.symbol_picker.blockSignals(True)
             self.symbol_picker.clear()
-            self.symbol_picker.addItems(symbols)
-            if current_symbol in symbols:
+            self.symbol_picker.addItems(normalized_symbols)
+            if resolved_current_symbol in supported_symbols:
+                self.symbol_picker.setCurrentText(resolved_current_symbol)
+            elif current_symbol in supported_symbols:
                 self.symbol_picker.setCurrentText(current_symbol)
-            elif symbols:
+            elif normalized_symbols:
                 self.symbol_picker.setCurrentIndex(0)
             self.symbol_picker.blockSignals(False)
 
-        for symbol in symbols:
+        for symbol in normalized_symbols:
             row = self.symbols_table.rowCount()
             self.symbols_table.insertRow(row)
             self._set_market_watch_row(row, symbol, bid="-", ask="-", status="⏳", usd_value="-")
         self.symbols_table.blockSignals(blocked)
         self._reorder_market_watch_rows()
+
+        if callable(resolver):
+            for chart in self._all_chart_widgets():
+                chart_symbol = str(getattr(chart, "symbol", "") or "").strip().upper()
+                if not chart_symbol:
+                    continue
+                try:
+                    resolved_chart_symbol = str(resolver(chart_symbol) or chart_symbol).strip().upper() or chart_symbol
+                except Exception:
+                    resolved_chart_symbol = chart_symbol
+                if resolved_chart_symbol == chart_symbol:
+                    continue
+                if supported_symbols and resolved_chart_symbol not in supported_symbols and chart_symbol in supported_symbols:
+                    continue
+                self._retarget_chart_widget_symbol(chart, resolved_chart_symbol)
+                self._schedule_chart_data_refresh(chart)
 
     def _manual_trade_default_payload(self, prefill=None):
         return manual_trade_default_payload(self, prefill=prefill)
@@ -6003,58 +6137,18 @@ class Terminal(QMainWindow):
         take_profit=None,
     ):
         try:
-            submit_amount = requested_amount if requested_amount is not None else amount
-            order = await self.controller.submit_trade_with_preflight(
+            await submit_live_manual_trade(
+                self,
                 symbol=symbol,
                 side=side,
-                amount=submit_amount,
+                amount=amount,
+                requested_amount=requested_amount,
                 quantity_mode=quantity_mode,
                 order_type=order_type,
                 price=price,
                 stop_price=stop_price,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
-                source="manual",
-                strategy_name="Manual",
-                reason="Manual order",
-            )
-            status_text = str(order.get("status") or "submitted").replace("_", " ").upper()
-            display_amount = order.get(
-                "applied_requested_mode_amount",
-                requested_amount if requested_amount is not None else amount,
-            )
-            requested_display_amount = order.get(
-                "requested_amount",
-                requested_amount if requested_amount is not None else amount,
-            )
-            display_mode = self._normalize_manual_trade_quantity_mode(quantity_mode)
-            sizing_summary = str(order.get("sizing_summary") or "").strip()
-            ai_sizing_reason = str(order.get("ai_sizing_reason") or "").strip()
-            requested_suffix = (
-                f" | requested {requested_display_amount} {display_mode}"
-                if bool(order.get("size_adjusted"))
-                else ""
-            )
-            sizing_suffix = f" | {sizing_summary}" if sizing_summary else ""
-            ai_suffix = f" | ChatGPT size note: {ai_sizing_reason}" if ai_sizing_reason else ""
-            self.system_console.log(
-                (
-                    f"Manual order {status_text}: {side.upper()} {display_amount} {display_mode} "
-                    f"{symbol} ({order_type}){requested_suffix}{sizing_suffix}{ai_suffix}"
-                ),
-                "INFO",
-            )
-            message = f"{status_text.title()} {side.upper()} {display_amount} {display_mode} {symbol}."
-            if bool(order.get("size_adjusted")):
-                message += f"\nRequested: {requested_display_amount} {display_mode}"
-            if sizing_summary:
-                message += f"\nSizing: {sizing_summary}"
-            if ai_sizing_reason:
-                message += f"\nChatGPT size note: {ai_sizing_reason}"
-            self._show_async_message(
-                "Manual Order",
-                message,
-                QMessageBox.Icon.Information,
             )
         except Exception as exc:
             self.logger.exception("Manual order failed")
@@ -9792,18 +9886,23 @@ def _hotfix_backtest_requested_range_text(window=None, context=None):
 
 def _hotfix_backtest_requested_limit(window=None, context=None, fallback=None):
     context = context or {}
+    backtest_cap = 1000000
+    if window is not None:
+        terminal = getattr(window, "_terminal_owner", None)
+        controller = getattr(terminal, "controller", None) if terminal is not None else None
+        backtest_cap = int(getattr(controller, "MAX_BACKTEST_HISTORY_LIMIT", backtest_cap) or backtest_cap)
     widget = getattr(window, "_backtest_history_limit", None) if window is not None else None
     if widget is not None:
         try:
-            return max(1, min(int(widget.value()), 50000))
+            return max(1, min(int(widget.value()), backtest_cap))
         except Exception:
             pass
     value = context.get("history_limit", fallback if fallback is not None else 50000)
     try:
-        return max(1, min(int(value), 50000))
+        return max(1, min(int(value), backtest_cap))
     except Exception:
         fallback_value = fallback if fallback is not None else 50000
-        return max(1, min(int(fallback_value), 50000))
+        return max(1, min(int(fallback_value), backtest_cap))
 
 
 def _hotfix_backtest_apply_history_limit(frame, requested_limit):
@@ -9860,13 +9959,15 @@ def _hotfix_backtest_required_history_limit(self, timeframe, start_date=None, en
         required_bars = int(np.ceil(total_seconds / float(step_seconds))) + 64
         required_limit = max(default_limit, required_bars)
 
-    resolver = getattr(self.controller, "_resolve_history_limit", None)
+    resolver = getattr(self.controller, "_resolve_backtest_history_limit", None)
+    if not callable(resolver):
+        resolver = getattr(self.controller, "_resolve_history_limit", None)
     if callable(resolver):
         try:
             return int(resolver(required_limit))
         except Exception:
             pass
-    return max(100, min(int(required_limit), 50000))
+    return max(100, min(int(required_limit), int(getattr(self.controller, "MAX_BACKTEST_HISTORY_LIMIT", 1000000) or 1000000)))
 
 
 def _hotfix_backtest_frame_for_symbol(self, symbol, timeframe):
@@ -10265,6 +10366,7 @@ async def _hotfix_prepare_backtest_context_with_selection(self, symbol=None, tim
             limit=fetch_limit,
             start_time=_hotfix_qdate_to_utc_boundary_text(selected_start_date, end_of_day=False),
             end_time=_hotfix_qdate_to_utc_boundary_text(selected_end_date, end_of_day=True),
+            history_scope="backtest",
         )
         frame = (getattr(self.controller, "candle_buffers", {}).get(symbol) or {}).get(timeframe)
     frame = candles_to_df(frame)

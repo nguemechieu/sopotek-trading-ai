@@ -15,6 +15,7 @@ from execution.execution_manager import ExecutionManager
 from execution.order_router import OrderRouter
 from storage import database as storage_db
 from storage.market_data_repository import MarketDataRepository
+from storage.trade_audit_repository import TradeAuditRepository
 from storage.trade_repository import TradeRepository
 
 
@@ -196,6 +197,50 @@ def test_market_data_repository_skips_invalid_rows_and_repairs_ohlc_bounds():
     assert inserted == 2
     assert candles[0][1:6] == [100.0, 105.0, 95.0, 101.0, 0.0]
     assert candles[1][1:6] == [104.0, 108.0, 102.0, 107.0, 0.0]
+
+
+def test_trade_audit_repository_records_recent_events():
+    repo = TradeAuditRepository()
+
+    repo.record_event(
+        action="submit_attempt",
+        status="pending",
+        exchange="coinbase",
+        account_label="Primary",
+        symbol="BTC/USD:USD",
+        requested_symbol="BTC/USD",
+        side="buy",
+        order_type="limit",
+        venue="derivative",
+        source="manual",
+        message="Pre-trade review accepted.",
+        payload={"reference_price": 105.0},
+        timestamp="2026-03-17T09:30:00+00:00",
+    )
+    repo.record_event(
+        action="submit_success",
+        status="filled",
+        exchange="coinbase",
+        account_label="Primary",
+        symbol="BTC/USD:USD",
+        requested_symbol="BTC/USD",
+        side="buy",
+        order_type="limit",
+        venue="derivative",
+        source="manual",
+        order_id="order-789",
+        message="Order was accepted by the broker.",
+        payload={"order_id": "order-789", "status": "filled"},
+        timestamp="2026-03-17T09:31:00+00:00",
+    )
+
+    rows = repo.get_recent(limit=5)
+
+    assert len(rows) == 2
+    assert rows[0].action == "submit_success"
+    assert rows[0].order_id == "order-789"
+    assert rows[0].requested_symbol == "BTC/USD"
+    assert '"status": "filled"' in str(rows[0].payload_json or "")
 
 
 def test_execution_manager_persists_trade_history():

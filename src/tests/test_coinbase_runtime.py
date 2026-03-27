@@ -236,6 +236,16 @@ class FakeStrictCoinbaseExchange(FakeCoinbaseExchange):
         return await super().fetch_trades(symbol, limit=limit)
 
 
+class FakeBuggyCoinbaseCreateOrderExchange(FakeCoinbaseExchange):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.id = "coinbase"
+
+    async def create_order(self, symbol, order_type, side, amount, price, params):
+        self.id = 123456789
+        return await super().create_order(symbol, order_type, side, amount, price, params)
+
+
 class FakeCoinbaseDerivativeExchange(FakeCoinbaseExchange):
     def __init__(self, cfg):
         super().__init__(cfg)
@@ -338,6 +348,63 @@ def test_coinbase_ccxt_broker_supports_market_data_and_order_methods(monkeypatch
         assert stop_limit_order["type"] == "stop_limit"
         assert stop_limit_order["stop_price"] == 65010.0
         assert stop_limit_order["params"]["stopPrice"] == 65010.0
+
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_coinbase_ccxt_broker_restores_exchange_id_after_create_order(monkeypatch):
+    import broker.ccxt_broker as broker_mod
+
+    monkeypatch.setattr(
+        broker_mod.aiohttp,
+        "TCPConnector",
+        lambda family=None, resolver=None, ttl_dns_cache=None: {
+            "family": family,
+            "resolver": resolver,
+            "ttl_dns_cache": ttl_dns_cache,
+        },
+    )
+    monkeypatch.setattr(broker_mod.aiohttp, "ThreadedResolver", lambda: "threaded-resolver")
+    monkeypatch.setattr(broker_mod.aiohttp, "ClientSession", lambda connector=None, **kwargs: FakeSession(connector=connector, **kwargs))
+    monkeypatch.setattr(broker_mod.ccxt, "coinbase", FakeBuggyCoinbaseCreateOrderExchange, raising=False)
+
+    async def scenario():
+        broker = CCXTBroker(
+            SimpleNamespace(
+                exchange="coinbase",
+                api_key="organizations/test/apiKeys/key-1",
+                secret=(
+                    "-----BEGIN EC PRIVATE KEY-----\n"
+                    "MHcCAQEEIAqSV4qAfY1Nm0xd6k95EZ39suUWAuze5Vuhn671kB9OoAoGCCqGSM49\n"
+                    "AwEHoUQDQgAEcgYO1ly0wyz23wipRFpoM6Oyvh6WB1wy9EB8PHhrNw5VSJsAqsb7\n"
+                    "gc1E+mZ1HVX3H8eKNlw8GrQCQJsZ5ExllA==\n"
+                    "-----END EC PRIVATE KEY-----\n"
+                ),
+                password=None,
+                uid=None,
+                mode="live",
+                sandbox=False,
+                timeout=15000,
+                options={},
+                params={},
+            )
+        )
+
+        await broker.connect()
+        assert broker.exchange.id == "coinbase"
+
+        order = await broker.create_order(
+            symbol="BTC/USD",
+            side="buy",
+            amount=0.01,
+            type="limit",
+            price=65000.0,
+        )
+
+        assert order["id"] == "cb-1"
+        assert broker.exchange.id == "coinbase"
 
         await broker.close()
 
