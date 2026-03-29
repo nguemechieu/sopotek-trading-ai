@@ -1,4 +1,24 @@
 import asyncio
+import time
+
+
+def _runtime_broker_name(terminal):
+    broker = getattr(getattr(terminal, "controller", None), "broker", None)
+    return str(getattr(broker, "exchange_name", "") or "").strip().lower()
+
+
+def _positions_refresh_interval_seconds(terminal):
+    broker_name = _runtime_broker_name(terminal)
+    if broker_name == "coinbase":
+        return 6.0
+    return 0.0
+
+
+def _open_orders_refresh_interval_seconds(terminal):
+    broker_name = _runtime_broker_name(terminal)
+    if broker_name == "coinbase":
+        return 5.0
+    return 0.0
 
 
 async def refresh_positions_async(terminal):
@@ -16,14 +36,25 @@ async def refresh_positions_async(terminal):
         positions = terminal._portfolio_positions_snapshot()
 
     terminal._latest_positions_snapshot = positions or []
-    terminal._populate_positions_table(terminal._latest_positions_snapshot)
+    positions_snapshot = terminal._latest_positions_snapshot
+    active_positions_snapshot = getattr(terminal, "_active_positions_snapshot", None)
+    if callable(active_positions_snapshot):
+        positions_snapshot = active_positions_snapshot()
+    terminal._populate_positions_table(positions_snapshot)
     terminal._refresh_position_analysis_window()
+    terminal._last_positions_refresh_at = time.monotonic()
 
 
 def schedule_positions_refresh(terminal):
     task = getattr(terminal, "_positions_refresh_task", None)
     if task is not None and not task.done():
         return
+
+    interval_seconds = _positions_refresh_interval_seconds(terminal)
+    if interval_seconds > 0:
+        last_refresh_at = float(getattr(terminal, "_last_positions_refresh_at", 0.0) or 0.0)
+        if (time.monotonic() - last_refresh_at) < interval_seconds:
+            return
 
     try:
         terminal._positions_refresh_task = asyncio.get_event_loop().create_task(terminal._refresh_positions_async())
@@ -57,13 +88,24 @@ async def refresh_open_orders_async(terminal):
             terminal.logger.debug("Open orders refresh failed: %s", exc)
 
     terminal._latest_open_orders_snapshot = orders or []
-    terminal._populate_open_orders_table(terminal._latest_open_orders_snapshot)
+    orders_snapshot = terminal._latest_open_orders_snapshot
+    active_open_orders_snapshot = getattr(terminal, "_active_open_orders_snapshot", None)
+    if callable(active_open_orders_snapshot):
+        orders_snapshot = active_open_orders_snapshot()
+    terminal._populate_open_orders_table(orders_snapshot)
+    terminal._last_open_orders_refresh_at = time.monotonic()
 
 
 def schedule_open_orders_refresh(terminal):
     task = getattr(terminal, "_open_orders_refresh_task", None)
     if task is not None and not task.done():
         return
+
+    interval_seconds = _open_orders_refresh_interval_seconds(terminal)
+    if interval_seconds > 0:
+        last_refresh_at = float(getattr(terminal, "_last_open_orders_refresh_at", 0.0) or 0.0)
+        if (time.monotonic() - last_refresh_at) < interval_seconds:
+            return
 
     try:
         terminal._open_orders_refresh_task = asyncio.get_event_loop().create_task(terminal._refresh_open_orders_async())

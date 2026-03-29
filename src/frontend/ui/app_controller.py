@@ -178,6 +178,23 @@ class AppController(QMainWindow):
     COINBASE_AUTO_ASSIGN_SYMBOL_LIMIT = 6
     COINBASE_TICKER_POLL_LIMIT = 8
     COINBASE_TICKER_POLL_SECONDS = 2.0
+    COINBASE_FAST_START_AUTO_ASSIGN_DELAY_SECONDS = 12.0
+    COINBASE_WATCHLIST_SYMBOL_LIMIT = 24
+    COINBASE_DISCOVERY_BATCH_SIZE = 4
+    COINBASE_DISCOVERY_PRIORITY_COUNT = 2
+    DEFAULT_SYMBOL_WATCHLIST_LIMIT = 36
+    DEFAULT_DISCOVERY_BATCH_SIZE = 10
+    DEFAULT_DISCOVERY_PRIORITY_COUNT = 3
+    SPOT_ONLY_SYMBOL_WATCHLIST_LIMIT = 20
+    SPOT_ONLY_DISCOVERY_BATCH_SIZE = 8
+    STELLAR_SYMBOL_WATCHLIST_LIMIT = 18
+    STELLAR_DISCOVERY_BATCH_SIZE = 6
+    FOREX_SYMBOL_WATCHLIST_LIMIT = 20
+    FOREX_DISCOVERY_BATCH_SIZE = 8
+    STOCKS_SYMBOL_WATCHLIST_LIMIT = 24
+    STOCKS_DISCOVERY_BATCH_SIZE = 8
+    PAPER_SYMBOL_WATCHLIST_LIMIT = 24
+    PAPER_DISCOVERY_BATCH_SIZE = 10
     QUOTE_STALE_SECONDS = 20.0
     ORDERBOOK_STALE_SECONDS = 20.0
     CANDLE_STALE_MIN_SECONDS = 60.0
@@ -345,6 +362,7 @@ class AppController(QMainWindow):
             "failed_symbols": [],
         }
         self._strategy_auto_assignment_task = None
+        self._strategy_auto_assignment_deferred_task = None
 
         self.portfolio = None
         self.ai_signal = None
@@ -379,6 +397,8 @@ class AppController(QMainWindow):
         self._recent_trades_cache = {}
         self._recent_trades_tasks = {}
         self._recent_trades_last_request_at = {}
+        self._symbol_universe_tiers = {}
+        self._symbol_universe_rotation_cursor = 0
 
         self.symbols = ["BTC/USDT", "ETH/USDT", "XLM/USDT"]
 
@@ -1342,6 +1362,11 @@ class AppController(QMainWindow):
                 raw_symbols = await self._fetch_symbols(self.broker)
                 filtered_symbols = self._filter_symbols_for_trading(raw_symbols, broker_type, exchange)
                 self.symbols = await self._select_trade_symbols(filtered_symbols, broker_type, exchange)
+                self._refresh_symbol_universe_tiers(
+                    catalog_symbols=filtered_symbols,
+                    broker_type=broker_type,
+                    exchange=exchange,
+                )
 
                 self.logger.info(
                     "Broker ready exchange=%s type=%s symbols=%s (raw=%s filtered=%s)",
@@ -1366,7 +1391,11 @@ class AppController(QMainWindow):
 
                 await self.initialize_trading()
                 self.symbols_signal.emit(exchange, self.symbols)
-                self.schedule_strategy_auto_assignment(symbols=self.symbols, timeframe=self.time_frame, force=False)
+                self._schedule_startup_strategy_auto_assignment(
+                    symbols=self.symbols,
+                    timeframe=self.time_frame,
+                    exchange=exchange,
+                )
                 await self._restart_telegram_service()
 
                 await self._start_market_stream()
@@ -1658,6 +1687,212 @@ class AppController(QMainWindow):
                     asset_codes.add(normalized_code)
         return asset_codes
 
+    @staticmethod
+    def _normalize_symbol_sequence(symbols):
+        normalized = []
+        for symbol in list(symbols or []):
+            value = str(symbol or "").upper().strip().replace("_", "/").replace("-", "/")
+            if value and value not in normalized:
+                normalized.append(value)
+        return normalized
+
+    def _active_broker_type(self, broker_type=None, exchange=None):
+        normalized_type = str(broker_type or "").strip().lower()
+        if normalized_type:
+            return normalized_type
+
+        broker_cfg = getattr(getattr(self, "config", None), "broker", None)
+        if broker_cfg is not None and getattr(broker_cfg, "type", None):
+            return str(broker_cfg.type).strip().lower()
+
+        exchange_code = self._active_exchange_code(exchange=exchange)
+        if exchange_code in {"coinbase", "binance", "binanceus", "kraken", "kucoin", "bybit", "stellar"}:
+            return "crypto"
+        if exchange_code == "oanda":
+            return "forex"
+        if exchange_code == "alpaca":
+            return "stocks"
+        if exchange_code == "paper":
+            return "paper"
+        return ""
+
+    def _symbol_universe_policy(self, broker_type=None, exchange=None):
+        exchange_code = self._active_exchange_code(exchange=exchange)
+        normalized_type = self._active_broker_type(broker_type=broker_type, exchange=exchange)
+
+        if exchange_code == "coinbase":
+            return {
+                "watchlist_limit": int(self.COINBASE_WATCHLIST_SYMBOL_LIMIT or 24),
+                "discovery_batch_size": int(self.COINBASE_DISCOVERY_BATCH_SIZE or 4),
+                "discovery_priority_count": int(self.COINBASE_DISCOVERY_PRIORITY_COUNT or 2),
+                "auto_assignment_limit": int(self.COINBASE_AUTO_ASSIGN_SYMBOL_LIMIT or 6),
+            }
+        if exchange_code == "stellar":
+            return {
+                "watchlist_limit": int(self.STELLAR_SYMBOL_WATCHLIST_LIMIT or 18),
+                "discovery_batch_size": int(self.STELLAR_DISCOVERY_BATCH_SIZE or 6),
+                "discovery_priority_count": 2,
+                "auto_assignment_limit": int(self.STELLAR_DISCOVERY_BATCH_SIZE or 6),
+            }
+        if exchange_code in SPOT_ONLY_EXCHANGES:
+            return {
+                "watchlist_limit": int(self.SPOT_ONLY_SYMBOL_WATCHLIST_LIMIT or 20),
+                "discovery_batch_size": int(self.SPOT_ONLY_DISCOVERY_BATCH_SIZE or 8),
+                "discovery_priority_count": 3,
+                "auto_assignment_limit": int(self.SPOT_ONLY_DISCOVERY_BATCH_SIZE or 8),
+            }
+        if normalized_type == "forex":
+            return {
+                "watchlist_limit": int(self.FOREX_SYMBOL_WATCHLIST_LIMIT or 20),
+                "discovery_batch_size": int(self.FOREX_DISCOVERY_BATCH_SIZE or 8),
+                "discovery_priority_count": 3,
+                "auto_assignment_limit": int(self.FOREX_DISCOVERY_BATCH_SIZE or 8),
+            }
+        if normalized_type == "stocks":
+            return {
+                "watchlist_limit": int(self.STOCKS_SYMBOL_WATCHLIST_LIMIT or 24),
+                "discovery_batch_size": int(self.STOCKS_DISCOVERY_BATCH_SIZE or 8),
+                "discovery_priority_count": 3,
+                "auto_assignment_limit": int(self.STOCKS_DISCOVERY_BATCH_SIZE or 8),
+            }
+        if normalized_type == "paper":
+            return {
+                "watchlist_limit": int(self.PAPER_SYMBOL_WATCHLIST_LIMIT or 24),
+                "discovery_batch_size": int(self.PAPER_DISCOVERY_BATCH_SIZE or 10),
+                "discovery_priority_count": 3,
+                "auto_assignment_limit": int(self.PAPER_DISCOVERY_BATCH_SIZE or 10),
+            }
+        return {
+            "watchlist_limit": int(self.DEFAULT_SYMBOL_WATCHLIST_LIMIT or 36),
+            "discovery_batch_size": int(self.DEFAULT_DISCOVERY_BATCH_SIZE or 10),
+            "discovery_priority_count": int(self.DEFAULT_DISCOVERY_PRIORITY_COUNT or 3),
+            "auto_assignment_limit": int(self.DEFAULT_DISCOVERY_BATCH_SIZE or 10),
+        }
+
+    def _limit_runtime_symbols(self, symbols, broker_type, exchange=None):
+        exchange_code = self._active_exchange_code(exchange=exchange)
+        normalized_symbols = self._normalize_symbol_sequence(symbols)
+        if exchange_code == "stellar":
+            return normalized_symbols[:12]
+        if broker_type != "crypto":
+            return normalized_symbols[:50]
+        if exchange_code == "coinbase":
+            candidate_symbols = self._filter_symbols_for_trading(normalized_symbols, broker_type, exchange_code)
+            prioritized = self._prioritize_symbols_for_trading(
+                candidate_symbols,
+                top_n=self.COINBASE_SYMBOL_LIMIT,
+                quote_priority=self.COINBASE_QUOTE_PRIORITY,
+                account_assets=self._positive_balance_asset_codes(getattr(self, "balances", None)),
+            )
+            return prioritized if prioritized else candidate_symbols[: self.COINBASE_SYMBOL_LIMIT]
+        prioritized = self._prioritize_symbols_for_trading(normalized_symbols, top_n=30)
+        return prioritized if prioritized else normalized_symbols[:30]
+
+    def _refresh_symbol_universe_tiers(self, catalog_symbols=None, broker_type=None, exchange=None):
+        exchange_code = self._active_exchange_code(exchange=exchange)
+        normalized_type = self._active_broker_type(broker_type=broker_type, exchange=exchange)
+        policy = self._symbol_universe_policy(broker_type=normalized_type, exchange=exchange_code)
+        active_symbols = self._normalize_symbol_sequence(getattr(self, "symbols", []) or [])
+
+        normalized_catalog = self._normalize_symbol_sequence(catalog_symbols)
+        if not normalized_catalog:
+            existing_catalog = (getattr(self, "_symbol_universe_tiers", {}) or {}).get("catalog", [])
+            normalized_catalog = self._normalize_symbol_sequence(existing_catalog)
+        if not normalized_catalog:
+            broker_symbols = getattr(getattr(self, "broker", None), "symbols", None)
+            normalized_catalog = self._normalize_symbol_sequence(broker_symbols or active_symbols)
+
+        explicit_watchlist = sorted(
+            [
+                symbol
+                for symbol in self._normalize_symbol_sequence(getattr(self, "autotrade_watchlist", set()) or set())
+                if symbol in normalized_catalog
+            ]
+        )
+        account_assets = self._positive_balance_asset_codes(getattr(self, "balances", None))
+        if normalized_type == "crypto":
+            prioritized_catalog = self._prioritize_symbols_for_trading(
+                normalized_catalog,
+                top_n=max(int(policy["watchlist_limit"] or 0), len(active_symbols), int(policy["discovery_batch_size"] or 0), 1),
+                quote_priority=self.COINBASE_QUOTE_PRIORITY if exchange_code == "coinbase" else self.QUOTE_PRIORITY,
+                account_assets=account_assets,
+            )
+        else:
+            prioritized_catalog = list(normalized_catalog)
+
+        watchlist_pool = []
+        for source in (active_symbols, explicit_watchlist, prioritized_catalog, normalized_catalog):
+            for symbol in source:
+                if symbol in normalized_catalog and symbol not in watchlist_pool:
+                    watchlist_pool.append(symbol)
+        watchlist_limit = max(int(policy["watchlist_limit"] or 0), len(active_symbols), 1)
+        watchlist_symbols = watchlist_pool[:watchlist_limit]
+        background_catalog = [symbol for symbol in normalized_catalog if symbol not in watchlist_symbols]
+
+        if background_catalog:
+            cursor = int(getattr(self, "_symbol_universe_rotation_cursor", 0) or 0) % len(background_catalog)
+        else:
+            cursor = 0
+        self._symbol_universe_rotation_cursor = cursor
+        self._symbol_universe_tiers = {
+            "exchange": exchange_code or "",
+            "broker_type": normalized_type,
+            "active": list(active_symbols),
+            "watchlist": list(watchlist_symbols),
+            "catalog": list(normalized_catalog),
+            "background_catalog": list(background_catalog),
+            "rotation_cursor": cursor,
+            "policy": dict(policy),
+            "last_batch": list(getattr(self, "_symbol_universe_tiers", {}).get("last_batch", []) or []),
+        }
+        return dict(self._symbol_universe_tiers)
+
+    def get_symbol_universe_snapshot(self):
+        tiers = dict(getattr(self, "_symbol_universe_tiers", {}) or {})
+        for key in ("active", "watchlist", "catalog", "background_catalog", "last_batch"):
+            tiers[key] = list(tiers.get(key, []) or [])
+        tiers["rotation_cursor"] = int(tiers.get("rotation_cursor", 0) or 0)
+        return tiers
+
+    def _rotating_discovery_batch(self, limit=None, advance=False, broker_type=None, exchange=None):
+        tiers = self._refresh_symbol_universe_tiers(broker_type=broker_type, exchange=exchange)
+        watchlist_symbols = list(tiers.get("watchlist", []) or [])
+        background_catalog = list(tiers.get("background_catalog", []) or [])
+        policy = dict(tiers.get("policy", {}) or self._symbol_universe_policy(broker_type=broker_type, exchange=exchange))
+        if limit is None:
+            limit = int(policy.get("discovery_batch_size", self.DEFAULT_DISCOVERY_BATCH_SIZE) or self.DEFAULT_DISCOVERY_BATCH_SIZE)
+        batch_limit = max(int(limit or 0), 1)
+        priority_count = min(
+            max(int(policy.get("discovery_priority_count", self.DEFAULT_DISCOVERY_PRIORITY_COUNT) or 0), 0),
+            batch_limit,
+            len(watchlist_symbols),
+        )
+        batch = list(watchlist_symbols[:priority_count])
+        remaining = batch_limit - len(batch)
+        cursor = int(getattr(self, "_symbol_universe_rotation_cursor", 0) or 0)
+        rotating_symbols = []
+        if background_catalog and remaining > 0:
+            cursor = cursor % len(background_catalog)
+            for offset in range(remaining):
+                rotating_symbols.append(background_catalog[(cursor + offset) % len(background_catalog)])
+            if advance:
+                cursor = (cursor + len(rotating_symbols)) % len(background_catalog)
+        batch.extend(rotating_symbols)
+        if len(batch) < batch_limit:
+            for symbol in watchlist_symbols[priority_count:]:
+                if symbol not in batch:
+                    batch.append(symbol)
+                if len(batch) >= batch_limit:
+                    break
+        batch = self._normalize_symbol_sequence(batch)
+        if advance:
+            self._symbol_universe_rotation_cursor = cursor if background_catalog else 0
+            tiers = dict(getattr(self, "_symbol_universe_tiers", {}) or {})
+            tiers["rotation_cursor"] = int(self._symbol_universe_rotation_cursor or 0)
+            tiers["last_batch"] = list(batch)
+            self._symbol_universe_tiers = tiers
+        return batch
+
     async def _select_trade_symbols(self, symbols, broker_type, exchange=None):
         exchange_code = self._active_exchange_code(exchange=exchange)
         if str(exchange or "").lower() == "stellar":
@@ -1713,21 +1948,7 @@ class AppController(QMainWindow):
 
             return validated if validated else prioritized[:12]
 
-        if broker_type != "crypto":
-            return symbols[:50]
-
-        if exchange_code == "coinbase":
-            candidate_symbols = self._filter_symbols_for_trading(symbols, broker_type, exchange_code)
-            prioritized = self._prioritize_symbols_for_trading(
-                candidate_symbols,
-                top_n=self.COINBASE_SYMBOL_LIMIT,
-                quote_priority=self.COINBASE_QUOTE_PRIORITY,
-                account_assets=self._positive_balance_asset_codes(getattr(self, "balances", None)),
-            )
-            return prioritized if prioritized else candidate_symbols[: self.COINBASE_SYMBOL_LIMIT]
-
-        prioritized = self._prioritize_symbols_for_trading(symbols, top_n=30)
-        return prioritized if prioritized else symbols[:30]
+        return self._limit_runtime_symbols(symbols, broker_type, exchange=exchange_code)
 
     def _prioritize_symbols_for_trading(self, symbols, top_n=30, quote_priority=None, account_assets=None):
         account_asset_codes = {
@@ -1823,6 +2044,7 @@ class AppController(QMainWindow):
 
         self.balances = await self._fetch_balances(self.broker)
         self.balance = self.balances
+        self._refresh_symbol_universe_tiers()
         equity = self._update_performance_equity(self.balances)
         self._update_behavior_guard_equity(self.balances)
         if equity is not None:
@@ -1947,11 +2169,17 @@ class AppController(QMainWindow):
                 except Exception:
                     updated_symbols = None
                 if updated_symbols:
-                    self.symbols = list(updated_symbols)
                     exchange_name = getattr(broker, "exchange_name", getattr(broker_cfg, "exchange", "broker")) or "broker"
+                    broker_type = getattr(broker_cfg, "type", None)
+                    self.symbols = self._limit_runtime_symbols(updated_symbols, broker_type, exchange_name)
+                    self._refresh_symbol_universe_tiers(
+                        catalog_symbols=updated_symbols,
+                        broker_type=broker_type,
+                        exchange=exchange_name,
+                    )
                     self.symbols_signal.emit(str(exchange_name), list(self.symbols))
                     if getattr(self, "connected", False):
-                        self.schedule_strategy_auto_assignment(symbols=self.symbols, timeframe=self.time_frame, force=False)
+                        self.schedule_strategy_auto_assignment(symbols=None, timeframe=self.time_frame, force=False)
 
     def set_forex_candle_price_component(self, component):
         normalized = _normalize_forex_candle_price_component(component)
@@ -3168,17 +3396,27 @@ class AppController(QMainWindow):
         lock_set = getattr(self, "symbol_strategy_locks", set()) or set()
         return normalized_symbol in lock_set
 
-    def _strategy_auto_assignment_symbols(self, symbols=None):
+    def _strategy_auto_assignment_symbols(self, symbols=None, advance_rotation=False):
         symbol_sources = []
         if symbols is not None:
             symbol_sources.append(list(symbols or []))
         else:
+            saved_sources = [
+                list(getattr(self, "symbol_strategy_assignments", {}).keys()),
+                list(getattr(self, "symbol_strategy_rankings", {}).keys()),
+                list(getattr(self, "symbol_strategy_locks", set()) or set()),
+            ]
+            symbol_sources.extend(saved_sources)
+            symbol_sources.append(
+                self._rotating_discovery_batch(
+                    limit=self._strategy_auto_assignment_symbol_limit(),
+                    advance=advance_rotation,
+                )
+            )
             symbol_sources.extend(
                 [
                     list(getattr(self, "symbols", []) or []),
-                    list(getattr(self, "symbol_strategy_assignments", {}).keys()),
-                    list(getattr(self, "symbol_strategy_rankings", {}).keys()),
-                    list(getattr(self, "symbol_strategy_locks", set()) or set()),
+                    list((getattr(self, "_symbol_universe_tiers", {}) or {}).get("watchlist", []) or []),
                 ]
             )
 
@@ -3199,8 +3437,9 @@ class AppController(QMainWindow):
         assigned_rows = list((getattr(self, "symbol_strategy_assignments", {}) or {}).get(normalized_symbol, []) or [])
         return bool(assigned_rows)
 
-    def _partition_strategy_auto_assignment_symbols(self, symbols=None):
-        symbol_candidates = self._strategy_auto_assignment_symbols(symbols=symbols)
+    def _partition_strategy_auto_assignment_symbols(self, symbols=None, symbol_candidates=None):
+        if symbol_candidates is None:
+            symbol_candidates = self._strategy_auto_assignment_symbols(symbols=symbols)
         restored_symbols = []
         missing_symbols = []
         for symbol in symbol_candidates:
@@ -3339,12 +3578,92 @@ class AppController(QMainWindow):
         return normalized
 
     def _strategy_auto_assignment_symbol_limit(self):
-        exchange_code = self._active_exchange_code()
-        if exchange_code == "coinbase":
-            return self.COINBASE_AUTO_ASSIGN_SYMBOL_LIMIT
-        if exchange_code in SPOT_ONLY_EXCHANGES:
-            return 10
-        return 0
+        policy = self._symbol_universe_policy()
+        return int(policy.get("auto_assignment_limit", 0) or 0)
+
+    def _startup_strategy_auto_assignment_delay_seconds(self, exchange=None):
+        exchange_code = self._active_exchange_code(exchange=exchange)
+        if exchange_code != "coinbase":
+            return 0.0
+        return max(0.0, float(getattr(self, "COINBASE_FAST_START_AUTO_ASSIGN_DELAY_SECONDS", 0.0) or 0.0))
+
+    async def _run_deferred_strategy_auto_assignment(self, delay_seconds, symbols=None, timeframe=None):
+        try:
+            await asyncio.sleep(max(0.0, float(delay_seconds or 0.0)))
+            if not getattr(self, "connected", False) or getattr(self, "broker", None) is None:
+                return None
+            task = self.schedule_strategy_auto_assignment(symbols=symbols, timeframe=timeframe, force=False)
+            if task is None:
+                return None
+            return await task
+        finally:
+            current_task = asyncio.current_task()
+            if getattr(self, "_strategy_auto_assignment_deferred_task", None) is current_task:
+                self._strategy_auto_assignment_deferred_task = None
+
+    def _schedule_startup_strategy_auto_assignment(self, symbols=None, timeframe=None, exchange=None):
+        deferred_task = getattr(self, "_strategy_auto_assignment_deferred_task", None)
+        if deferred_task is not None and not deferred_task.done():
+            deferred_task.cancel()
+        self._strategy_auto_assignment_deferred_task = None
+
+        if not bool(getattr(self, "strategy_auto_assignment_enabled", True)):
+            self.strategy_auto_assignment_ready = True
+            return None
+
+        delay_seconds = self._startup_strategy_auto_assignment_delay_seconds(exchange=exchange)
+        scheduled_symbols = None
+        if delay_seconds <= 0:
+            return self.schedule_strategy_auto_assignment(symbols=scheduled_symbols, timeframe=timeframe, force=False)
+
+        timeframe_value = str(timeframe or getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+        tracked_symbols = list(scheduled_symbols or [])
+        if scheduled_symbols is None:
+            tracked_symbols = self._rotating_discovery_batch(
+                limit=self._strategy_auto_assignment_symbol_limit(),
+                advance=False,
+                exchange=exchange,
+            )
+        symbol_limit = int(self._strategy_auto_assignment_symbol_limit() or 0)
+        if symbol_limit > 0:
+            tracked_symbols = tracked_symbols[:symbol_limit]
+
+        delay_label = int(round(delay_seconds))
+        self.strategy_auto_assignment_ready = False
+        self.strategy_auto_assignment_in_progress = False
+        self._update_strategy_auto_assignment_progress(
+            completed=0,
+            total=len(tracked_symbols),
+            current_symbol="",
+            timeframe=timeframe_value,
+            message=(
+                f"Coinbase fast mode is letting the terminal settle first. "
+                f"Automatic strategy ranking will start in about {delay_label} seconds."
+            ),
+            failed_symbols=[],
+            scan_timeframes=list(self._strategy_auto_assignment_timeframes(timeframe=timeframe_value)),
+        )
+        terminal = getattr(self, "terminal", None)
+        system_console = getattr(terminal, "system_console", None) if terminal is not None else None
+        if system_console is not None:
+            system_console.log(
+                (
+                    f"Coinbase fast mode enabled: delaying automatic strategy scan for about "
+                    f"{delay_label} seconds so the terminal can finish loading."
+                ),
+                "INFO",
+            )
+
+        task = self._create_task(
+            self._run_deferred_strategy_auto_assignment(
+                delay_seconds,
+                symbols=scheduled_symbols,
+                timeframe=timeframe_value,
+            ),
+            "startup_strategy_auto_assignment",
+        )
+        self._strategy_auto_assignment_deferred_task = task
+        return task
 
     def _best_strategy_rankings_across_timeframes(self, rankings):
         best_by_strategy = {}
@@ -3417,11 +3736,27 @@ class AppController(QMainWindow):
         return list(cleaned_rows)
 
     def schedule_strategy_auto_assignment(self, symbols=None, timeframe=None, force=False):
+        deferred_task = getattr(self, "_strategy_auto_assignment_deferred_task", None)
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        if deferred_task is not None and deferred_task is not current_task and not deferred_task.done():
+            deferred_task.cancel()
+            self._strategy_auto_assignment_deferred_task = None
         if not bool(getattr(self, "strategy_auto_assignment_enabled", True)) and not force:
             self.strategy_auto_assignment_ready = True
             return None
+        source_symbols = (
+            self._strategy_auto_assignment_symbols(symbols=symbols, advance_rotation=(symbols is None and self._active_exchange_code() == "coinbase"))
+            if not force
+            else self._strategy_auto_assignment_symbols(symbols=symbols)
+        )
         if not force:
-            _all_symbols, missing_symbols, restored_symbols = self._partition_strategy_auto_assignment_symbols(symbols=symbols)
+            _all_symbols, missing_symbols, restored_symbols = self._partition_strategy_auto_assignment_symbols(
+                symbols=symbols,
+                symbol_candidates=source_symbols,
+            )
             if restored_symbols and not missing_symbols:
                 self._strategy_auto_assignment_task = None
                 self._restore_saved_strategy_assignments(
@@ -3431,6 +3766,8 @@ class AppController(QMainWindow):
                 return None
             if missing_symbols:
                 symbols = list(missing_symbols)
+            else:
+                symbols = list(source_symbols or [])
         task = getattr(self, "_strategy_auto_assignment_task", None)
         if task is not None and not task.done():
             return task
@@ -3447,13 +3784,19 @@ class AppController(QMainWindow):
             return self.strategy_auto_assignment_status()
 
         timeframe_value = str(timeframe or getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
-        symbol_candidates = self._strategy_auto_assignment_symbols(symbols=symbols)
+        symbol_candidates = self._strategy_auto_assignment_symbols(
+            symbols=symbols,
+            advance_rotation=(symbols is None and self._active_exchange_code() == "coinbase"),
+        )
         symbol_limit = int(self._strategy_auto_assignment_symbol_limit() or 0)
         if symbol_limit > 0:
             symbol_candidates = symbol_candidates[:symbol_limit]
         restored_symbols = []
         if not force:
-            _all_symbols, missing_symbols, restored_symbols = self._partition_strategy_auto_assignment_symbols(symbols=symbols)
+            _all_symbols, missing_symbols, restored_symbols = self._partition_strategy_auto_assignment_symbols(
+                symbols=symbols,
+                symbol_candidates=symbol_candidates,
+            )
             symbol_candidates = list(missing_symbols)
             if symbol_limit > 0:
                 symbol_candidates = symbol_candidates[:symbol_limit]
@@ -4563,6 +4906,13 @@ class AppController(QMainWindow):
         terminal = getattr(self, "terminal", None)
         if terminal is None:
             return []
+        active_snapshot = getattr(terminal, "_active_open_orders_snapshot", None)
+        if callable(active_snapshot):
+            try:
+                snapshot = list(active_snapshot() or [])
+            except Exception:
+                snapshot = []
+            return [dict(item) for item in snapshot if isinstance(item, dict)]
         snapshot = list(getattr(terminal, "_latest_open_orders_snapshot", []) or [])
         normalized = []
         normalizer = getattr(terminal, "_normalize_open_order_entry", None)
@@ -4587,6 +4937,13 @@ class AppController(QMainWindow):
         terminal = getattr(self, "terminal", None)
         if terminal is None:
             return []
+        active_snapshot = getattr(terminal, "_active_positions_snapshot", None)
+        if callable(active_snapshot):
+            try:
+                snapshot = list(active_snapshot() or [])
+            except Exception:
+                snapshot = []
+            return [dict(item) for item in snapshot if isinstance(item, dict)]
         snapshot = list(getattr(terminal, "_latest_positions_snapshot", []) or [])
         normalized = []
         normalizer = getattr(terminal, "_normalize_position_entry", None)
@@ -5492,6 +5849,7 @@ class AppController(QMainWindow):
         )
         self.autotrade_watchlist = set(normalized)
         self.settings.setValue("autotrade/watchlist", json.dumps(normalized))
+        self._refresh_symbol_universe_tiers()
 
     def _current_autotrade_selected_symbol(self):
         terminal = getattr(self, "terminal", None)
@@ -6569,6 +6927,40 @@ class AppController(QMainWindow):
             self.health_check_summary = f"{passed} pass / {warned} warn / {failed} fail"
         else:
             self.health_check_summary = f"{passed} pass / {warned} warn"
+        terminal = getattr(self, "terminal", None)
+        notifier = getattr(terminal, "_push_notification", None)
+        attention_items = [
+            item
+            for item in results
+            if str((item or {}).get("status") or "").strip().lower() in {"warn", "fail"}
+        ]
+        notification_signature = (
+            self.health_check_summary,
+            tuple(
+                (
+                    str(item.get("name") or "").strip(),
+                    str(item.get("status") or "").strip().lower(),
+                    str(item.get("detail") or "").strip(),
+                )
+                for item in attention_items
+            ),
+        )
+        if callable(notifier) and notification_signature != getattr(self, "_startup_health_notification_signature", None):
+            self._startup_health_notification_signature = notification_signature
+            details = "; ".join(
+                f"{item.get('name')}: {item.get('detail')}"
+                for item in attention_items[:4]
+                if isinstance(item, dict)
+            )
+            if not details:
+                details = "All startup checks passed."
+            notifier(
+                "Startup health check",
+                f"{self.health_check_summary}. {details}",
+                level="ERROR" if failed else "WARN" if warned else "INFO",
+                source="health",
+                dedupe_seconds=5.0,
+            )
         return results
 
     def get_health_check_report(self):
@@ -7267,7 +7659,7 @@ class AppController(QMainWindow):
         return " | ".join(lines[:4]) if compact else "<b>Balances</b>\n" + "\n".join(lines)
 
     async def telegram_positions_text(self):
-        positions = list(getattr(getattr(self, "terminal", None), "_latest_positions_snapshot", []) or [])
+        positions = self._market_chat_positions_snapshot()
         if not positions:
             return "<b>Positions</b>\nNo open positions."
 
@@ -7280,7 +7672,7 @@ class AppController(QMainWindow):
         return "\n".join(lines)
 
     async def telegram_open_orders_text(self):
-        orders = list(getattr(getattr(self, "terminal", None), "_latest_open_orders_snapshot", []) or [])
+        orders = self._market_chat_open_orders_snapshot()
         if not orders:
             return "<b>Open Orders</b>\nNo open orders."
 
@@ -8654,6 +9046,10 @@ class AppController(QMainWindow):
             if auto_assignment_task is not None and not auto_assignment_task.done():
                 auto_assignment_task.cancel()
             self._strategy_auto_assignment_task = None
+            deferred_assignment_task = getattr(self, "_strategy_auto_assignment_deferred_task", None)
+            if deferred_assignment_task is not None and not deferred_assignment_task.done():
+                deferred_assignment_task.cancel()
+            self._strategy_auto_assignment_deferred_task = None
             self.strategy_auto_assignment_in_progress = False
             self.strategy_auto_assignment_ready = not bool(getattr(self, "strategy_auto_assignment_enabled", True))
             self._update_strategy_auto_assignment_progress(

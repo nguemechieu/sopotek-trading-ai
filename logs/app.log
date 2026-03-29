@@ -3532,3 +3532,231 @@ Using polling market data for Oanda
 Initializing broker oanda
 Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
 Using polling market data for Oanda
+Initializing broker coinbase
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+Broker ready exchange=coinbase type=crypto symbols=0 (raw=893 filtered=0)
+Requested market preference derivative was not available on coinbase; falling back to auto symbols
+WebSocket market data enabled for coinbase
+Not enough data for 00/USD (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/USD (1m): received 156 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USDC (1m): received 169 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVAX/USDT (1h): received 236 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/USDT (1m): received 46 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/USDT (5m): received 94 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/USDT (15m): received 178 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/USDT (30m): received 230 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVAX/USDT (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVNT/USD (1m): received 86 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVNT/USD (5m): received 172 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVNT/USD (15m): received 233 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVNT/USD (30m): received 238 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVNT/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVNT/USD (1d): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVNT/USDC (1m): received 77 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVNT/USDC (5m): received 171 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVNT/USDC (15m): received 232 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVNT/USDC (30m): received 238 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVNT/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AVNT/USDC (1d): received 200 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVT/USD (1h): received 130 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVT/USD (1m): received 1 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVT/USD (5m): received 10 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVT/USD (15m): received 31 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVT/USD (30m): received 58 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AVT/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Task ws_connect failed: no close frame received or sent
+WebSocket stream failed: no close frame received or sent
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=895 filtered=795)
+WebSocket market data enabled for coinbase
+Not enough data for AVT/USDC (1h): received 127 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USD (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 74 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for DAI/USD (1h): received 299 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6152, in _submit_manual_trade
+    await submit_live_manual_trade(
+    ...<11 lines>...
+    )
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\actions\live_trade_actions.py", line 73, in submit_manual_trade
+    preflight = await controller.preview_trade_submission(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<11 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2894, in preview_trade_submission
+    return await self._preflight_trade_submission(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<11 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2703, in _preflight_trade_submission
+    raise RuntimeError(" ".join(str(item).strip() for item in market_data_guard.get("reasons", []) if str(item).strip()))
+RuntimeError: Live trade blocked: quote data for DASH/USD is stale (unknown old).
+Not enough data for AVT/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6152, in _submit_manual_trade
+    await submit_live_manual_trade(
+    ...<11 lines>...
+    )
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\actions\live_trade_actions.py", line 73, in submit_manual_trade
+    preflight = await controller.preview_trade_submission(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<11 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2894, in preview_trade_submission
+    return await self._preflight_trade_submission(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<11 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2703, in _preflight_trade_submission
+    raise RuntimeError(" ".join(str(item).strip() for item in market_data_guard.get("reasons", []) if str(item).strip()))
+RuntimeError: Live trade blocked: quote data for DASH/USD is stale (unknown old).
+Not enough data for AWE/USD (1h): received 163 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CRO/USDT (1h): received 41 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CVC/USD (1h): received 242 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6152, in _submit_manual_trade
+    await submit_live_manual_trade(
+    ...<11 lines>...
+    )
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\actions\live_trade_actions.py", line 73, in submit_manual_trade
+    preflight = await controller.preview_trade_submission(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<11 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2894, in preview_trade_submission
+    return await self._preflight_trade_submission(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<11 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2703, in _preflight_trade_submission
+    raise RuntimeError(" ".join(str(item).strip() for item in market_data_guard.get("reasons", []) if str(item).strip()))
+RuntimeError: Live trade blocked: quote data for CRO/USDT is stale (unknown old). Live trade blocked: candle data for CRO/USDT 1h is stale (8.0h old).
+Manual order failed
+Traceback (most recent call last):
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\terminal.py", line 6152, in _submit_manual_trade
+    await submit_live_manual_trade(
+    ...<11 lines>...
+    )
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\actions\live_trade_actions.py", line 73, in submit_manual_trade
+    preflight = await controller.preview_trade_submission(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<11 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2894, in preview_trade_submission
+    return await self._preflight_trade_submission(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<11 lines>...
+    )
+    ^
+  File "C:\Users\nguem\Documents\GitHub\sopotek-trading-ai\src\frontend\ui\app_controller.py", line 2703, in _preflight_trade_submission
+    raise RuntimeError(" ".join(str(item).strip() for item in market_data_guard.get("reasons", []) if str(item).strip()))
+RuntimeError: Live trade blocked: quote data for CRO/USDT is stale (unknown old). Live trade blocked: candle data for CRO/USDT 1h is stale (8.0h old).
+Not enough data for CVC/USD (1h): received 241 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for DEXT/USD (1h): received 168 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AWE/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AWE/USDC (1h): received 162 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for DASH/USD (1h): received 299 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AWE/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AXL/USD (1h): received 236 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AXL/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AXL/USDC (1h): received 236 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AXL/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AXS/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Task ws_connect failed: no close frame received or sent
+WebSocket stream failed: no close frame received or sent
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=895 filtered=795)
+Not enough data for RONIN/USD (1h): received 263 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+WebSocket market data enabled for coinbase
+Not enough data for 00/USD (1h): received 73 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 73 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=895 filtered=795)
+WebSocket market data enabled for coinbase
+Not enough data for 00/USD (1h): received 73 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 73 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+COINBASE does not support market symbol USD/HUF on the active broker. The app will skip live market data for this symbol until you switch to a supported market.
+Not enough data for AXS/USDC (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AZTEC/USD (1h): received 238 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=895 filtered=795)
+WebSocket market data enabled for coinbase
+Not enough data for CELO/USDC (1h): received 259 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AZTEC/USD (1h): received 238 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USD (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=895 filtered=795)
+WebSocket market data enabled for coinbase
+Not enough data for AZTEC/USD (1h): received 238 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USD (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=895 filtered=795)
+WebSocket market data enabled for coinbase
+Not enough data for AZTEC/USD (1h): received 238 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for DAI/USD (1h): received 299 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USD (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CELR/USDC (1h): received 247 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CELO/USD (1h): received 260 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=895 filtered=795)
+WebSocket market data enabled for coinbase
+Not enough data for CELO/USDC (1h): received 259 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AZTEC/USD (1h): received 237 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USD (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for 00/USDC (1h): received 77 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for AZTEC/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for AZTEC/USDC (1h): received 237 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=895 filtered=795)
+WebSocket market data enabled for coinbase
+Not enough data for CELO/USD (1h): received 207 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CELO/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for DAI/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for DASH/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for RONIN/USD (1h): received 208 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=895 filtered=795)
+WebSocket market data enabled for coinbase
+Not enough data for DASH/USD (1h): received 299 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for RONIN/USD (1h): received 207 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CELO/USD (1h): received 149 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for RONIN/USD (4h): no candles were returned. Try another timeframe, load more history, or wait for more market data.
+Not enough data for VARA/USD (1h): received 220 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Initializing broker oanda
+Broker ready exchange=oanda type=forex symbols=50 (raw=68 filtered=68)
+Using polling market data for Oanda
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=895 filtered=795)
+WebSocket market data enabled for coinbase
+Not enough data for DAI/USD (1h): received 299 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for VARA/USD (1h): received 221 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CELO/USDC (1h): received 259 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CELO/USD (1h): received 149 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Initializing broker coinbase
+Broker ready exchange=coinbase type=crypto symbols=10 (raw=895 filtered=795)
+WebSocket market data enabled for coinbase
+Not enough data for VARA/USD (1h): received 220 of 240 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for VARA/USD (1h): received 275 of 500 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CELO/USD (1h): received 148 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Sanitized OHLCV data for BTC/USD (1h) from cache: kept 161 row(s), replaced 19 duplicate timestamp row(s).
+Not enough data for BTC/USD (1h): received 161 of 180 requested candles. Indicators, AI signals, and backtests may be limited.
+Not enough data for CELO/USD (1h): received 259 of 500 requested candles. Indicators, AI signals, and backtests may be limited.

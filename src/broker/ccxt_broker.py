@@ -1,4 +1,5 @@
 import asyncio
+import copy
 from datetime import datetime, timezone
 import logging
 import re
@@ -87,6 +88,9 @@ class CCXTBroker(BaseBroker):
     COINBASE_OHLCV_CACHE_SECONDS = 8.0
     COINBASE_OHLCV_SHORTFALL_CACHE_SECONDS = 20.0
     COINBASE_OHLCV_MAX_CONCURRENCY = 2
+    SPOT_ACCOUNT_CACHE_SECONDS = 3.0
+    COINBASE_SPOT_ACCOUNT_CACHE_SECONDS = 8.0
+    COINBASE_OPEN_ORDERS_CACHE_SECONDS = 5.0
     SPOT_PRICE_CACHE_SECONDS = 15.0
     SPOT_DUST_THRESHOLD = 1e-10
     SPOT_CASH_EQUIVALENTS = {"USD", "USDC", "USDT", "BUSD", "EUR", "GBP"}
@@ -140,6 +144,9 @@ class CCXTBroker(BaseBroker):
         self.symbols = []
         self._connected = False
         self._open_orders_snapshot_cache = {}
+        self._spot_account_snapshot_cache = None
+        self._spot_account_snapshot_cache_until = 0.0
+        self._spot_account_snapshot_inflight = None
         self._ticker_price_cache = {}
         self._ticker_price_cache_until = {}
         self._ticker_price_inflight = {}
@@ -901,11 +908,14 @@ class CCXTBroker(BaseBroker):
         if not isinstance(raw_balance, dict):
             return raw_balance
 
+        snapshot = await self._spot_account_snapshot_from_balance(raw_balance)
+        return self._compose_spot_balance_snapshot(raw_balance, snapshot)
+
+    def _compose_spot_balance_snapshot(self, raw_balance, snapshot):
         normalized = dict(raw_balance)
         totals = self._spot_balance_totals(raw_balance)
         if totals:
             normalized.setdefault("asset_balances", dict(totals))
-        snapshot = await self._spot_account_snapshot_from_balance(raw_balance)
         cash_value = float(snapshot.get("cash_value", 0.0) or 0.0)
         position_value = sum(
             float((position or {}).get("value", 0.0) or 0.0)
@@ -925,6 +935,57 @@ class CCXTBroker(BaseBroker):
             normalized.setdefault("total_account_value", account_value)
             normalized.setdefault("net_liquidation", account_value)
         return normalized
+
+    def _spot_account_cache_seconds(self):
+        if self._exchange_code() == "coinbase":
+            return self.COINBASE_SPOT_ACCOUNT_CACHE_SECONDS
+        return self.SPOT_ACCOUNT_CACHE_SECONDS
+
+    def _invalidate_account_state_cache(self):
+        self._spot_account_snapshot_cache = None
+        self._spot_account_snapshot_cache_until = 0.0
+        self._open_orders_snapshot_cache.clear()
+
+    async def _get_spot_account_snapshot_cached(self):
+        now = time.monotonic()
+        cached_snapshot = self._spot_account_snapshot_cache
+        if cached_snapshot is not None and now < float(self._spot_account_snapshot_cache_until or 0.0):
+            return copy.deepcopy(cached_snapshot)
+
+        inflight = self._spot_account_snapshot_inflight
+        if inflight is not None and not inflight.done():
+            return copy.deepcopy(await inflight)
+
+        async def runner():
+            raw_balance = await self._fetch_raw_balance()
+            if not isinstance(raw_balance, dict):
+                payload = {
+                    "raw_balance": raw_balance,
+                    "balance": raw_balance,
+                    "positions": [],
+                    "cash_value": 0.0,
+                }
+            else:
+                snapshot = await self._spot_account_snapshot_from_balance(raw_balance)
+                payload = {
+                    "raw_balance": raw_balance,
+                    "balance": self._compose_spot_balance_snapshot(raw_balance, snapshot),
+                    "positions": list(snapshot.get("positions", [])),
+                    "cash_value": float(snapshot.get("cash_value", 0.0) or 0.0),
+                }
+
+            self._spot_account_snapshot_cache = copy.deepcopy(payload)
+            self._spot_account_snapshot_cache_until = time.monotonic() + self._spot_account_cache_seconds()
+            return copy.deepcopy(payload)
+
+        task = asyncio.create_task(runner())
+        self._spot_account_snapshot_inflight = task
+        try:
+            return await task
+        finally:
+            current = self._spot_account_snapshot_inflight
+            if current is task:
+                self._spot_account_snapshot_inflight = None
 
     def _coinbase_ohlcv_cache_key(self, symbol, timeframe, limit):
         return f"{str(symbol or '').upper().strip()}|{str(timeframe or '1h').lower().strip()}|{max(int(limit or 0), 1)}"
@@ -1424,16 +1485,19 @@ class CCXTBroker(BaseBroker):
             normalized_price,
             order_params,
         )
+        self._invalidate_account_state_cache()
         if isinstance(created, dict) and trigger_price is not None:
             created.setdefault("stop_price", float(trigger_price))
         return created
 
     async def cancel_order(self, order_id, symbol=None):
+        self._invalidate_account_state_cache()
         if symbol is None:
             return await self._call_unified("cancel_order", order_id)
         return await self._call_unified("cancel_order", order_id, symbol)
 
     async def cancel_all_orders(self, symbol=None):
+        self._invalidate_account_state_cache()
         if symbol is None:
             return await self._call_unified("cancel_all_orders", default=[])
         return await self._call_unified("cancel_all_orders", symbol, default=[])
@@ -1443,24 +1507,24 @@ class CCXTBroker(BaseBroker):
     # ==========================================================
 
     async def fetch_balance(self):
+        if not self._supports_positions_endpoint():
+            try:
+                snapshot = await self._get_spot_account_snapshot_cached()
+                return snapshot.get("balance")
+            except Exception as exc:
+                self.logger.debug("Unable to derive spot account valuation on %s: %s", self.exchange_name, exc)
         raw_balance = await self._fetch_raw_balance()
         if not isinstance(raw_balance, dict):
             return raw_balance
-        if not self._supports_positions_endpoint():
-            try:
-                return await self._augment_spot_balance_snapshot(raw_balance)
-            except Exception as exc:
-                self.logger.debug("Unable to derive spot account valuation on %s: %s", self.exchange_name, exc)
         return raw_balance
 
     async def fetch_positions(self, symbols=None):
         if not self._supports_positions_endpoint():
             try:
-                raw_balance = await self._fetch_raw_balance()
-                snapshot = await self._spot_account_snapshot_from_balance(raw_balance)
+                snapshot = await self._get_spot_account_snapshot_cached()
                 return [
                     position
-                    for position in snapshot.get("positions", [])
+                    for position in (snapshot or {}).get("positions", [])
                     if isinstance(position, dict) and self._spot_position_matches_symbols(position, symbols)
                 ]
             except Exception as exc:
@@ -1512,6 +1576,26 @@ class CCXTBroker(BaseBroker):
             }
             return orders
 
+        if exchange_code == "coinbase":
+            cache_key = ("coinbase-snapshot", tuple(monitored_symbols), limit)
+            cached = self._open_orders_snapshot_cache.get(cache_key)
+            if cached and now < cached["expires_at"]:
+                return list(cached["orders"])
+
+            try:
+                orders = self._dedupe_orders_snapshot(await self._fetch_open_orders_without_symbol(limit=limit))
+            except Exception:
+                if monitored_symbols:
+                    orders = await self._fetch_open_orders_by_symbols(monitored_symbols, limit=limit)
+                else:
+                    raise
+
+            self._open_orders_snapshot_cache[cache_key] = {
+                "orders": list(orders),
+                "expires_at": now + self.COINBASE_OPEN_ORDERS_CACHE_SECONDS,
+            }
+            return orders
+
         try:
             return self._dedupe_orders_snapshot(await self._fetch_open_orders_without_symbol(limit=limit))
         except Exception:
@@ -1531,6 +1615,7 @@ class CCXTBroker(BaseBroker):
             order_params.update(params)
         if tag is not None:
             order_params.setdefault("tag", tag)
+        self._invalidate_account_state_cache()
         return await self._call_unified(
             "withdraw",
             code,

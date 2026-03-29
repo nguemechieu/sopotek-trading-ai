@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QComboBox, QProgressBar,
     QTabWidget, QToolBar, QDialog, QGridLayout, QDoubleSpinBox, QMessageBox, QFormLayout, QInputDialog, QColorDialog,
     QFrame, QHeaderView, QMenu,
-    QHBoxLayout, QSizePolicy, QTextEdit, QTextBrowser, QApplication, QLineEdit, QSlider, QCheckBox, QScrollArea
+    QHBoxLayout, QSizePolicy, QTextEdit, QTextBrowser, QApplication, QLineEdit, QSlider, QCheckBox, QScrollArea, QFileDialog
 )
 
 
@@ -166,7 +166,10 @@ from frontend.ui.panels.workspace_updates import (
     update_recent_trades,
     update_risk_heatmap,
 )
+from frontend.ui.services.diagnostics_service import export_diagnostics_bundle
+from frontend.ui.services.error_reporting import report_uncaught_exception, set_active_terminal
 from frontend.ui.services.screenshot_service import prompt_and_save_widget_screenshot
+from frontend.ui.services.runtime_metrics import build_runtime_metrics_snapshot
 from integrations.news_service import NewsService
 from quant.ml_research import MLResearchPipeline
 from strategy.strategy import Strategy
@@ -225,6 +228,20 @@ def global_exception_hook(exctype, value, tb):
 
     print("UNCAUGHT EXCEPTION:")
     traceback.print_exception(exctype, value, tb)
+    report_uncaught_exception(exctype, value, tb)
+
+
+def global_thread_exception_hook(args):
+    """Capture uncaught worker-thread exceptions with the same reporting path."""
+    exctype = getattr(args, "exc_type", Exception)
+    value = getattr(args, "exc_value", None)
+    tb = getattr(args, "exc_traceback", None)
+    if exctype in (KeyboardInterrupt, SystemExit):
+        return
+
+    print("UNCAUGHT THREAD EXCEPTION:")
+    traceback.print_exception(exctype, value, tb)
+    report_uncaught_exception(exctype, value, tb)
 
 
 def _json_text(value: object, fallback: str) -> str:
@@ -304,7 +321,9 @@ class Terminal(QMainWindow):
 
         super().__init__(controller)
 
+        set_active_terminal(self)
         sys.excepthook = global_exception_hook
+        threading.excepthook = global_thread_exception_hook
 
         self.controller = controller
         self.logger = controller.logger
@@ -1795,6 +1814,8 @@ class Terminal(QMainWindow):
         self.action_ml_monitor.triggered.connect(self._open_ml_monitor)
         self.action_logs = QAction(self)
         self.action_logs.triggered.connect(self._open_logs)
+        self.action_export_diagnostics = QAction("Export Diagnostics Bundle", self)
+        self.action_export_diagnostics.triggered.connect(self._export_diagnostics_bundle)
         self.action_performance = QAction(self)
         self.action_performance.triggered.connect(self._open_performance)
         self.action_performance.setShortcut("Ctrl+Shift+P")
@@ -1896,6 +1917,7 @@ class Terminal(QMainWindow):
         self.research_menu.addAction(self.action_stellar_asset_explorer)
 
         self.tools_menu.addAction(self.action_logs)
+        self.tools_menu.addAction(self.action_export_diagnostics)
         self.tools_menu.addSeparator()
         self.tools_menu.addAction(self.action_system_console)
         self.tools_menu.addAction(self.action_system_status)
@@ -1986,6 +2008,7 @@ class Terminal(QMainWindow):
             self.action_recommendations.setText("Recommendations")
             self.action_ml_monitor.setText(self._tr("terminal.action.ml_monitor"))
             self.action_logs.setText(self._tr("terminal.action.logs"))
+            self.action_export_diagnostics.setText("Export Diagnostics Bundle")
             self.action_performance.setText(self._tr("terminal.action.performance"))
             self.action_closed_journal.setText("Closed Journal")
             self.action_trade_checklist.setText("Trade Checklist")
@@ -3316,6 +3339,17 @@ class Terminal(QMainWindow):
         if normalized_positions:
             return normalized_positions
         return list(self._portfolio_positions_snapshot() or [])
+
+    def _active_open_orders_snapshot(self):
+        normalized_orders = []
+        for raw in list(getattr(self, "_latest_open_orders_snapshot", []) or []):
+            normalized = self._normalize_open_order_entry(raw)
+            if normalized is not None:
+                normalized_orders.append(normalized)
+        return normalized_orders
+
+    def _runtime_metrics_snapshot(self):
+        return build_runtime_metrics_snapshot(self)
 
     def _populate_positions_table(self, positions):
         populate_positions_table(self, positions)
@@ -8086,6 +8120,40 @@ class Terminal(QMainWindow):
         ]
         capabilities_browser.setHtml("<h3>Broker Capabilities</h3><ul>" + "".join(capability_lines) + "</ul>")
 
+    def _export_diagnostics_bundle(self):
+        default_dir = str(self.settings.value("diagnostics/export_dir", "logs") or "logs")
+        destination = QFileDialog.getExistingDirectory(self, "Export Diagnostics Bundle", default_dir)
+        if not destination:
+            return None
+        try:
+            bundle_path = export_diagnostics_bundle(self, destination)
+        except Exception as exc:
+            self.logger.exception("Diagnostics bundle export failed")
+            if hasattr(self, "_push_notification"):
+                self._push_notification(
+                    "Diagnostics export failed",
+                    str(exc),
+                    level="ERROR",
+                    source="diagnostics",
+                    dedupe_seconds=5.0,
+                )
+            QMessageBox.warning(self, "Export Diagnostics", f"Diagnostics bundle export failed:\n{exc}")
+            return None
+
+        self.settings.setValue("diagnostics/export_dir", str(Path(destination)))
+        if getattr(self, "system_console", None) is not None:
+            self.system_console.log(f"Diagnostics bundle exported to {bundle_path}", "INFO")
+        if hasattr(self, "_push_notification"):
+            self._push_notification(
+                "Diagnostics bundle exported",
+                f"Saved diagnostics bundle to {bundle_path}.",
+                level="INFO",
+                source="diagnostics",
+                dedupe_seconds=2.0,
+            )
+        QMessageBox.information(self, "Export Diagnostics", f"Diagnostics bundle exported to:\n{bundle_path}")
+        return bundle_path
+
     def _open_system_health_window(self):
         window = self._get_or_create_tool_window(
             "system_health",
@@ -8108,6 +8176,25 @@ class Terminal(QMainWindow):
             )
             layout.addWidget(summary)
 
+            controls = QHBoxLayout()
+            rerun_btn = QPushButton("Run Checks")
+            rerun_btn.clicked.connect(
+                lambda: (
+                    self.controller._create_task(self.controller.run_startup_health_check(), "manual_health_check")
+                    if hasattr(self.controller, "run_startup_health_check") and hasattr(self.controller, "_create_task")
+                    else None
+                )
+            )
+            export_btn = QPushButton("Export Diagnostics")
+            export_btn.clicked.connect(self._export_diagnostics_bundle)
+            logs_btn = QPushButton("Open Logs")
+            logs_btn.clicked.connect(self._open_logs)
+            controls.addWidget(rerun_btn)
+            controls.addWidget(export_btn)
+            controls.addWidget(logs_btn)
+            controls.addStretch()
+            layout.addLayout(controls)
+
             checks = QTableWidget()
             checks.setColumnCount(3)
             checks.setHorizontalHeaderLabels(["Check", "Status", "Detail"])
@@ -8121,6 +8208,8 @@ class Terminal(QMainWindow):
 
             window.setCentralWidget(container)
             window._health_summary = summary
+            window._health_rerun_btn = rerun_btn
+            window._health_export_btn = export_btn
             window._health_checks_table = checks
             window._capabilities_browser = capabilities_browser
 
@@ -8341,27 +8430,17 @@ class Terminal(QMainWindow):
         try:
 
             controller = self.controller
-
-            balance = getattr(controller, "balances", {})
-            balance_equity = None
-            resolve_equity = getattr(controller, "_extract_balance_equity_value", None)
-            if callable(resolve_equity):
-                try:
-                    balance_equity = resolve_equity(balance)
-                except Exception:
-                    balance_equity = None
-
-            if balance_equity is None:
-                equity = getattr(controller.portfolio, "get_equity", lambda: 0)()
-            else:
-                equity = float(balance_equity)
-            spread = getattr(controller, "spread_pct", 0)
-            positions = list(self._active_positions_snapshot() or [])
-            symbols = getattr(controller, "symbols", [])
+            runtime_metrics = self._runtime_metrics_snapshot()
+            balance = dict(runtime_metrics.get("balances") or {})
+            equity = float(runtime_metrics.get("equity_value") or 0.0)
+            spread = runtime_metrics.get("spread_pct", 0)
+            positions = list(runtime_metrics.get("positions") or [])
+            open_orders = list(runtime_metrics.get("open_orders") or [])
+            symbols_loaded = int(runtime_metrics.get("symbols_loaded") or 0)
             exchange_display, exchange_tooltip = self._system_status_exchange_display()
 
-            free = balance.get("free", 0) if isinstance(balance, dict) else 0
-            used = balance.get("used", 0) if isinstance(balance, dict) else 0
+            free = runtime_metrics.get("free_balances", 0)
+            used = runtime_metrics.get("used_balances", 0)
 
             balance_summary, balance_tooltip = self._compact_balance_text(balance)
             free_summary, free_tooltip = self._compact_balance_text(
@@ -8398,9 +8477,9 @@ class Terminal(QMainWindow):
             self._set_status_value("Trade Venue", trade_venue)
             self._set_status_value("News Mode", news_mode)
 
-            self._set_status_value("Symbols Loaded", len(symbols))
+            self._set_status_value("Symbols Loaded", symbols_loaded)
 
-            self._set_status_value("Equity", f"{equity:.4f}")
+            self._set_status_value("Equity", self._format_currency(equity))
 
             self._set_status_value("Balance", balance_summary, balance_tooltip)
 
@@ -8411,7 +8490,7 @@ class Terminal(QMainWindow):
             self._set_status_value("Spread %", f"{spread:.4f}")
 
             self._set_status_value("Open Positions", len(positions))
-            self._set_status_value("Open Orders", len(getattr(self, "_latest_open_orders_snapshot", [])))
+            self._set_status_value("Open Orders", len(open_orders))
 
             market_stream_status = "Stopped"
             if hasattr(controller, "get_market_stream_status"):
@@ -8438,8 +8517,8 @@ class Terminal(QMainWindow):
             self._update_kill_switch_button()
 
             self._update_risk_heatmap()
-            self._populate_positions_table(getattr(self, "_latest_positions_snapshot", []))
-            self._populate_open_orders_table(getattr(self, "_latest_open_orders_snapshot", []))
+            self._populate_positions_table(positions)
+            self._populate_open_orders_table(open_orders)
             self._schedule_broker_status_refresh()
             self._schedule_positions_refresh()
             self._schedule_open_orders_refresh()
@@ -14494,6 +14573,7 @@ Terminal._backtest_requested_limit = staticmethod(_hotfix_backtest_requested_lim
 Terminal._backtest_symbol_candidates = _hotfix_backtest_symbol_candidates
 Terminal._backtest_timeframe_candidates = _hotfix_backtest_timeframe_candidates
 Terminal._refresh_backtest_selectors = _hotfix_refresh_backtest_selectors
+Terminal._load_backtest_history_clicked = _hotfix_load_backtest_history_clicked
 Terminal._backtest_selection_changed = _hotfix_backtest_selection_changed
 Terminal._start_backtest_graph_animation = _hotfix_start_backtest_graph_animation
 Terminal._stop_backtest_graph_animation = staticmethod(_hotfix_stop_backtest_graph_animation)

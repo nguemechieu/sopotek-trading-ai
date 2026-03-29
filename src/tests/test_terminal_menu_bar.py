@@ -61,6 +61,8 @@ def test_create_menu_bar_groups_actions_into_single_clear_menus():
 
     Terminal._create_menu_bar(terminal)
 
+    menu_titles = [action.text() for action in terminal.menuBar().actions()]
+
     file_actions = terminal.file_menu.actions()
     strategy_actions = terminal.strategy_menu.actions()
     backtest_actions = terminal.backtest_menu.actions()
@@ -110,7 +112,10 @@ def test_create_menu_bar_groups_actions_into_single_clear_menus():
     assert terminal.action_run_backtest not in research_actions
 
     assert terminal.action_logs in tools_actions
+    assert terminal.action_export_diagnostics in tools_actions
     assert terminal.action_system_console in tools_actions
     assert terminal.action_system_status in tools_actions
     assert terminal.action_market_chat not in tools_actions
     assert terminal.action_performance not in tools_actions
+    assert menu_titles[-1] == terminal.help_menu.title()
+    assert menu_titles[-2] == terminal.workspace_menu.title()

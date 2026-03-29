@@ -11,6 +11,8 @@ from frontend.ui.panels.runtime_updates import (
     load_persisted_runtime_data,
     refresh_open_orders_async,
     refresh_positions_async,
+    schedule_open_orders_refresh,
+    schedule_positions_refresh,
 )
 
 
@@ -78,3 +80,41 @@ def test_load_persisted_runtime_data_replays_recent_trades():
     asyncio.run(load_persisted_runtime_data(fake))
 
     assert loaded == [{"order_id": "ord-1"}, {"order_id": "ord-2"}]
+
+
+def test_schedule_positions_refresh_throttles_coinbase(monkeypatch):
+    import frontend.ui.panels.runtime_updates as runtime_mod
+
+    fake = SimpleNamespace(
+        _positions_refresh_task=None,
+        _last_positions_refresh_at=runtime_mod.time.monotonic(),
+        controller=SimpleNamespace(broker=SimpleNamespace(exchange_name="coinbase")),
+        logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+        _refresh_positions_async=lambda: None,
+    )
+
+    def should_not_schedule():
+        raise AssertionError("Coinbase positions refresh should be throttled")
+
+    monkeypatch.setattr(runtime_mod.asyncio, "get_event_loop", should_not_schedule)
+
+    schedule_positions_refresh(fake)
+
+
+def test_schedule_open_orders_refresh_throttles_coinbase(monkeypatch):
+    import frontend.ui.panels.runtime_updates as runtime_mod
+
+    fake = SimpleNamespace(
+        _open_orders_refresh_task=None,
+        _last_open_orders_refresh_at=runtime_mod.time.monotonic(),
+        controller=SimpleNamespace(broker=SimpleNamespace(exchange_name="coinbase")),
+        logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+        _refresh_open_orders_async=lambda: None,
+    )
+
+    def should_not_schedule():
+        raise AssertionError("Coinbase open-orders refresh should be throttled")
+
+    monkeypatch.setattr(runtime_mod.asyncio, "get_event_loop", should_not_schedule)
+
+    schedule_open_orders_refresh(fake)

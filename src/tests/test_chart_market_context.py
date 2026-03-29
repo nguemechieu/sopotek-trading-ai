@@ -173,6 +173,19 @@ def test_chart_visual_theme_updates_plot_background_and_axis_colors():
     assert axis.textPen().color().name() == "#223344"
     assert axis.tickPen().color().name() == "#6b7a8f"
     assert "#f4efe5" in widget.market_tabs.styleSheet()
+    assert "#223344" in widget.instrument_label.styleSheet()
+    assert "rgba(244,239,229" in widget.controls_container.styleSheet()
+
+
+def test_chart_coinbase_style_surfaces_market_summary_and_segmented_tabs():
+    _app()
+    widget = ChartWidget("BTC/USDT", "1h", _controller())
+
+    assert widget.market_meta_label.isHidden() is False
+    assert widget.market_micro_label.isHidden() is False
+    assert "#1652f0" in widget.market_tabs.styleSheet()
+    assert "#1652f0" in widget.timeframe_picker.styleSheet()
+    assert "border-radius: 20px" in widget.candlestick_shell.styleSheet()
 
 
 def test_chart_indicators_can_be_removed_from_price_and_lower_panes():

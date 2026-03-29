@@ -247,6 +247,44 @@ def test_handle_market_chat_action_reports_why_ai_trading_cannot_start():
     assert terminal.autotrading_enabled is False
 
 
+def test_telegram_positions_text_uses_normalized_active_positions_snapshot():
+    controller = _make_controller()
+    controller.terminal = SimpleNamespace(
+        _active_positions_snapshot=lambda: [
+            {"symbol": "EUR/USD", "side": "long", "amount": 1250.0, "pnl": 12.5}
+        ],
+        _latest_positions_snapshot=[
+            {"symbol": "raw-should-not-appear", "side": "short", "amount": 1.0, "pnl": -1.0}
+        ],
+    )
+
+    reply = asyncio.run(controller.telegram_positions_text())
+
+    assert "EUR/USD" in reply
+    assert "long" in reply
+    assert "1250.0" in reply
+    assert "raw-should-not-appear" not in reply
+
+
+def test_telegram_open_orders_text_uses_normalized_active_open_orders_snapshot():
+    controller = _make_controller()
+    controller.terminal = SimpleNamespace(
+        _active_open_orders_snapshot=lambda: [
+            {"symbol": "BTC/USDT", "side": "buy", "status": "open", "amount": 0.5, "price": 65000.0}
+        ],
+        _latest_open_orders_snapshot=[
+            {"symbol": "raw-should-not-appear", "side": "sell", "status": "open", "amount": 1.0, "price": 1.0}
+        ],
+    )
+
+    reply = asyncio.run(controller.telegram_open_orders_text())
+
+    assert "BTC/USDT" in reply
+    assert "buy" in reply
+    assert "65000.0" in reply
+    assert "raw-should-not-appear" not in reply
+
+
 def test_handle_market_chat_action_can_open_trade_from_pilot():
     controller = _make_controller()
     submitted = {}

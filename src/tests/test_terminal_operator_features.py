@@ -140,6 +140,8 @@ def test_create_menu_bar_adds_workspace_notifications_palette_and_favorite_actio
 
     Terminal._create_menu_bar(terminal)
 
+    menu_titles = [action.text() for action in terminal.menuBar().actions()]
+
     workspace_actions = terminal.workspace_menu.actions()
     panels_actions = terminal.panels_menu.actions()
     strategy_actions = terminal.strategy_menu.actions()
@@ -148,10 +150,12 @@ def test_create_menu_bar_adds_workspace_notifications_palette_and_favorite_actio
     assert terminal.action_workspace_research in workspace_actions
     assert terminal.action_workspace_risk in workspace_actions
     assert terminal.action_workspace_review in workspace_actions
+    assert terminal.action_symbol_universe in workspace_actions
     assert terminal.action_save_workspace_layout in workspace_actions
     assert terminal.action_restore_workspace_layout in workspace_actions
     assert terminal.action_reset_dock_layout in workspace_actions
     assert terminal.panels_menu.menuAction() in workspace_actions
+    assert terminal.action_symbol_universe in terminal.tools_menu.actions()
     assert terminal.action_market_watch_panel in panels_actions
     assert terminal.action_system_console_panel in panels_actions
     assert terminal.backtest_menu.menuAction() in strategy_actions
@@ -169,6 +173,8 @@ def test_create_menu_bar_adds_workspace_notifications_palette_and_favorite_actio
     assert terminal.action_system_status in terminal.tools_menu.actions()
     assert terminal.action_favorite_symbol in terminal.charts_menu.actions()
     assert terminal.action_remove_indicator in terminal.charts_menu.actions()
+    assert menu_titles[-1] == terminal.help_menu.title()
+    assert menu_titles[-2] == terminal.workspace_menu.title()
 
 
 def test_push_notification_dedupes_repeated_messages():
@@ -261,6 +267,7 @@ def test_command_palette_entries_include_operator_actions():
         controller=SimpleNamespace(symbols=[]),
         _open_manual_trade=lambda *args, **kwargs: None,
         _open_notification_center=lambda: None,
+        _open_symbol_universe=lambda: None,
         _open_agent_timeline=lambda: None,
         _open_performance=lambda: None,
         _show_portfolio_exposure=lambda: None,
@@ -273,6 +280,7 @@ def test_command_palette_entries_include_operator_actions():
         _open_strategy_assignment_window=lambda: None,
         _optimize_strategy=lambda: None,
         _show_backtest_window=lambda: None,
+        _export_diagnostics_bundle=lambda: None,
         _apply_workspace_preset=lambda _name: None,
         _save_current_workspace_layout=lambda: None,
         _restore_saved_workspace_layout=lambda: None,
@@ -293,8 +301,56 @@ def test_command_palette_entries_include_operator_actions():
     assert "Research Workspace" in titles
     assert "Risk Workspace" in titles
     assert "Review Workspace" in titles
+    assert "Symbol Universe" in titles
+    assert "Export Diagnostics Bundle" in titles
     assert "Reset Dock Layout" in titles
     assert "Show Market Watch" in titles
+
+
+def test_open_symbol_universe_window_shows_controller_tiers():
+    _app()
+    terminal = _MenuTerminal()
+    terminal.controller = SimpleNamespace(
+        language_code="en",
+        set_language=lambda _code: None,
+        symbols=["BTC/USD", "ETH/USD", "SOL/USD"],
+        get_symbol_universe_snapshot=lambda: {
+            "active": ["BTC/USD", "ETH/USD"],
+            "watchlist": ["BTC/USD", "SOL/USD", "ETH/USD"],
+            "catalog": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD"],
+            "background_catalog": ["SOL/USD", "XRP/USD"],
+            "last_batch": ["BTC/USD", "SOL/USD"],
+            "rotation_cursor": 2,
+            "policy": {
+                "live_symbol_limit": 4,
+                "watchlist_limit": 8,
+                "discovery_batch_size": 3,
+            },
+        },
+    )
+    terminal._is_qt_object_alive = lambda obj: obj is not None
+    _bind(
+        terminal,
+        "_get_or_create_tool_window",
+        "_symbol_universe_snapshot",
+        "_refresh_symbol_universe_window",
+        "_open_symbol_universe",
+    )
+
+    window = terminal._open_symbol_universe()
+
+    assert window is not None
+    assert "Active 2/4" in window._symbol_universe_summary.text()
+    assert "Catalog 4" in window._symbol_universe_summary.text()
+    tree = window._symbol_universe_tree
+    top_labels = [tree.topLevelItem(index).text(0) for index in range(tree.topLevelItemCount())]
+    assert "Active (2)" in top_labels
+    assert "Watchlist (3)" in top_labels
+    assert "Discovery Batch (2)" in top_labels
+    active_item = tree.topLevelItem(0)
+    assert active_item.childCount() >= 2
+    child_symbols = {active_item.child(i).text(0) for i in range(active_item.childCount())}
+    assert {"BTC/USD", "ETH/USD"}.issubset(child_symbols)
 
 
 def test_market_watch_panel_action_shows_hidden_market_watch_dock():

@@ -478,6 +478,141 @@ def test_paper_broker_bootstraps_public_market_data(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_paper_broker_forwards_backtest_time_range_to_public_market_data(monkeypatch):
+    observed = {}
+
+    class FakeMarketDataBroker:
+        def __init__(self, config):
+            self.config = config
+
+        async def connect(self):
+            return True
+
+        async def close(self):
+            return True
+
+        async def fetch_ohlcv(self, symbol, timeframe="1h", limit=100, start_time=None, end_time=None):
+            observed.update(
+                {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "limit": limit,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                }
+            )
+            return [
+                ["2024-01-01T00:00:00Z", 100.0, 101.0, 99.0, 100.5, 10.0],
+                ["2024-01-01T01:00:00Z", 100.5, 101.5, 100.0, 101.0, 12.0],
+            ]
+
+    class DummyController:
+        def __init__(self):
+            self.logger = None
+            self.paper_balance = 1000.0
+            self.symbols = ["BTC/USDT"]
+            self.candle_buffers = {}
+            self.ticker_buffer = TickerBuffer()
+            self.ticker_stream = SimpleNamespace(get=lambda symbol: None, update=lambda symbol, ticker: None)
+            self.time_frame = "1h"
+            self.broker = None
+            self.config = SimpleNamespace(
+                broker=SimpleNamespace(params={"paper_data_exchange": "binanceus"})
+            )
+
+    monkeypatch.setattr(paper_module, "CCXTBroker", FakeMarketDataBroker)
+
+    async def scenario():
+        controller = DummyController()
+        broker = PaperBroker(controller)
+        controller.broker = broker
+        await broker.connect()
+
+        candles = await broker.fetch_ohlcv(
+            "BTC/USDT",
+            timeframe="1h",
+            limit=5000,
+            start_time="2024-01-01",
+            end_time="2025-12-31",
+        )
+
+        assert len(candles) == 2
+        assert observed == {
+            "symbol": "BTC/USDT",
+            "timeframe": "1h",
+            "limit": 5000,
+            "start_time": "2024-01-01",
+            "end_time": "2025-12-31",
+        }
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_paper_broker_keeps_legacy_market_data_adapters_working_for_range_requests(monkeypatch):
+    observed = {}
+
+    class FakeLegacyMarketDataBroker:
+        def __init__(self, config):
+            self.config = config
+
+        async def connect(self):
+            return True
+
+        async def close(self):
+            return True
+
+        async def fetch_ohlcv(self, symbol, timeframe="1h", limit=100):
+            observed.update(
+                {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "limit": limit,
+                }
+            )
+            return [["2026-01-01T00:00:00Z", 120.0, 121.0, 119.0, 120.5, 42.0]]
+
+    class DummyController:
+        def __init__(self):
+            self.logger = None
+            self.paper_balance = 1000.0
+            self.symbols = ["BTC/USDT"]
+            self.candle_buffers = {}
+            self.ticker_buffer = TickerBuffer()
+            self.ticker_stream = SimpleNamespace(get=lambda symbol: None, update=lambda symbol, ticker: None)
+            self.time_frame = "1h"
+            self.broker = None
+            self.config = SimpleNamespace(
+                broker=SimpleNamespace(params={"paper_data_exchange": "binanceus"})
+            )
+
+    monkeypatch.setattr(paper_module, "CCXTBroker", FakeLegacyMarketDataBroker)
+
+    async def scenario():
+        controller = DummyController()
+        broker = PaperBroker(controller)
+        controller.broker = broker
+        await broker.connect()
+
+        candles = await broker.fetch_ohlcv(
+            "BTC/USDT",
+            timeframe="1h",
+            limit=300,
+            start_time="2024-01-01",
+            end_time="2024-12-31",
+        )
+
+        assert candles[0][4] == 120.5
+        assert observed == {
+            "symbol": "BTC/USDT",
+            "timeframe": "1h",
+            "limit": 300,
+        }
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
 def test_base_broker_close_all_positions_uses_opposite_side():
     class DummyBroker(PaperBroker):
         def __init__(self):
