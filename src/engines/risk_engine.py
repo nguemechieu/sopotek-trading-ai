@@ -37,7 +37,38 @@ class RiskEngine:
             return 0.0
         return self.max_position_notional() / trade_price
 
-    def adjust_trade(self, price, quantity):
+    def _normalize_quote_to_account_rate(self, value):
+        rate = self._safe_float(value, 1.0)
+        return rate if rate > 0 else 1.0
+
+    def risk_per_unit(self, entry_price, stop_price, quote_to_account_rate=1.0):
+        entry = self._safe_float(entry_price, 0.0)
+        stop = self._safe_float(stop_price, 0.0)
+        if entry <= 0 or stop <= 0:
+            return 0.0
+        return abs(entry - stop) * self._normalize_quote_to_account_rate(quote_to_account_rate)
+
+    def max_risk_quantity(self, entry_price, stop_price, quote_to_account_rate=1.0):
+        risk_amount = self.account_equity * self.max_risk_per_trade
+        risk_per_unit = self.risk_per_unit(
+            entry_price,
+            stop_price,
+            quote_to_account_rate=quote_to_account_rate,
+        )
+        if risk_per_unit <= 0:
+            return 0.0
+        return risk_amount / risk_per_unit
+
+    def stop_distance_pips(self, entry_price, stop_price, pip_size=None):
+        pip_value = self._safe_float(pip_size, 0.0)
+        if pip_value <= 0:
+            return None
+        distance = abs(self._safe_float(entry_price, 0.0) - self._safe_float(stop_price, 0.0))
+        if distance <= 0:
+            return None
+        return distance / pip_value
+
+    def adjust_trade(self, price, quantity, *, stop_price=None, quote_to_account_rate=1.0, pip_size=None, symbol=None):
         trade_price = self._safe_float(price, 0.0)
         requested_quantity = abs(self._safe_float(quantity, 0.0))
         if trade_price <= 0 or requested_quantity <= 0:
@@ -48,17 +79,42 @@ class RiskEngine:
         if max_notional <= 0:
             return False, 0.0, "Position size cap is zero"
 
-        if requested_notional <= max_notional:
+        max_quantity = max_notional / trade_price
+        limiting_reason = None
+        limiting_quantity = max_quantity
+
+        stop_value = self._safe_float(stop_price, 0.0)
+        if stop_value > 0 and abs(stop_value - trade_price) > 1e-12:
+            max_risk_quantity = self.max_risk_quantity(
+                trade_price,
+                stop_value,
+                quote_to_account_rate=quote_to_account_rate,
+            )
+            if max_risk_quantity > 0 and max_risk_quantity < limiting_quantity:
+                limiting_quantity = max_risk_quantity
+                stop_distance_pips = self.stop_distance_pips(trade_price, stop_value, pip_size=pip_size)
+                if stop_distance_pips is not None:
+                    limiting_reason = (
+                        f"Position size reduced to fit {self.max_risk_per_trade:.1%} max risk "
+                        f"at {stop_distance_pips:.1f} pip stop"
+                    )
+                else:
+                    limiting_reason = (
+                        f"Position size reduced to fit {self.max_risk_per_trade:.1%} max risk "
+                        "at the current stop distance"
+                    )
+
+        if requested_quantity <= limiting_quantity:
             return True, requested_quantity, "Approved"
 
-        adjusted_quantity = max_notional / trade_price
+        adjusted_quantity = limiting_quantity
         if adjusted_quantity <= 0:
             return False, 0.0, "Position size cap reduced trade to zero"
 
         return (
             True,
             adjusted_quantity,
-            f"Position size reduced to fit {self.max_position_size_pct:.1%} max position cap",
+            limiting_reason or f"Position size reduced to fit {self.max_position_size_pct:.1%} max position cap",
         )
 
     # =====================================
@@ -77,16 +133,20 @@ class RiskEngine:
     # POSITION SIZE
     # =====================================
 
-    def position_size(self, entry_price, stop_price):
-
-        risk_amount = self.account_equity * self.max_risk_per_trade
-
-        risk_per_unit = abs(entry_price - stop_price)
-
-        if risk_per_unit == 0:
+    def position_size(self, entry_price, stop_price, *, quote_to_account_rate=1.0, pip_size=None, symbol=None):
+        risk_per_unit = self.risk_per_unit(
+            entry_price,
+            stop_price,
+            quote_to_account_rate=quote_to_account_rate,
+        )
+        if risk_per_unit <= 0:
             return 0
 
-        size = risk_amount / risk_per_unit
+        size = self.max_risk_quantity(
+            entry_price,
+            stop_price,
+            quote_to_account_rate=quote_to_account_rate,
+        )
         max_size = self.max_position_quantity(entry_price)
         if max_size > 0:
             size = min(size, max_size)

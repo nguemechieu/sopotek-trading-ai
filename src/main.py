@@ -77,7 +77,7 @@ def _install_faulthandler() -> None:
     try:
         log_dir = _src_root() / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        stream = (log_dir / "native_crash.log").open(  # pylint: disable=consider-using-with
+        stream: os.TextIOWrapper[_WrappedBuffer] = (log_dir / "native_crash.log").open(  # pylint: disable=consider-using-with
             "a",
             encoding="utf-8",
             buffering=1,
@@ -112,14 +112,15 @@ def _is_dns_resolution_noise(context: dict[str, Any] | None) -> bool:
     future_repr = str(future or "").lower()
 
     details: list[str] = []
-    for item in (
-        exception,
-        getattr(exception, "__cause__", None),
-        getattr(exception, "__context__", None),
-    ):
-        if item is not None:
-            details.append(str(item).lower())
-
+    details.extend(
+        str(item).lower()
+        for item in (
+            exception,
+            getattr(exception, "__cause__", None),
+            getattr(exception, "__context__", None),
+        )
+        if item is not None
+    )
     if isinstance(exception, socket.gaierror):
         return True
 

@@ -2518,6 +2518,107 @@ class AppController(QMainWindow):
         base_currency, quote_currency = normalized_symbol.split("/", 1)
         return base_currency or None, quote_currency.split(":", 1)[0] or None
 
+    def _balance_account_currency(self, balances):
+        if not isinstance(balances, dict):
+            return None
+
+        for key in ("currency", "account_currency"):
+            value = str(balances.get(key) or "").strip().upper()
+            if value.isalpha() and len(value) >= 3:
+                return value
+
+        for bucket_name in ("total", "free", "used"):
+            bucket = balances.get(bucket_name)
+            if not isinstance(bucket, dict) or not bucket:
+                continue
+            currencies = [str(item or "").strip().upper() for item in bucket.keys()]
+            currencies = [item for item in currencies if item.isalpha() and len(item) >= 3]
+            if len(currencies) == 1:
+                return currencies[0]
+        return None
+
+    async def _conversion_reference_price(self, symbol):
+        fetch_ticker = getattr(self, "_safe_fetch_ticker", None)
+        if not callable(fetch_ticker):
+            return None
+        try:
+            ticker = await fetch_ticker(symbol)
+        except Exception:
+            return None
+        if not isinstance(ticker, dict):
+            return None
+        prepared = self._prepare_ticker_snapshot(symbol, ticker) if hasattr(self, "_prepare_ticker_snapshot") else ticker
+        for key in ("ask", "price", "last", "close", "mid", "bid"):
+            numeric = self._safe_balance_metric(prepared.get(key))
+            if numeric is not None and numeric > 0:
+                return float(numeric)
+        return None
+
+    async def _resolve_trade_risk_context(self, symbol, reference_price, balances, broker=None):
+        base_currency, quote_currency = self._trade_symbol_parts(symbol)
+        account_currency = self._balance_account_currency(balances)
+        context = {
+            "symbol": str(symbol or "").strip().upper(),
+            "base_currency": base_currency,
+            "quote_currency": quote_currency,
+            "account_currency": account_currency,
+            "is_forex": False,
+            "pip_size": None,
+            "quote_to_account_rate": 1.0,
+        }
+        if not base_currency or not quote_currency:
+            return context
+
+        is_forex = (
+            len(base_currency) == 3
+            and len(quote_currency) == 3
+            and base_currency.isalpha()
+            and quote_currency.isalpha()
+            and base_currency in self.FOREX_SYMBOL_QUOTES
+            and quote_currency in self.FOREX_SYMBOL_QUOTES
+        )
+        context["is_forex"] = is_forex
+        if not is_forex:
+            return context
+
+        pip_size = None
+        meta_loader = getattr(broker or getattr(self, "broker", None), "_get_instrument_meta", None)
+        if callable(meta_loader):
+            try:
+                meta = await meta_loader(symbol)
+            except Exception:
+                meta = {}
+            if isinstance(meta, dict):
+                try:
+                    pip_size = 10 ** int(meta.get("pipLocation"))
+                except Exception:
+                    pip_size = None
+        if pip_size is None or pip_size <= 0:
+            pip_size = 0.01 if quote_currency == "JPY" else 0.0001
+        context["pip_size"] = float(pip_size)
+
+        try:
+            reference_value = float(reference_price)
+        except Exception:
+            reference_value = None
+
+        quote_to_account_rate = 1.0
+        if account_currency and account_currency == quote_currency:
+            quote_to_account_rate = 1.0
+        elif account_currency and account_currency == base_currency and reference_value and reference_value > 0:
+            quote_to_account_rate = 1.0 / float(reference_value)
+        elif account_currency and account_currency not in {base_currency, quote_currency}:
+            direct_price = await self._conversion_reference_price(f"{quote_currency}/{account_currency}")
+            if direct_price is not None and direct_price > 0:
+                quote_to_account_rate = float(direct_price)
+            else:
+                reverse_price = await self._conversion_reference_price(f"{account_currency}/{quote_currency}")
+                if reverse_price is not None and reverse_price > 0:
+                    quote_to_account_rate = 1.0 / float(reverse_price)
+        if quote_to_account_rate > 0:
+            context["quote_to_account_rate"] = float(quote_to_account_rate)
+        return context
+
     def _display_trade_amount(self, amount_units, quantity):
         try:
             normalized_units = abs(float(amount_units))
@@ -3047,6 +3148,12 @@ class AppController(QMainWindow):
             "free",
         )
         equity = self._extract_balance_equity_value(balances if isinstance(balances, dict) else {})
+        risk_context = await self._resolve_trade_risk_context(
+            resolved_symbol,
+            reference_price,
+            balances,
+            broker=broker,
+        )
 
         hard_caps = []
         sizing_notes = []
@@ -3101,7 +3208,14 @@ class AppController(QMainWindow):
                 self.logger.debug("Risk engine equity sync failed during order preflight", exc_info=True)
         if risk_engine is not None and reference_price and reference_price > 0 and hasattr(risk_engine, "adjust_trade"):
             try:
-                allowed, adjusted_units, risk_reason = risk_engine.adjust_trade(float(reference_price), requested_units)
+                allowed, adjusted_units, risk_reason = risk_engine.adjust_trade(
+                    float(reference_price),
+                    requested_units,
+                    symbol=resolved_symbol,
+                    stop_price=stop_loss,
+                    quote_to_account_rate=risk_context.get("quote_to_account_rate", 1.0),
+                    pip_size=risk_context.get("pip_size"),
+                )
             except Exception:
                 self.logger.debug("Risk engine preflight check failed for %s", symbol, exc_info=True)
                 allowed, adjusted_units, risk_reason = True, requested_units, ""

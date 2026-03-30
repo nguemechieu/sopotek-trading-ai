@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from engines.risk_engine import RiskEngine
 from frontend.ui.app_controller import AppController
 from market_data.candle_buffer import CandleBuffer
 from market_data.orderbook_buffer import OrderBookBuffer
@@ -848,6 +849,80 @@ def test_submit_trade_with_preflight_surfaces_execution_manager_skip_reason():
         assert str(exc) == "No available USDT balance to buy BTC/USDT."
     else:
         raise AssertionError("Expected manual trade skip reason to be surfaced")
+
+
+def test_preview_trade_submission_caps_usdjpy_by_stop_risk():
+    controller = _make_controller()
+    controller.max_position_size_pct = 10000.0
+    controller.max_risk_per_trade = 0.02
+    controller.balances = {
+        "free": {"USD": 10000.0},
+        "total": {"USD": 10000.0},
+        "equity": 10000.0,
+        "currency": "USD",
+    }
+    controller.balance = dict(controller.balances)
+    controller.market_trade_preference = "otc"
+    controller.margin_closeout_snapshot = lambda _balances: {}
+    controller._evaluate_trade_eligibility = lambda symbol: {
+        "ok": True,
+        "issues": [],
+        "warnings": [],
+        "resolved_venue": "otc",
+        "supported_market_venues": ["auto", "otc"],
+    }
+
+    async def fake_market_data_guard(*_args, **_kwargs):
+        return {
+            "blocked": False,
+            "quote": {"supported": True, "fresh": True},
+            "candles": {"supported": True, "fresh": True},
+            "orderbook": {"supported": False},
+        }
+
+    async def fake_fetch_balance():
+        return dict(controller.balances)
+
+    async def fake_instrument_meta(_symbol):
+        return {"pipLocation": -2}
+
+    controller._assess_trade_market_data_guard = fake_market_data_guard
+    controller.normalize_trade_quantity = lambda symbol, amount, quantity_mode=None: {
+        "symbol": symbol,
+        "requested_mode": "units",
+        "requested_amount": float(amount),
+        "requested_amount_units": float(amount),
+        "amount_units": float(amount),
+    }
+    controller._display_trade_amount = lambda amount_units, quantity: float(amount_units)
+    controller.broker = SimpleNamespace(
+        exchange_name="oanda",
+        fetch_balance=fake_fetch_balance,
+        _get_instrument_meta=fake_instrument_meta,
+    )
+    controller.trading_system = SimpleNamespace(
+        risk_engine=RiskEngine(
+            account_equity=10000,
+            max_risk_per_trade=0.02,
+            max_position_size_pct=10000.0,
+        )
+    )
+
+    preflight = asyncio.run(
+        controller.preview_trade_submission(
+            symbol="USD/JPY",
+            side="buy",
+            amount=100000.0,
+            price=150.0,
+            stop_loss=149.5,
+            source="manual",
+            timeframe="1h",
+        )
+    )
+
+    assert preflight["amount_units"] == pytest.approx(60000.0)
+    assert preflight["size_adjusted"] is True
+    assert any("max risk" in note.lower() for note in preflight["sizing_notes"])
 
 
 def test_handle_market_chat_action_surfaces_chatgpt_size_note():
