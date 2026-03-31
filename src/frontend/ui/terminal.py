@@ -29,7 +29,7 @@ import pyqtgraph as pg  # type: ignore[import-untyped]
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, cast
 from PySide6.QtCore import Qt, QDate, QSettings, QDateTime, Signal, QTimer, QUrl, QRect
-from PySide6.QtGui import QAction, QColor, QTextCursor, QDesktopServices
+from PySide6.QtGui import QAction, QActionGroup, QColor, QTextCursor, QDesktopServices
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QDockWidget, QSpinBox,
     QTableWidget, QTableWidgetItem,
@@ -218,6 +218,133 @@ RISK_PROFILE_PRESETS = {
         "description": "High-risk profile for experienced users who accept deeper swings.",
     },
 }
+
+CHART_TIMEFRAME_MENU_OPTIONS = [
+    ("1 Min", "1m"),
+    ("5 Min", "5m"),
+    ("15 Min", "15m"),
+    ("30 Min", "30m"),
+    ("1 Hour", "1h"),
+    ("4 Hours", "4h"),
+    ("1 Day", "1d"),
+    ("1 Week", "1w"),
+]
+
+CHART_INDICATOR_OPTIONS = [
+    "Moving Average",
+    "EMA",
+    "SMMA",
+    "LWMA",
+    "VWAP",
+    "Fibonacci Retracement",
+    "ADX",
+    "ATR",
+    "Bollinger Bands",
+    "Envelopes",
+    "Ichimoku",
+    "Parabolic SAR",
+    "Standard Deviation",
+    "Accelerator Oscillator",
+    "Awesome Oscillator",
+    "CCI",
+    "DeMarker",
+    "MACD",
+    "Momentum",
+    "OsMA",
+    "RSI",
+    "RVI",
+    "Stochastic Oscillator",
+    "Williams' Percent Range",
+    "Accumulation/Distribution",
+    "Money Flow Index",
+    "On Balance Volume",
+    "Volumes",
+    "Alligator",
+    "Fractal",
+    "Gator Oscillator",
+    "Market Facilitation Index",
+    "Bulls Power",
+    "Bears Power",
+    "Force Index",
+    "Donchian Channel",
+    "Keltner Channel",
+    "ZigZag",
+]
+
+CHART_INDICATOR_DEFAULT_PERIODS = {
+    "Moving Average": 14,
+    "EMA": 14,
+    "SMMA": 14,
+    "LWMA": 14,
+    "VWAP": 20,
+    "Fibonacci Retracement": 120,
+    "ADX": 14,
+    "ATR": 14,
+    "Bollinger Bands": 20,
+    "Envelopes": 14,
+    "Standard Deviation": 20,
+    "CCI": 14,
+    "DeMarker": 14,
+    "Momentum": 14,
+    "RSI": 14,
+    "RVI": 10,
+    "Stochastic Oscillator": 14,
+    "Williams' Percent Range": 14,
+    "Money Flow Index": 14,
+    "Force Index": 13,
+    "Donchian Channel": 20,
+    "Keltner Channel": 20,
+    "Fractal": 5,
+    "ZigZag": 12,
+}
+
+CHART_FIXED_DEFAULT_INDICATORS = {
+    "Ichimoku",
+    "Parabolic SAR",
+    "Accelerator Oscillator",
+    "Awesome Oscillator",
+    "MACD",
+    "OsMA",
+    "Accumulation/Distribution",
+    "On Balance Volume",
+    "Volumes",
+    "Alligator",
+    "Gator Oscillator",
+    "Market Facilitation Index",
+    "Bulls Power",
+    "Bears Power",
+}
+
+CHART_STUDY_MENU_GROUPS = [
+    (
+        "Trend",
+        [
+            ("Moving Average", 14),
+            ("EMA", 14),
+            ("VWAP", 20),
+            ("Bollinger Bands", 20),
+            ("Ichimoku", None),
+        ],
+    ),
+    (
+        "Momentum",
+        [
+            ("RSI", 14),
+            ("MACD", None),
+            ("Stochastic Oscillator", 14),
+            ("Momentum", 14),
+        ],
+    ),
+    (
+        "Volatility & Volume",
+        [
+            ("ATR", 14),
+            ("Standard Deviation", 20),
+            ("Volumes", None),
+            ("On Balance Volume", None),
+        ],
+    ),
+]
 
 
 def global_exception_hook(exctype, value, tb):
@@ -1581,6 +1708,19 @@ class Terminal(QMainWindow):
             self.toolbar_timeframe_label.setText(
                 self._tr("terminal.toolbar.timeframe_active", timeframe=active_tf)
             )
+        self._sync_chart_timeframe_menu_actions()
+
+    def _sync_chart_timeframe_menu_actions(self):
+        current = str(
+            getattr(self, "current_timeframe", getattr(getattr(self, "controller", None), "time_frame", "1h"))
+            or "1h"
+        ).strip().lower() or "1h"
+        for timeframe, action in getattr(self, "chart_timeframe_actions", {}).items():
+            try:
+                action.blockSignals(True)
+                action.setChecked(str(timeframe).strip().lower() == current)
+            finally:
+                action.blockSignals(False)
 
     def _update_autotrade_button(self):
         scope_suffix = f" [{self._autotrade_scope_label()}]"
@@ -1736,11 +1876,22 @@ class Terminal(QMainWindow):
         self.risk_menu = menu_bar.addMenu("")
         self.review_menu = menu_bar.addMenu("")
         self.research_menu = menu_bar.addMenu("")
+        self.education_menu = menu_bar.addMenu("")
         self.tools_menu = menu_bar.addMenu("")
         self.help_menu = menu_bar.addMenu("")
 
         self.language_menu = QMenu(self.settings_menu)
         self.backtest_menu = QMenu(self.strategy_menu)
+        self.chart_style_menu = QMenu(self.charts_menu)
+        self.chart_studies_menu = QMenu(self.charts_menu)
+        self.chart_quick_studies_menu = QMenu(self.chart_studies_menu)
+        self.chart_timeframe_menu = QMenu(self.charts_menu)
+        self.chart_timeframe_actions = {}
+        self._chart_timeframe_action_group = QActionGroup(self)
+        self._chart_timeframe_action_group.setExclusive(True)
+        self.analyze_positions_menu = QMenu(self.risk_menu)
+        self.analyze_trade_review_menu = QMenu(self.risk_menu)
+        self.analyze_desk_menu = QMenu(self.risk_menu)
 
         self.action_generate_report = QAction(self)
         self.action_generate_report.triggered.connect(self._generate_report)
@@ -1791,10 +1942,16 @@ class Terminal(QMainWindow):
         self.action_cascade_chart_windows.triggered.connect(self._cascade_chart_windows)
         self.action_candle_colors = QAction(self)
         self.action_candle_colors.triggered.connect(self._choose_candle_colors)
+        self.action_chart_settings = QAction("Chart Settings...", self)
+        self.action_chart_settings.triggered.connect(self._open_chart_settings)
+        self.action_edit_studies = QAction("Edit Studies...", self)
+        self.action_edit_studies.triggered.connect(self._open_studies_manager)
         self.action_add_indicator = QAction(self)
         self.action_add_indicator.triggered.connect(self._add_indicator_to_current_chart)
         self.action_remove_indicator = QAction(self)
         self.action_remove_indicator.triggered.connect(self._remove_indicator_from_current_chart)
+        self.action_remove_all_indicators = QAction("Remove All Studies", self)
+        self.action_remove_all_indicators.triggered.connect(self._remove_all_indicators_from_current_chart)
         self.toggle_bid_ask_lines_action = QAction(self)
         self.toggle_bid_ask_lines_action.setCheckable(True)
         self.toggle_bid_ask_lines_action.setChecked(self.show_bid_ask_lines)
@@ -1851,6 +2008,10 @@ class Terminal(QMainWindow):
         self.action_quant_pm.triggered.connect(self._open_quant_pm_window)
         self.action_ml_research = QAction("ML Research Lab", self)
         self.action_ml_research.triggered.connect(self._open_ml_research_window)
+        self.action_trader_tv = QAction("Trader TV", self)
+        self.action_trader_tv.triggered.connect(self._open_trader_tv_window)
+        self.action_education_center = QAction("Education Center", self)
+        self.action_education_center.triggered.connect(self._open_education_center_window)
         self.action_position_analysis = QAction("Position Analysis", self)
         self.action_position_analysis.triggered.connect(self._open_position_analysis_window)
         self.action_position_analysis.setShortcut("Ctrl+Shift+I")
@@ -1894,17 +2055,50 @@ class Terminal(QMainWindow):
         self.charts_menu.addAction(self.action_new_chart)
         self.charts_menu.addAction(self.action_multi_chart)
         self.charts_menu.addSeparator()
+        self.charts_menu.addMenu(self.chart_timeframe_menu)
+        self.charts_menu.addMenu(self.chart_style_menu)
+        self.charts_menu.addMenu(self.chart_studies_menu)
+        self.charts_menu.addSeparator()
         self.charts_menu.addAction(self.action_detach_chart)
         self.charts_menu.addAction(self.action_reattach_chart)
         self.charts_menu.addAction(self.action_tile_chart_windows)
         self.charts_menu.addAction(self.action_cascade_chart_windows)
-        self.charts_menu.addSeparator()
-        self.charts_menu.addAction(self.action_candle_colors)
-        self.charts_menu.addAction(self.action_add_indicator)
-        self.charts_menu.addAction(self.action_remove_indicator)
-        self.charts_menu.addSeparator()
-        self.charts_menu.addAction(self.toggle_bid_ask_lines_action)
-        self.charts_menu.addAction(self.toggle_volume_bar_action)
+
+        self.chart_style_menu.addAction(self.action_chart_settings)
+        self.chart_style_menu.addSeparator()
+        self.chart_style_menu.addAction(self.action_candle_colors)
+        self.chart_style_menu.addAction(self.toggle_bid_ask_lines_action)
+        self.chart_style_menu.addAction(self.toggle_volume_bar_action)
+
+        self.chart_studies_menu.addAction(self.action_edit_studies)
+        self.chart_studies_menu.addAction(self.action_add_indicator)
+        self.chart_studies_menu.addAction(self.action_remove_indicator)
+        self.chart_studies_menu.addAction(self.action_remove_all_indicators)
+        self.chart_studies_menu.addSeparator()
+        self.chart_studies_menu.addMenu(self.chart_quick_studies_menu)
+
+        for label, timeframe in CHART_TIMEFRAME_MENU_OPTIONS:
+            timeframe_action = QAction(label, self)
+            timeframe_action.setCheckable(True)
+            timeframe_action.triggered.connect(
+                lambda checked=False, tf=timeframe: self._set_timeframe(tf)
+            )
+            self._chart_timeframe_action_group.addAction(timeframe_action)
+            self.chart_timeframe_menu.addAction(timeframe_action)
+            self.chart_timeframe_actions[timeframe] = timeframe_action
+
+        for section_name, studies in CHART_STUDY_MENU_GROUPS:
+            section_menu = self.chart_quick_studies_menu.addMenu(section_name)
+            for study_name, default_period in studies:
+                study_action = QAction(study_name, self)
+                study_action.triggered.connect(
+                    lambda checked=False, name=study_name, period=default_period: self._add_indicator_to_current_chart(
+                        indicator_name=name,
+                        preset_period=period,
+                        prompt_for_period=False,
+                    )
+                )
+                section_menu.addAction(study_action)
 
         self.data_menu.addAction(self.action_refresh_markets)
         self.data_menu.addAction(self.action_refresh_chart)
@@ -1912,12 +2106,22 @@ class Terminal(QMainWindow):
         self.data_menu.addSeparator()
         self.data_menu.addAction(self.action_reload_balance)
 
-        self.risk_menu.addAction(self.action_risk_settings)
-        self.risk_menu.addAction(self.action_portfolio_view)
-        self.risk_menu.addAction(self.action_position_analysis)
-        self.risk_menu.addAction(self.action_trade_checklist)
-        self.risk_menu.addSeparator()
-        self.risk_menu.addAction(self.action_system_health)
+        self.risk_menu.addMenu(self.analyze_positions_menu)
+        self.risk_menu.addMenu(self.analyze_trade_review_menu)
+        self.risk_menu.addMenu(self.analyze_desk_menu)
+
+        self.analyze_positions_menu.addAction(self.action_risk_settings)
+        self.analyze_positions_menu.addAction(self.action_portfolio_view)
+        self.analyze_positions_menu.addAction(self.action_position_analysis)
+
+        self.analyze_trade_review_menu.addAction(self.action_trade_checklist)
+        self.analyze_trade_review_menu.addAction(self.action_closed_journal)
+        self.analyze_trade_review_menu.addAction(self.action_journal_review)
+        self.analyze_trade_review_menu.addAction(self.action_performance)
+
+        self.analyze_desk_menu.addAction(self.action_system_health)
+        self.analyze_desk_menu.addAction(self.action_recommendations)
+        self.analyze_desk_menu.addAction(self.action_quant_pm)
         self.review_menu.addAction(self.action_performance)
         self.review_menu.addAction(self.action_recommendations)
         self.review_menu.addAction(self.action_closed_journal)
@@ -1933,6 +2137,9 @@ class Terminal(QMainWindow):
         self._research_stellar_separator_action = self.research_menu.addSeparator()
         self.research_menu.addAction(self.action_stellar_asset_explorer)
 
+        self.education_menu.addAction(self.action_trader_tv)
+        self.education_menu.addAction(self.action_education_center)
+
         self.tools_menu.addAction(self.action_logs)
         self.tools_menu.addAction(self.action_export_diagnostics)
         self.tools_menu.addSeparator()
@@ -1944,6 +2151,9 @@ class Terminal(QMainWindow):
         self.action_api_docs = QAction(self)
         self.action_api_docs.triggered.connect(self._open_api_docs)
         self.help_menu.addAction(self.action_api_docs)
+        self.education_menu.addSeparator()
+        self.education_menu.addAction(self.action_documentation)
+        self.education_menu.addAction(self.action_api_docs)
         self.help_menu.addSeparator()
         self.action_license = QAction("License", self)
         self.action_license.triggered.connect(self._open_license_manager)
@@ -1952,6 +2162,7 @@ class Terminal(QMainWindow):
         self.action_about.triggered.connect(self._show_about)
         self.help_menu.addAction(self.action_about)
 
+        self._sync_chart_timeframe_menu_actions()
         Terminal._sync_exchange_scoped_actions(self)
         self.apply_language()
 
@@ -1986,12 +2197,20 @@ class Terminal(QMainWindow):
             self.charts_menu.setTitle(self._tr("terminal.menu.charts"))
             self.data_menu.setTitle(self._tr("terminal.menu.data"))
             self.settings_menu.setTitle(self._tr("terminal.menu.settings"))
-            self.risk_menu.setTitle(self._tr("terminal.menu.risk"))
+            self.risk_menu.setTitle("Analyze")
             self.review_menu.setTitle(self._tr("terminal.menu.review"))
             self.research_menu.setTitle(self._tr("terminal.menu.research"))
+            self.education_menu.setTitle("Education")
             self.language_menu.setTitle(self._tr("terminal.menu.language"))
             self.tools_menu.setTitle(self._tr("terminal.menu.tools"))
             self.help_menu.setTitle(self._tr("terminal.menu.help"))
+            self.chart_timeframe_menu.setTitle("Time Frame")
+            self.chart_style_menu.setTitle("Style")
+            self.chart_studies_menu.setTitle("Studies")
+            self.chart_quick_studies_menu.setTitle("Quick Studies")
+            self.analyze_positions_menu.setTitle("Positions & Risk")
+            self.analyze_trade_review_menu.setTitle("Trade Review")
+            self.analyze_desk_menu.setTitle("Desk & System")
 
             self.action_generate_report.setText(self._tr("terminal.action.generate_report"))
             self.action_export_trades.setText(self._tr("terminal.action.export_trades"))
@@ -2010,18 +2229,21 @@ class Terminal(QMainWindow):
             self.action_reattach_chart.setText("Reattach Chart")
             self.action_tile_chart_windows.setText("Tile Chart Windows")
             self.action_cascade_chart_windows.setText("Cascade Chart Windows")
-            self.action_candle_colors.setText(self._tr("terminal.action.candle_colors"))
-            self.action_add_indicator.setText(self._tr("terminal.action.add_indicator"))
-            self.action_remove_indicator.setText("Remove Indicator")
+            self.action_chart_settings.setText("Chart Settings...")
+            self.action_candle_colors.setText("Candle Colors...")
+            self.action_edit_studies.setText("Edit Studies...")
+            self.action_add_indicator.setText("Add Study...")
+            self.action_remove_indicator.setText("Remove Study...")
+            self.action_remove_all_indicators.setText("Remove All Studies")
             self.toggle_bid_ask_lines_action.setText(self._tr("terminal.action.toggle_bid_ask"))
-            self.toggle_volume_bar_action.setText("Show Volume")
+            self.toggle_volume_bar_action.setText("Show Volume Subgraph")
             self.action_refresh_markets.setText(self._tr("terminal.action.refresh_markets"))
             self.action_refresh_chart.setText(self._tr("terminal.action.refresh_chart"))
             self.action_refresh_orderbook.setText(self._tr("terminal.action.refresh_orderbook"))
             self.action_reload_balance.setText(self._tr("terminal.action.reload_balance"))
             self.action_app_settings.setText(self._tr("terminal.action.app_settings"))
-            self.action_risk_settings.setText(self._tr("terminal.action.risk_settings"))
-            self.action_portfolio_view.setText(self._tr("terminal.action.portfolio"))
+            self.action_risk_settings.setText("Risk Profile Settings")
+            self.action_portfolio_view.setText("Portfolio Exposure")
             self.action_market_chat.setText("Sopotek Pilot")
             self.action_recommendations.setText("Recommendations")
             self.action_ml_monitor.setText(self._tr("terminal.action.ml_monitor"))
@@ -2034,6 +2256,8 @@ class Terminal(QMainWindow):
             self.action_system_health.setText("System Health")
             self.action_quant_pm.setText("Quant PM")
             self.action_ml_research.setText("ML Research Lab")
+            self.action_trader_tv.setText("Trader TV")
+            self.action_education_center.setText("Education Center")
             self.action_position_analysis.setText("Position Analysis")
             self.action_strategy_optimization.setText("Strategy Optimization")
             self.action_strategy_assigner.setText("Strategy Assigner")
@@ -5105,6 +5329,9 @@ class Terminal(QMainWindow):
             if hasattr(chart, "set_visual_theme"):
                 chart.set_visual_theme(**theme_kwargs)
 
+    def _open_chart_settings(self):
+        self._show_settings_window("Display")
+
     def _choose_candle_colors(self):
         up = QColorDialog.getColor(QColor(self.candle_up_color), self, "Select Bullish Candle Color")
         if not up.isValid():
@@ -5122,110 +5349,123 @@ class Terminal(QMainWindow):
 
         self._apply_candle_colors_to_all_charts()
 
-    def _add_indicator_to_current_chart(self):
+    def _current_chart_indicator_specs(self, chart=None):
+        active_chart = chart if isinstance(chart, ChartWidget) else self._current_chart_widget()
+        if not isinstance(active_chart, ChartWidget):
+            return None, []
+        indicator_specs = [
+            spec
+            for spec in list(getattr(active_chart, "indicators", []) or [])
+            if isinstance(spec, dict) and str(spec.get("key") or "").strip()
+        ]
+        return active_chart, indicator_specs
+
+    def _show_loaded_studies(self):
+        chart, indicator_specs = self._current_chart_indicator_specs()
+        if not isinstance(chart, ChartWidget):
+            QMessageBox.warning(self, "Studies", "Select a chart first.")
+            return
+        if not indicator_specs:
+            QMessageBox.information(self, "Studies", "This chart does not have any studies loaded.")
+            return
+
+        study_lines = "\n".join(
+            f"- {self._chart_indicator_display_name(spec)}"
+            for spec in indicator_specs
+        )
+        QMessageBox.information(
+            self,
+            "Studies",
+            f"Active studies on {chart.symbol} ({chart.timeframe}):\n\n{study_lines}",
+        )
+
+    def _open_studies_manager(self):
+        chart, _indicator_specs = self._current_chart_indicator_specs()
+        if not isinstance(chart, ChartWidget):
+            QMessageBox.warning(self, "Studies", "Select a chart first.")
+            return
+
+        choices = [
+            "Show Loaded Studies",
+            "Add Study...",
+            "Remove Study...",
+            "Remove All Studies",
+        ]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Edit Studies",
+            "Study action:",
+            choices,
+            0,
+            False,
+        )
+        if not ok or not choice:
+            return
+
+        if choice == "Show Loaded Studies":
+            self._show_loaded_studies()
+        elif choice == "Add Study...":
+            self._add_indicator_to_current_chart()
+        elif choice == "Remove Study...":
+            self._remove_indicator_from_current_chart()
+        elif choice == "Remove All Studies":
+            self._remove_all_indicators_from_current_chart()
+
+    def _remove_all_indicators_from_current_chart(self):
+        chart, indicator_specs = self._current_chart_indicator_specs()
+        if not isinstance(chart, ChartWidget):
+            QMessageBox.warning(self, "Studies", "Select a chart first.")
+            return
+        if not indicator_specs:
+            QMessageBox.information(self, "Studies", "This chart has no studies to remove.")
+            return
+
+        response = QMessageBox.question(
+            self,
+            "Remove All Studies",
+            f"Remove all studies from {chart.symbol} ({chart.timeframe})?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+
+        removed = False
+        for spec in indicator_specs:
+            removed = chart.remove_indicator(str(spec.get("key") or "").strip()) or removed
+
+        if not removed:
+            QMessageBox.warning(self, "Studies", "Unable to remove the loaded studies.")
+            return
+
+        chart.updateGeometry()
+        chart.repaint()
+
+    def _add_indicator_to_current_chart(self, checked=False, indicator_name=None, preset_period=None, prompt_for_period=True):
+        _ = checked
         chart = self._current_chart_widget()
         if not isinstance(chart, ChartWidget):
             QMessageBox.warning(self, "Chart", "Select a chart first.")
             return
 
-        options = [
-            "Moving Average",
-            "EMA",
-            "SMMA",
-            "LWMA",
-            "VWAP",
-            "Fibonacci Retracement",
-            "ADX",
-            "ATR",
-            "Bollinger Bands",
-            "Envelopes",
-            "Ichimoku",
-            "Parabolic SAR",
-            "Standard Deviation",
-            "Accelerator Oscillator",
-            "Awesome Oscillator",
-            "CCI",
-            "DeMarker",
-            "MACD",
-            "Momentum",
-            "OsMA",
-            "RSI",
-            "RVI",
-            "Stochastic Oscillator",
-            "Williams' Percent Range",
-            "Accumulation/Distribution",
-            "Money Flow Index",
-            "On Balance Volume",
-            "Volumes",
-            "Alligator",
-            "Fractal",
-            "Gator Oscillator",
-            "Market Facilitation Index",
-            "Bulls Power",
-            "Bears Power",
-            "Force Index",
-            "Donchian Channel",
-            "Keltner Channel",
-            "ZigZag",
-        ]
-        indicator, ok = QInputDialog.getItem(
-            self,
-            "Add Indicator",
-            "Indicator:",
-            options,
-            0,
-            False,
-        )
-        if not ok or not indicator:
-            return
+        indicator = str(indicator_name or "").strip()
+        if not indicator:
+            indicator, ok = QInputDialog.getItem(
+                self,
+                "Add Study",
+                "Study:",
+                CHART_INDICATOR_OPTIONS,
+                0,
+                False,
+            )
+            if not ok or not indicator:
+                return
 
-        default_period_map = {
-            "Moving Average": 14,
-            "EMA": 14,
-            "SMMA": 14,
-            "LWMA": 14,
-            "VWAP": 20,
-            "Fibonacci Retracement": 120,
-            "ADX": 14,
-            "ATR": 14,
-            "Bollinger Bands": 20,
-            "Envelopes": 14,
-            "Standard Deviation": 20,
-            "CCI": 14,
-            "DeMarker": 14,
-            "Momentum": 14,
-            "RSI": 14,
-            "RVI": 10,
-            "Stochastic Oscillator": 14,
-            "Williams' Percent Range": 14,
-            "Money Flow Index": 14,
-            "Force Index": 13,
-            "Donchian Channel": 20,
-            "Keltner Channel": 20,
-            "Fractal": 5,
-            "ZigZag": 12,
-        }
-        fixed_default_indicators = {
-            "Ichimoku",
-            "Parabolic SAR",
-            "Accelerator Oscillator",
-            "Awesome Oscillator",
-            "MACD",
-            "OsMA",
-            "Accumulation/Distribution",
-            "On Balance Volume",
-            "Volumes",
-            "Alligator",
-            "Gator Oscillator",
-            "Market Facilitation Index",
-            "Bulls Power",
-            "Bears Power",
-        }
-        period = default_period_map.get(indicator, 20)
-        if indicator not in fixed_default_indicators:
+        period = preset_period if preset_period is not None else CHART_INDICATOR_DEFAULT_PERIODS.get(indicator, 20)
+        if indicator not in CHART_FIXED_DEFAULT_INDICATORS and prompt_for_period:
             period, ok = QInputDialog.getInt(
                 self,
-                "Indicator Period",
+                "Study Length",
                 "Period:",
                 period,
                 2,
@@ -5234,10 +5474,15 @@ class Terminal(QMainWindow):
             )
             if not ok:
                 return
+        elif indicator not in CHART_FIXED_DEFAULT_INDICATORS:
+            try:
+                period = max(2, int(period))
+            except (TypeError, ValueError):
+                period = CHART_INDICATOR_DEFAULT_PERIODS.get(indicator, 20)
 
         key = chart.add_indicator(indicator, period)
         if key is None:
-            QMessageBox.warning(self, "Indicator", "Unsupported indicator.")
+            QMessageBox.warning(self, "Study", "Unsupported study.")
             return
 
         # Force redraw using existing candle cache for this symbol/timeframe.
@@ -5314,7 +5559,7 @@ class Terminal(QMainWindow):
     def _remove_indicator_from_current_chart(self):
         chart = self._current_chart_widget()
         if not isinstance(chart, ChartWidget):
-            QMessageBox.warning(self, "Chart", "Select a chart first.")
+            QMessageBox.warning(self, "Studies", "Select a chart first.")
             return
 
         indicator_specs = [
@@ -5323,7 +5568,7 @@ class Terminal(QMainWindow):
             if isinstance(spec, dict) and str(spec.get("key") or "").strip()
         ]
         if not indicator_specs:
-            QMessageBox.information(self, "Indicator", "This chart has no indicators to remove.")
+            QMessageBox.information(self, "Studies", "This chart has no studies to remove.")
             return
 
         options = []
@@ -5336,8 +5581,8 @@ class Terminal(QMainWindow):
 
         selection, ok = QInputDialog.getItem(
             self,
-            "Remove Indicator",
-            "Indicator:",
+            "Remove Study",
+            "Study:",
             options,
             0,
             False,
@@ -5346,7 +5591,7 @@ class Terminal(QMainWindow):
             return
 
         if not chart.remove_indicator(option_map.get(selection, "")):
-            QMessageBox.warning(self, "Indicator", "Unable to remove the selected indicator.")
+            QMessageBox.warning(self, "Studies", "Unable to remove the selected study.")
             return
 
         chart.updateGeometry()
@@ -6296,6 +6541,145 @@ class Terminal(QMainWindow):
             """,
             width=900,
             height=720,
+        )
+
+    def _learning_market_snapshot(self):
+        symbol = ""
+        try:
+            symbol = str(self._current_chart_symbol() or "").strip().upper()
+        except Exception:
+            symbol = ""
+        if not symbol:
+            symbol = str(getattr(self, "symbol", "") or "").strip().upper()
+
+        loaded_symbols = list(getattr(self.controller, "symbols", []) or [])
+        if not symbol and loaded_symbols:
+            symbol = str(loaded_symbols[0]).strip().upper()
+
+        timeframe = str(getattr(self, "current_timeframe", "") or "1h").strip() or "1h"
+        try:
+            exchange_name = str(self._active_exchange_name() or "").strip()
+        except Exception:
+            exchange_name = ""
+
+        return {
+            "focus_symbol": symbol or "No active symbol",
+            "timeframe": timeframe,
+            "exchange": exchange_name.upper() or "DESK",
+            "loaded_symbols": len(loaded_symbols),
+            "connection": str(getattr(self, "current_connection_status", "connecting") or "connecting").strip().title(),
+            "news_mode": "Live feed on" if bool(getattr(self.controller, "news_enabled", True)) else "Live feed off",
+            "autotrade_mode": "Enabled" if bool(getattr(self, "autotrading_enabled", False)) else "Disabled",
+        }
+
+    def _trader_tv_html(self):
+        snapshot = self._learning_market_snapshot()
+        focus_symbol = html.escape(snapshot["focus_symbol"])
+        timeframe = html.escape(snapshot["timeframe"])
+        exchange = html.escape(snapshot["exchange"])
+        connection = html.escape(snapshot["connection"])
+        news_mode = html.escape(snapshot["news_mode"])
+        autotrade_mode = html.escape(snapshot["autotrade_mode"])
+
+        return f"""
+            <h2>Trader TV</h2>
+            <p><b>Trader TV</b> is the desk-side market briefing for the current Sopotek session. Use it to learn what matters before you place a trade.</p>
+
+            <h3>Current Desk Snapshot</h3>
+            <p>
+                <b>Desk:</b> {exchange}<br>
+                <b>Focus symbol:</b> {focus_symbol}<br>
+                <b>Time frame:</b> {timeframe}<br>
+                <b>Loaded symbols:</b> {snapshot["loaded_symbols"]}<br>
+                <b>Connection:</b> {connection}<br>
+                <b>News mode:</b> {news_mode}<br>
+                <b>Auto trading:</b> {autotrade_mode}
+            </p>
+
+            <h3>What To Learn From The Market</h3>
+            <ul>
+                <li><b>Trend:</b> Start with the higher-timeframe direction before drilling into entries.</li>
+                <li><b>Volatility:</b> Watch candle expansion, ATR, and spread changes before sizing up.</li>
+                <li><b>Liquidity:</b> Check order-book depth and recent prints so you do not trade into thin conditions.</li>
+                <li><b>Event risk:</b> Treat macro releases, earnings, and breaking news as volatility events.</li>
+            </ul>
+
+            <h3>Trader TV Segments</h3>
+            <ul>
+                <li><b>Pre-Market Map:</b> Mark the dominant trend, nearby support and resistance, and the high-impact calendar events for the session.</li>
+                <li><b>Intraday Rotation:</b> Compare leaders, laggards, and correlated symbols to understand where capital is rotating.</li>
+                <li><b>Risk Window:</b> Confirm whether volatility is expanding fast enough to justify a trade and whether your stop still fits the plan.</li>
+                <li><b>Closing Review:</b> Revisit your best and worst decisions while the market context is still fresh.</li>
+            </ul>
+
+            <h3>Where To Continue In Sopotek</h3>
+            <ul>
+                <li><b>Charts -&gt; Studies:</b> Layer RSI, moving averages, ATR, and volume studies onto the active chart.</li>
+                <li><b>Research -&gt; Sopotek Pilot:</b> Ask the AI for symbol context, scenario planning, and trade ideas.</li>
+                <li><b>Analyze -&gt; Positions &amp; Risk:</b> Check exposure, position structure, and portfolio limits before execution.</li>
+                <li><b>Review -&gt; Journal Review:</b> Turn live observations into repeatable lessons after the session.</li>
+            </ul>
+        """
+
+    def _education_center_html(self):
+        snapshot = self._learning_market_snapshot()
+        focus_symbol = html.escape(snapshot["focus_symbol"])
+        timeframe = html.escape(snapshot["timeframe"])
+
+        return f"""
+            <h2>Education Center</h2>
+            <p><b>Education Center</b> is the trader learning hub inside Sopotek. Use it to build skill, rehearse process, and connect lessons to the live workspace.</p>
+
+            <h3>Learning Track</h3>
+            <ol>
+                <li><b>Market structure:</b> Learn trend, range, breakout, pullback, and failed breakout behavior.</li>
+                <li><b>Trade location:</b> Practice entering only where reward-to-risk is clear and invalidation is obvious.</li>
+                <li><b>Risk control:</b> Keep size aligned with volatility, stop distance, and your account rules.</li>
+                <li><b>Execution discipline:</b> Trade the plan you wrote, not the emotion you feel in the moment.</li>
+                <li><b>Review loop:</b> Journal every good and bad trade so the next session starts smarter.</li>
+            </ol>
+
+            <h3>Practice Loop Inside This App</h3>
+            <ul>
+                <li><b>Step 1:</b> Open <b>{focus_symbol}</b> on <b>{timeframe}</b> and map the structure with chart studies.</li>
+                <li><b>Step 2:</b> Use <b>Trader TV</b> and <b>Sopotek Pilot</b> to form a market thesis.</li>
+                <li><b>Step 3:</b> Run the idea through <b>Analyze</b> for exposure, stop placement, and portfolio fit.</li>
+                <li><b>Step 4:</b> Execute in paper mode first, then review it in <b>Closed Journal</b> and <b>Journal Review</b>.</li>
+            </ul>
+
+            <h3>Study Topics To Repeat Weekly</h3>
+            <ul>
+                <li><b>Context:</b> How trend, volatility, and liquidity change the same setup.</li>
+                <li><b>Risk:</b> Why the best traders protect downside before they chase upside.</li>
+                <li><b>Process:</b> How checklists and journals improve consistency more than raw prediction.</li>
+                <li><b>Adaptation:</b> How to review losses without overfitting or revenge trading.</li>
+            </ul>
+
+            <h3>Ready-For-Live Checklist</h3>
+            <ul>
+                <li>You can explain the setup in one sentence before you enter.</li>
+                <li>You know where the trade is wrong before you know where it can win.</li>
+                <li>Your size respects the risk profile, not your latest emotion.</li>
+                <li>You are willing to review the trade honestly after it closes.</li>
+            </ul>
+        """
+
+    def _open_trader_tv_window(self):
+        return self._open_text_window(
+            "education_trader_tv",
+            "Trader TV",
+            self._trader_tv_html(),
+            width=920,
+            height=720,
+        )
+
+    def _open_education_center_window(self):
+        return self._open_text_window(
+            "education_center",
+            "Education Center",
+            self._education_center_html(),
+            width=940,
+            height=760,
         )
 
     def _multi_chart_layout(self):
@@ -12599,12 +12983,18 @@ def _hotfix_show_ml_research_window(self):
         controls = QHBoxLayout()
         train_btn = QPushButton("Train Model")
         walk_forward_btn = QPushButton("Run Walk-Forward")
+        auto_research_btn = QPushButton("Auto Research Best")
+        auto_deploy_btn = QPushButton("Auto Deploy Best")
         deploy_btn = QPushButton("Deploy Selected")
         train_btn.clicked.connect(lambda: asyncio.get_event_loop().create_task(self._run_ml_model_training()))
         walk_forward_btn.clicked.connect(lambda: asyncio.get_event_loop().create_task(self._run_ml_walk_forward()))
+        auto_research_btn.clicked.connect(lambda: asyncio.get_event_loop().create_task(self._run_ml_auto_research()))
+        auto_deploy_btn.clicked.connect(lambda: asyncio.get_event_loop().create_task(self._run_ml_auto_research(auto_deploy=True)))
         deploy_btn.clicked.connect(self._deploy_selected_ml_model)
         controls.addWidget(train_btn)
         controls.addWidget(walk_forward_btn)
+        controls.addWidget(auto_research_btn)
+        controls.addWidget(auto_deploy_btn)
         controls.addWidget(deploy_btn)
         controls.addStretch()
         layout.addLayout(controls)
@@ -12634,6 +13024,16 @@ def _hotfix_show_ml_research_window(self):
         )
         tabs.addTab(walk_table, "Walk-Forward")
 
+        leaderboard_table = QTableWidget()
+        leaderboard_table.setAlternatingRowColors(True)
+        leaderboard_table.setSelectionBehavior(QTableWidget.SelectRows)
+        leaderboard_table.setSelectionMode(QTableWidget.SingleSelection)
+        leaderboard_table.setColumnCount(8)
+        leaderboard_table.setHorizontalHeaderLabels(
+            ["Model", "Family", "Seq", "Score", "WF Acc", "WF Prec", "Test Acc", "Test Prec"]
+        )
+        tabs.addTab(leaderboard_table, "Leaderboard")
+
         details = QTextBrowser()
         details.setStyleSheet(
             "QTextBrowser { background-color: #0b1220; color: #d7dfeb; border: 1px solid #24344f; border-radius: 10px; padding: 10px; }"
@@ -12656,9 +13056,12 @@ def _hotfix_show_ml_research_window(self):
         window._ml_research_test_window_spin = test_window_spin
         window._ml_research_train_btn = train_btn
         window._ml_research_walk_btn = walk_forward_btn
+        window._ml_research_auto_btn = auto_research_btn
+        window._ml_research_auto_deploy_btn = auto_deploy_btn
         window._ml_research_deploy_btn = deploy_btn
         window._ml_research_experiments_table = experiments_table
         window._ml_research_walk_table = walk_table
+        window._ml_research_leaderboard_table = leaderboard_table
         window._ml_research_details = details
 
         symbol_picker.currentTextChanged.connect(lambda _text: _hotfix_ml_research_selection_changed(self))
@@ -12671,6 +13074,7 @@ def _hotfix_show_ml_research_window(self):
         train_window_spin.valueChanged.connect(lambda _v: _hotfix_ml_research_selection_changed(self))
         test_window_spin.valueChanged.connect(lambda _v: _hotfix_ml_research_selection_changed(self))
         experiments_table.itemSelectionChanged.connect(lambda: self._refresh_ml_research_window())
+        leaderboard_table.itemSelectionChanged.connect(lambda: self._refresh_ml_research_window())
 
     _hotfix_refresh_ml_research_selectors(self, window)
     self._refresh_ml_research_window(window)
@@ -12844,7 +13248,86 @@ def _hotfix_populate_ml_walk_table(_self, table, frame):
     table.resizeColumnsToContents()
 
 
-def _hotfix_build_ml_research_details(_self, context, result=None, walk_summary=None):
+def _hotfix_populate_ml_leaderboard_table(_self, table, frame):
+    if table is None:
+        return
+    leaderboard = frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    if leaderboard.empty:
+        table.setRowCount(0)
+        return
+    display = leaderboard.copy().reset_index(drop=True)
+    table.setRowCount(len(display))
+    columns = [
+        ("model_name", "{}"),
+        ("model_family", "{}"),
+        ("sequence_length", "{:g}"),
+        ("selection_score", "{:.3f}"),
+        ("walk_forward_accuracy", "{:.3f}"),
+        ("walk_forward_precision", "{:.3f}"),
+        ("test_accuracy", "{:.3f}"),
+        ("test_precision", "{:.3f}"),
+    ]
+    for row_idx, (_, row) in enumerate(display.iterrows()):
+        for col_idx, (column, fmt) in enumerate(columns):
+            value = row.get(column, "")
+            try:
+                text = fmt.format(float(value)) if fmt != "{}" else fmt.format(value)
+            except Exception:
+                text = str(value)
+            item = QTableWidgetItem(text)
+            if col_idx == 0:
+                item.setData(Qt.UserRole, str(row.get("model_name") or ""))
+            table.setItem(row_idx, col_idx, item)
+    table.resizeColumnsToContents()
+
+
+def _hotfix_select_ml_table_row_by_model_name(table, model_name):
+    if table is None:
+        return
+    target = str(model_name or "").strip()
+    if not target:
+        return
+    blocked = table.blockSignals(True)
+    try:
+        for row_idx in range(table.rowCount()):
+            items = [table.item(row_idx, column) for column in range(min(2, table.columnCount()))]
+            candidate = ""
+            for item in items:
+                if item is None:
+                    continue
+                candidate = str(item.data(Qt.UserRole) or item.text() or "").strip()
+                if candidate:
+                    break
+            if candidate == target:
+                table.selectRow(row_idx)
+                return
+    finally:
+        table.blockSignals(blocked)
+
+
+def _hotfix_effective_ml_model_name(self, window=None, prefer_best=True):
+    model_name = ""
+    if window is not None:
+        leaderboard_table = getattr(window, "_ml_research_leaderboard_table", None)
+        if leaderboard_table is not None and leaderboard_table.currentRow() >= 0:
+            item = leaderboard_table.item(leaderboard_table.currentRow(), 0)
+            if item is not None:
+                model_name = str(item.data(Qt.UserRole) or item.text() or "").strip()
+        if not model_name:
+            table = getattr(window, "_ml_research_experiments_table", None)
+            if table is not None and table.currentRow() >= 0:
+                item = table.item(table.currentRow(), 1)
+                if item is not None:
+                    model_name = str(item.data(Qt.UserRole) or item.text() or "").strip()
+    if not model_name and prefer_best:
+        best_candidate = getattr(getattr(self, "_ml_auto_research_result", None), "best_candidate", None)
+        model_name = str(getattr(best_candidate, "model_name", "") or "").strip()
+    if not model_name:
+        model_name = str(getattr(getattr(self, "_ml_latest_result", None), "model_name", "") or "").strip()
+    return model_name
+
+
+def _hotfix_build_ml_research_details(_self, context, result=None, walk_summary=None, auto_summary=None):
     lines = ["<h3 style='margin-top:0;'>ML Research Lab</h3>"]
     if context:
         lines.append(
@@ -12854,6 +13337,20 @@ def _hotfix_build_ml_research_details(_self, context, result=None, walk_summary=
             f"<b>Family:</b> {html.escape(str(context.get('model_family') or '-'))} | "
             f"<b>Horizon:</b> {html.escape(str(context.get('horizon') or '-'))}"
             "</p>"
+        )
+    best_candidate = getattr(auto_summary, "best_candidate", None) if auto_summary is not None else None
+    if best_candidate is not None:
+        best_metrics = dict(getattr(best_candidate, "selection_metrics", {}) or {})
+        lines.append("<h4>Auto Research Winner</h4>")
+        lines.append(
+            "<ul>"
+            f"<li>Model: <b>{html.escape(str(best_candidate.model_name or '-'))}</b></li>"
+            f"<li>Family: <b>{html.escape(str(best_candidate.model_family or '-'))}</b> | Sequence length: <b>{int(best_candidate.sequence_length or 1)}</b></li>"
+            f"<li>Selection score: <b>{float(best_metrics.get('selection_score', 0.0) or 0.0):.3f}</b></li>"
+            f"<li>Walk-forward accuracy: <b>{float(best_metrics.get('walk_forward_accuracy', 0.0) or 0.0):.3f}</b></li>"
+            f"<li>Walk-forward precision: <b>{float(best_metrics.get('walk_forward_precision', 0.0) or 0.0):.3f}</b></li>"
+            f"<li>Test accuracy: <b>{float(best_metrics.get('test_accuracy', 0.0) or 0.0):.3f}</b></li>"
+            "</ul>"
         )
     if result is not None:
         metrics = dict(getattr(result, "metrics", {}) or {})
@@ -12892,11 +13389,14 @@ def _hotfix_refresh_ml_research_window(self, window=None, message=None):
     summary = getattr(window, "_ml_research_summary", None)
     train_btn = getattr(window, "_ml_research_train_btn", None)
     walk_btn = getattr(window, "_ml_research_walk_btn", None)
+    auto_btn = getattr(window, "_ml_research_auto_btn", None)
+    auto_deploy_btn = getattr(window, "_ml_research_auto_deploy_btn", None)
     deploy_btn = getattr(window, "_ml_research_deploy_btn", None)
     experiments_table = getattr(window, "_ml_research_experiments_table", None)
     walk_table = getattr(window, "_ml_research_walk_table", None)
+    leaderboard_table = getattr(window, "_ml_research_leaderboard_table", None)
     details = getattr(window, "_ml_research_details", None)
-    if status is None or summary is None or experiments_table is None or walk_table is None or details is None:
+    if status is None or summary is None or experiments_table is None or walk_table is None or leaderboard_table is None or details is None:
         return
 
     if message is not None:
@@ -12904,30 +13404,46 @@ def _hotfix_refresh_ml_research_window(self, window=None, message=None):
 
     context = getattr(self, "_ml_research_context", {}) or {}
     running = bool(getattr(self, "_ml_research_running", False))
+    running_mode = str(getattr(self, "_ml_research_mode", "") or "").strip().lower()
+    best_candidate = getattr(getattr(self, "_ml_auto_research_result", None), "best_candidate", None)
     status.setText(getattr(self, "_ml_research_status_message", None) or ("ML research running..." if running else "ML research workspace ready."))
-    summary.setText(
+    summary_parts = [
         f"Symbol: {context.get('symbol', '-')} | Timeframe: {context.get('timeframe', '-')} | "
         f"Family: {context.get('model_family', '-')} | Horizon: {context.get('horizon', '-')} | "
         f"Test Size: {float(context.get('test_size', 0.25) or 0.25):.0%}"
-    )
+    ]
+    if best_candidate is not None:
+        summary_parts.append(
+            f" | Best: {best_candidate.model_family} -> {best_candidate.model_name}"
+        )
+    summary.setText("".join(summary_parts))
     if train_btn is not None:
         train_btn.setEnabled(not running)
-        train_btn.setText("Training..." if running else "Train Model")
+        train_btn.setText("Training..." if running and running_mode == "training" else "Train Model")
     if walk_btn is not None:
         walk_btn.setEnabled(not running)
-        walk_btn.setText("Running..." if running else "Run Walk-Forward")
+        walk_btn.setText("Running..." if running and running_mode == "walk_forward" else "Run Walk-Forward")
+    if auto_btn is not None:
+        auto_btn.setEnabled(not running)
+        auto_btn.setText("Researching..." if running and running_mode == "auto_research" else "Auto Research Best")
+    if auto_deploy_btn is not None:
+        auto_deploy_btn.setEnabled(not running)
+        auto_deploy_btn.setText("Deploying..." if running and running_mode == "auto_deploy" else "Auto Deploy Best")
 
     pipeline = _hotfix_get_ml_pipeline(self)
     experiment_frame = pipeline.experiment_tracker.to_frame()
     _hotfix_populate_ml_experiments_table(self, experiments_table, experiment_frame)
     _hotfix_populate_ml_walk_table(self, walk_table, getattr(self, "_ml_walk_forward_summary", None))
+    _hotfix_populate_ml_leaderboard_table(self, leaderboard_table, getattr(getattr(self, "_ml_auto_research_result", None), "leaderboard", None))
 
-    selected_model_name = ""
-    current_row = experiments_table.currentRow()
-    if current_row >= 0:
-        item = experiments_table.item(current_row, 1)
-        if item is not None:
-            selected_model_name = str(item.data(Qt.UserRole) or item.text() or "").strip()
+    preferred_model_name = str(getattr(self, "_ml_selected_model_name", "") or "").strip()
+    if not preferred_model_name and best_candidate is not None:
+        preferred_model_name = str(best_candidate.model_name or "").strip()
+    if preferred_model_name:
+        _hotfix_select_ml_table_row_by_model_name(experiments_table, preferred_model_name)
+        _hotfix_select_ml_table_row_by_model_name(leaderboard_table, preferred_model_name)
+
+    selected_model_name = _hotfix_effective_ml_model_name(self, window=window)
     if deploy_btn is not None:
         deploy_btn.setEnabled((not running) and bool(selected_model_name or getattr(getattr(self, "_ml_latest_result", None), "model_name", "")))
 
@@ -12937,6 +13453,7 @@ def _hotfix_refresh_ml_research_window(self, window=None, message=None):
             context,
             result=getattr(self, "_ml_latest_result", None),
             walk_summary=getattr(self, "_ml_walk_forward_summary", None),
+            auto_summary=getattr(self, "_ml_auto_research_result", None),
         )
     )
 
@@ -12955,6 +13472,7 @@ async def _hotfix_run_ml_model_training(self):
             raise RuntimeError("No ML dataset could be built from the selected history")
 
         self._ml_research_running = True
+        self._ml_research_mode = "training"
         self._ml_research_status_message = "Training ML model..."
         self._ml_research_context = {**(getattr(self, "_ml_research_context", {}) or {}), **context}
         self._refresh_ml_research_window(message="Training ML model...")
@@ -12974,6 +13492,7 @@ async def _hotfix_run_ml_model_training(self):
             "terminal_training",
         )
         self._ml_latest_result = result
+        self._ml_selected_model_name = str(result.model_name or "").strip()
         self.system_console.log(f"ML model trained: {result.model_name}", "INFO")
         self._ml_research_status_message = "ML training completed."
         self._refresh_ml_research_window(message="ML training completed.")
@@ -12983,6 +13502,7 @@ async def _hotfix_run_ml_model_training(self):
         self._refresh_ml_research_window(message=f"ML training failed: {e}")
     finally:
         self._ml_research_running = False
+        self._ml_research_mode = ""
         self._refresh_ml_research_window()
 
 
@@ -13000,6 +13520,7 @@ async def _hotfix_run_ml_walk_forward(self):
             raise RuntimeError("No ML dataset could be built from the selected history")
 
         self._ml_research_running = True
+        self._ml_research_mode = "walk_forward"
         self._ml_research_status_message = "Running ML walk-forward..."
         self._ml_research_context = {**(getattr(self, "_ml_research_context", {}) or {}), **context}
         self._refresh_ml_research_window(message="Running ML walk-forward...")
@@ -13025,22 +13546,98 @@ async def _hotfix_run_ml_walk_forward(self):
         self._refresh_ml_research_window(message=f"ML walk-forward failed: {e}")
     finally:
         self._ml_research_running = False
+        self._ml_research_mode = ""
         self._refresh_ml_research_window()
 
 
-def _hotfix_deploy_selected_ml_model(self):
+async def _hotfix_run_ml_auto_research(self, auto_deploy=False):
+    if bool(getattr(self, "_ml_research_running", False)):
+        self._show_ml_research_window()
+        self._refresh_ml_research_window(message="ML research is already running.")
+        return
+
+    try:
+        self._show_ml_research_window()
+        context = await _hotfix_prepare_ml_research_context(self)
+        dataset = context.get("dataset")
+        if dataset is None or dataset.empty:
+            raise RuntimeError("No ML dataset could be built from the selected history")
+
+        self._ml_research_running = True
+        self._ml_research_mode = "auto_deploy" if auto_deploy else "auto_research"
+        self._ml_research_status_message = (
+            "Auto researching and deploying the best ML model..."
+            if auto_deploy
+            else "Auto researching ML candidates..."
+        )
+        self._ml_research_context = {**(getattr(self, "_ml_research_context", {}) or {}), **context}
+        self._refresh_ml_research_window(message=self._ml_research_status_message)
+
+        pipeline = _hotfix_get_ml_pipeline(self)
+        symbol_label = str(context.get("symbol") or "symbol").replace("/", "_")
+        timeframe_label = str(context.get("timeframe") or "1h").replace("/", "_")
+        auto_summary = await asyncio.to_thread(
+            pipeline.auto_research,
+            dataset,
+            ["linear", "tree", "sequence"],
+            context["sequence_length"],
+            context["test_size"],
+            context["train_window"],
+            context["test_window"],
+            None,
+            f"{symbol_label}_{timeframe_label}_auto",
+            "ml_auto_research_lab",
+            "terminal_auto_research",
+            None,
+        )
+        best_candidate = getattr(auto_summary, "best_candidate", None)
+        if best_candidate is None:
+            raise RuntimeError("Auto research did not return a winning model")
+
+        self._ml_auto_research_result = auto_summary
+        self._ml_best_result = best_candidate.result
+        self._ml_latest_result = best_candidate.result
+        self._ml_walk_forward_summary = best_candidate.walk_summary
+        self._ml_walk_forward_predictions = best_candidate.walk_predictions
+        self._ml_selected_model_name = str(best_candidate.model_name or "").strip()
+        self._ml_research_context = {
+            **(getattr(self, "_ml_research_context", {}) or {}),
+            "model_family": str(best_candidate.model_family or context.get("model_family") or "linear"),
+            "sequence_length": int(best_candidate.sequence_length or context.get("sequence_length", 4) or 4),
+        }
+
+        best_score = float(best_candidate.selection_score or 0.0)
+        self.system_console.log(
+            f"Auto research selected {best_candidate.model_name} ({best_candidate.model_family}) "
+            f"with score {best_score:.3f}.",
+            "INFO",
+        )
+        self._ml_research_status_message = (
+            f"Auto research selected {best_candidate.model_name}."
+        )
+        self._refresh_ml_research_window(message=self._ml_research_status_message)
+
+        if auto_deploy:
+            self._ml_research_running = False
+            self._ml_research_mode = ""
+            self._deploy_selected_ml_model(model_name=best_candidate.model_name)
+            self._ml_research_status_message = f"Auto research deployed {best_candidate.model_name}."
+            self._refresh_ml_research_window(message=self._ml_research_status_message)
+    except Exception as e:
+        self.system_console.log(f"ML auto research failed: {e}", "ERROR")
+        self._ml_research_status_message = f"ML auto research failed: {e}"
+        self._refresh_ml_research_window(message=f"ML auto research failed: {e}")
+    finally:
+        self._ml_research_running = False
+        self._ml_research_mode = ""
+        self._refresh_ml_research_window()
+
+
+def _hotfix_deploy_selected_ml_model(self, model_name=None):
     try:
         window = getattr(self, "detached_tool_windows", {}).get("ml_research_lab")
         pipeline = _hotfix_get_ml_pipeline(self)
-        model_name = ""
-        if window is not None:
-            table = getattr(window, "_ml_research_experiments_table", None)
-            if table is not None and table.currentRow() >= 0:
-                item = table.item(table.currentRow(), 1)
-                if item is not None:
-                    model_name = str(item.data(Qt.UserRole) or item.text() or "").strip()
-        if not model_name:
-            model_name = str(getattr(getattr(self, "_ml_latest_result", None), "model_name", "") or "").strip()
+        model_name = str(model_name or "").strip() or _hotfix_effective_ml_model_name(self, window=window)
         if not model_name:
             raise RuntimeError("Train or select an ML model before deployment")
 
@@ -13055,6 +13652,7 @@ def _hotfix_deploy_selected_ml_model(self):
 
         pipeline.deploy_to_strategy_registry(strategy_registry, model_name, strategy_name="ML Model")
         self.controller.strategy_name = "ML Model"
+        self._ml_selected_model_name = model_name
         if hasattr(strategy_registry, "set_active"):
             strategy_registry.set_active("ML Model")
         self.system_console.log(f"Deployed ML model: {model_name}", "INFO")
@@ -13777,7 +14375,7 @@ def _hotfix_show_settings_window(self, initial_tab=None):
 
         intro = QLabel(
             "Configure trading defaults, chart behavior, refresh timing, and integrations here. "
-            "Use the Risk menu when you want to jump straight to portfolio controls and risk limits."
+            "Use the Analyze menu when you want to jump straight to portfolio controls and risk limits."
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #c9d5e8; font-weight: 600; padding: 4px 0 10px 0;")
@@ -14671,6 +15269,7 @@ Terminal._show_ml_research_window = _hotfix_show_ml_research_window
 Terminal._refresh_ml_research_window = _hotfix_refresh_ml_research_window
 Terminal._run_ml_model_training = _hotfix_run_ml_model_training
 Terminal._run_ml_walk_forward = _hotfix_run_ml_walk_forward
+Terminal._run_ml_auto_research = _hotfix_run_ml_auto_research
 Terminal._deploy_selected_ml_model = _hotfix_deploy_selected_ml_model
 Terminal._reload_chart_data = _hotfix_reload_chart_data
 Terminal._refresh_markets = _hotfix_refresh_markets

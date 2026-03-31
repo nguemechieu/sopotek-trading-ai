@@ -102,6 +102,8 @@ If the rejection is a manual insufficient-funds, insufficient-margin, or buying-
 Check:
 - Telegram enabled in settings
 - bot token and chat ID configured
+- if you do not know the token yet, create the bot with `@BotFather` and `/newbot`
+- if you do not know the chat ID yet, message the bot once and inspect `https://api.telegram.org/bot<token>/getUpdates` for `message.chat.id`
 - the bot is messaging the expected chat
 - network access is available
 - use `/help` or `/commands` to restore the keyboard
@@ -110,6 +112,7 @@ Check:
 
 Check:
 - OpenAI API key set in Settings -> Integrations
+- if you do not have a key yet, create one at `https://platform.openai.com/api-keys`
 - OpenAI model set correctly
 - if using OpenAI speech, speech provider is set to `OpenAI`
 - if using Google recognition, optional recognition packages are installed

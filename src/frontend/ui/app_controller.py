@@ -2594,7 +2594,14 @@ class AppController(QMainWindow):
                 return float(numeric)
         return None
 
-    async def _resolve_trade_risk_context(self, symbol, reference_price, balances, broker=None):
+    async def _resolve_trade_risk_context(
+        self,
+        symbol,
+        reference_price,
+        balances,
+        broker=None,
+        allow_cross_conversion=True,
+    ):
         base_currency, quote_currency = self._trade_symbol_parts(symbol)
         account_currency = self._balance_account_currency(balances)
         context = {
@@ -2647,7 +2654,11 @@ class AppController(QMainWindow):
             quote_to_account_rate = 1.0
         elif account_currency and account_currency == base_currency and reference_value and reference_value > 0:
             quote_to_account_rate = 1.0 / float(reference_value)
-        elif account_currency and account_currency not in {base_currency, quote_currency}:
+        elif (
+            account_currency
+            and allow_cross_conversion
+            and account_currency not in {base_currency, quote_currency}
+        ):
             direct_price = await self._conversion_reference_price(f"{quote_currency}/{account_currency}")
             if direct_price is not None and direct_price > 0:
                 quote_to_account_rate = float(direct_price)
@@ -2714,13 +2725,20 @@ class AppController(QMainWindow):
 
         if isinstance(ticker, dict):
             ticker = self._prepare_ticker_snapshot(symbol, ticker)
-            price_keys = ("ask", "price", "last", "close", "mid") if str(side or "").lower() == "buy" else (
-                "bid",
-                "price",
-                "last",
-                "close",
-                "mid",
-            )
+            exchange_name = str(self._active_exchange_code() or "").strip().lower()
+            market_venue = str(self._market_venue_for_symbol(symbol) or "").strip().lower()
+            if exchange_name == "oanda" or market_venue == "otc":
+                price_keys = (
+                    ("price", "last", "close", "mid", "ask", "bid")
+                    if str(side or "").lower() == "buy"
+                    else ("price", "last", "close", "mid", "bid", "ask")
+                )
+            else:
+                price_keys = (
+                    ("ask", "price", "last", "close", "mid", "bid")
+                    if str(side or "").lower() == "buy"
+                    else ("bid", "price", "last", "close", "mid", "ask")
+                )
             for key in price_keys:
                 numeric = self._safe_balance_metric(ticker.get(key))
                 if numeric is not None and numeric > 0:
@@ -3158,16 +3176,27 @@ class AppController(QMainWindow):
             token in lowered
             for token in (
                 "insufficient margin",
+                "insufficient_margin",
                 "insufficient funds",
+                "insufficient_funds",
                 "insufficient balance",
+                "insufficient_balance",
                 "margin available",
+                "margin_available",
                 "not enough margin",
+                "not_enough_margin",
                 "not enough funds",
+                "not_enough_funds",
                 "not enough balance",
+                "not_enough_balance",
                 "no available balance",
+                "no_available_balance",
                 "no free margin",
+                "no_free_margin",
                 "insufficient buying power",
+                "insufficient_buying_power",
                 "not enough buying power",
+                "not_enough_buying_power",
             )
         )
 
@@ -3386,21 +3415,34 @@ class AppController(QMainWindow):
             "available_margin",
             "margin_available",
         )
-        available_cash = self._balance_metric_value(
-            balances,
-            "cash",
-            "buying_power",
-            "available_funds",
-            "free",
-        )
+        if exchange_name == "alpaca":
+            available_cash = self._balance_metric_value(
+                balances,
+                "buying_power",
+                "available_funds",
+                "cash",
+                "free",
+            )
+        else:
+            available_cash = self._balance_metric_value(
+                balances,
+                "cash",
+                "buying_power",
+                "available_funds",
+                "free",
+            )
         equity = self._extract_balance_equity_value(balances if isinstance(balances, dict) else {})
+        trading_system = getattr(self, "trading_system", None)
+        risk_engine = getattr(trading_system, "risk_engine", None)
         risk_context = await self._resolve_trade_risk_context(
             resolved_symbol,
             reference_price,
             balances,
             broker=broker,
+            allow_cross_conversion=risk_engine is not None,
         )
         account_unit_price = self._trade_account_unit_price(reference_price, risk_context)
+        account_currency = str(risk_context.get("account_currency") or "").strip().upper() or None
 
         hard_caps = []
         sizing_notes = []
@@ -3456,8 +3498,11 @@ class AppController(QMainWindow):
         if (
             exchange_name == "oanda"
             and not margin_cap_applied
+            and free_margin is None
             and available_cash is not None
             and account_unit_price is not None
+            and account_currency
+            and account_currency == quote_currency
         ):
             if available_cash <= 0:
                 raise RuntimeError("No available account balance is available for a new trade.")
@@ -3469,8 +3514,6 @@ class AppController(QMainWindow):
             if balance_cap + 1e-12 < requested_units:
                 sizing_notes.append("Available account balance reduced the order size.")
 
-        trading_system = getattr(self, "trading_system", None)
-        risk_engine = getattr(trading_system, "risk_engine", None)
         if risk_engine is not None and equity is not None and hasattr(risk_engine, "sync_equity"):
             try:
                 risk_engine.sync_equity(equity)
@@ -3495,7 +3538,11 @@ class AppController(QMainWindow):
             hard_caps.append(adjusted_units)
             if adjusted_units + 1e-12 < requested_units:
                 sizing_notes.append(str(risk_reason or "Risk settings reduced the order size.").strip())
-        elif equity is not None and account_unit_price is not None:
+        elif (
+            equity is not None
+            and account_unit_price is not None
+            and not self._is_user_directed_trade_source(source)
+        ):
             max_position_size_pct = max(0.001, float(getattr(self, "max_position_size_pct", 0.10) or 0.10))
             risk_cap = max(0.0, float(equity) * max_position_size_pct / float(account_unit_price))
             hard_caps.append(risk_cap)
@@ -7671,11 +7718,18 @@ class AppController(QMainWindow):
             return CoinbaseWebSocket(symbols=products, event_bus=self.ws_bus)
 
         if exchange == "alpaca":
+            broker_cfg = getattr(self, "config", None)
+            broker_cfg = getattr(broker_cfg, "broker", None)
+            options = dict(getattr(broker_cfg, "options", None) or {})
+            params = dict(getattr(broker_cfg, "params", None) or {})
             return AlpacaWebSocket(
                 api_key=self.config.broker.api_key,
                 secret_key=self.config.broker.secret,
                 symbols=symbols,
                 event_bus=self.ws_bus,
+                feed=options.get("market_data_feed") or params.get("market_data_feed") or "iex",
+                sandbox=bool(getattr(getattr(self, "broker", None), "paper", False)),
+                max_symbols=options.get("alpaca_ws_symbol_limit") or params.get("alpaca_ws_symbol_limit"),
             )
 
         if exchange == "paper":
@@ -10899,9 +10953,11 @@ class AppController(QMainWindow):
             self._session_closing = False
 
     def get_market_stream_status(self):
-        if self._ws_task and not self._ws_task.done():
+        ws_task = getattr(self, "_ws_task", None)
+        if ws_task and not ws_task.done():
             return "Running"
-        if self._ticker_task and not self._ticker_task.done():
+        ticker_task = getattr(self, "_ticker_task", None)
+        if ticker_task and not ticker_task.done():
             return "Polling"
         if self._schedule_polling_market_stream_recovery():
             return "Restarting"

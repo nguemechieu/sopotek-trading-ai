@@ -54,6 +54,9 @@ class _MenuTerminal(QMainWindow):
     def apply_language(self):
         return Terminal.apply_language(self)
 
+    def _sync_chart_timeframe_menu_actions(self):
+        return Terminal._sync_chart_timeframe_menu_actions(self)
+
     def _update_autotrade_button(self):
         return None
 
@@ -168,11 +171,16 @@ def test_create_menu_bar_adds_workspace_notifications_palette_and_favorite_actio
     assert terminal.action_agent_timeline in terminal.review_menu.actions()
     assert terminal.action_agent_timeline in terminal.research_menu.actions()
     assert terminal.action_agent_timeline in terminal.tools_menu.actions()
+    assert terminal.action_trader_tv in terminal.education_menu.actions()
+    assert terminal.action_education_center in terminal.education_menu.actions()
     assert terminal.action_command_palette in terminal.tools_menu.actions()
     assert terminal.action_system_console in terminal.tools_menu.actions()
     assert terminal.action_system_status in terminal.tools_menu.actions()
     assert terminal.action_favorite_symbol in terminal.charts_menu.actions()
-    assert terminal.action_remove_indicator in terminal.charts_menu.actions()
+    assert terminal.chart_studies_menu.menuAction() in terminal.charts_menu.actions()
+    assert terminal.action_remove_indicator in terminal.chart_studies_menu.actions()
+    assert terminal.action_chart_settings in terminal.chart_style_menu.actions()
+    assert terminal.chart_timeframe_menu.menuAction() in terminal.charts_menu.actions()
     assert menu_titles[-1] == terminal.help_menu.title()
     assert menu_titles[-2] == terminal.workspace_menu.title()
 

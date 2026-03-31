@@ -455,7 +455,12 @@ class TelegramService:
             "/killswitch - activate the emergency kill switch\n"
             "/resume - resume trading after a stop\n"
             "/ask &lt;question&gt; - ask Sopotek Pilot about the app or current market context\n"
-            "/help - show this message"
+            "/help - show this message\n\n"
+            "Setup tips:\n"
+            "Telegram: talk to BotFather, send <code>/newbot</code>, copy the bot token, message your bot once, then open "
+            "<code>https://api.telegram.org/bot&lt;token&gt;/getUpdates</code> and copy <code>chat.id</code> into Settings -> Integrations.\n"
+            "OpenAI: create a key at <code>platform.openai.com/api-keys</code>, copy it once, then paste it into Settings -> Integrations -> OpenAI API key and use Test OpenAI.\n"
+            "Keep both secrets private."
         )
 
     def _command_keyboard_markup(self):

@@ -213,6 +213,20 @@ Settings expose fields for:
 - speech output provider and voice preferences
 - news feed behavior
 
+### Credential Setup
+
+Telegram:
+1. Open Telegram and talk to `@BotFather`.
+2. Send `/newbot` and copy the returned bot token.
+3. Message your bot once, then open `https://api.telegram.org/bot<token>/getUpdates`.
+4. Copy `message.chat.id` into `Settings -> Integrations -> Telegram chat ID`.
+
+OpenAI:
+1. Sign in at `https://platform.openai.com/`.
+2. Create a key at `https://platform.openai.com/api-keys`.
+3. Paste it into `Settings -> Integrations -> OpenAI API key`.
+4. Use `Test OpenAI` before depending on Sopotek Pilot or Telegram Q&A.
+
 Telegram now supports:
 
 - notifications

@@ -1,10 +1,13 @@
 import asyncio
 import logging
 import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 
 from event_bus.event import Event
 from event_bus.event_types import EventType
+from models.instrument import Instrument
+from models.order import Order
 
 
 class ExecutionManager:
@@ -150,6 +153,12 @@ class ExecutionManager:
 
         requested_mode = str(order.get("requested_quantity_mode") or "").strip().lower()
         if requested_mode == "lots":
+            return False
+
+        instrument_type = str(order.get("instrument_type") or "").strip().lower()
+        if not instrument_type and isinstance(order.get("instrument"), dict):
+            instrument_type = str(order["instrument"].get("type") or "").strip().lower()
+        if instrument_type in {"option", "future", "derivative"}:
             return False
 
         market_type = str(
@@ -736,18 +745,31 @@ class ExecutionManager:
     async def execute(self, signal=None, **kwargs):
         if signal is None:
             signal = {}
+        elif isinstance(signal, Order):
+            signal = signal.to_dict()
+        elif isinstance(signal, Mapping):
+            signal = dict(signal)
+        elif hasattr(signal, "to_dict") and callable(getattr(signal, "to_dict")):
+            signal = dict(signal.to_dict())
         elif not isinstance(signal, dict):
             raise TypeError("signal must be a dict when provided")
 
         order = {**signal, **kwargs}
 
-        symbol = order.get("symbol")
+        instrument_payload = order.get("instrument")
+        instrument = None
+        if instrument_payload:
+            try:
+                instrument = Instrument.from_mapping(instrument_payload)
+            except Exception:
+                instrument = None
+        symbol = order.get("symbol") or (instrument.symbol if instrument is not None else None)
         side = order.get("side") or order.get("signal")
         amount = order.get("amount")
         if amount is None:
-            amount = order.get("size")
+            amount = order.get("size", order.get("quantity"))
         price = order.get("price")
-        order_type = str(order.get("type", "market") or "market").strip().lower().replace(" ", "_")
+        order_type = str(order.get("order_type") or order.get("type", "market") or "market").strip().lower().replace(" ", "_")
         stop_price = order.get("stop_price")
         stop_loss = order.get("stop_loss")
         take_profit = order.get("take_profit")
@@ -771,8 +793,17 @@ class ExecutionManager:
             "source": str(order.get("source") or "bot").strip().lower() or "bot",
             "exchange": order.get("exchange") or getattr(self.broker, "exchange_name", None),
             "amount": amount,
+            "quantity": amount,
             "type": order_type,
+            "order_type": order_type,
         }
+        if instrument is not None:
+            normalized_order["instrument"] = instrument.to_dict()
+            normalized_order["instrument_type"] = instrument.type.value
+        elif order.get("instrument") is not None:
+            normalized_order["instrument"] = order.get("instrument")
+        elif order.get("instrument_type") is not None:
+            normalized_order["instrument_type"] = order.get("instrument_type")
 
         if price is not None:
             normalized_order["price"] = price
@@ -803,6 +834,10 @@ class ExecutionManager:
             "consensus_status",
             "adaptive_weight",
             "adaptive_score",
+            "broker",
+            "time_in_force",
+            "client_order_id",
+            "account_id",
             "requested_amount",
             "requested_quantity_mode",
             "requested_amount_units",
@@ -814,9 +849,12 @@ class ExecutionManager:
             "sizing_summary",
             "sizing_notes",
             "ai_sizing_reason",
+            "metadata",
         ):
             if order.get(extra_key) is not None:
                 normalized_order[extra_key] = order.get(extra_key)
+        if order.get("legs") is not None:
+            normalized_order["legs"] = list(order.get("legs") or [])
         if params:
             normalized_order["params"] = params
 

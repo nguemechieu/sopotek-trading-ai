@@ -12,6 +12,7 @@ from broker.alpaca_broker import AlpacaBroker
 from broker.oanda_broker import OandaBroker
 from broker.paper_broker import PaperBroker
 from market_data.ticker_buffer import TickerBuffer
+from market_data.websocket.alpaca_web_socket import AlpacaWebSocket
 
 
 class FakeResponse:
@@ -132,24 +133,43 @@ class FakeAlpacaREST:
         self.api_key = api_key
         self.secret = secret
         self.base_url = base_url
+        self.latest_trade_feed = None
+        self.latest_quote_feed = None
+        self.bars_feed = None
 
     def get_account(self):
-        return SimpleNamespace(status="ACTIVE", cash="5000", equity="5200", buying_power="7000")
+        return SimpleNamespace(
+            status="ACTIVE",
+            cash="5000",
+            equity="5200",
+            buying_power="7000",
+            initial_margin="1200",
+            maintenance_margin="900",
+            portfolio_value="5200",
+            long_market_value="4000",
+            short_market_value="0",
+        )
 
-    def get_latest_trade(self, symbol):
+    def get_latest_trade(self, symbol, feed=None):
+        self.latest_trade_feed = feed
         return SimpleNamespace(price=201.5)
 
-    def get_latest_quote(self, symbol):
+    def get_latest_quote(self, symbol, feed=None):
+        self.latest_quote_feed = feed
         return SimpleNamespace(bid_price=201.0, ask_price=202.0)
 
-    def get_bars(self, symbol, timeframe, limit=100):
+    def get_bars(self, symbol, timeframe, limit=100, feed=None):
+        self.bars_feed = feed
         return [
             SimpleNamespace(t="t1", o=1.0, h=2.0, l=0.5, c=1.5, v=10),
             SimpleNamespace(t="t2", o=1.5, h=2.5, l=1.0, c=2.0, v=11),
         ]
 
     def list_assets(self, status="active"):
-        return [SimpleNamespace(symbol="AAPL", tradable=True), SimpleNamespace(symbol="TSLA", tradable=True)]
+        return [
+            SimpleNamespace(symbol="AAPL", tradable=True, status="active", marginable=True, shortable=True, fractionable=True),
+            SimpleNamespace(symbol="TSLA", tradable=True, status="active", marginable=True, shortable=True, fractionable=True),
+        ]
 
     def submit_order(self, **kwargs):
         return SimpleNamespace(
@@ -172,12 +192,43 @@ class FakeAlpacaREST:
         return [{"status": "canceled"}]
 
     def get_order(self, order_id):
-        return SimpleNamespace(id=order_id, symbol="AAPL", side="buy", type="market", status="filled", qty="2", filled_qty="2", filled_avg_price="200")
+        return SimpleNamespace(
+            id=order_id,
+            symbol="AAPL",
+            side="buy",
+            type="market",
+            status="filled",
+            qty="2",
+            filled_qty="2",
+            filled_avg_price="200",
+            filled_at="2026-03-31T10:00:00Z",
+        )
 
     def list_orders(self, status="all", limit=None):
         orders = [
-            SimpleNamespace(id="1", symbol="AAPL", side="buy", type="market", status="new", qty="2", filled_qty="0", filled_avg_price="0"),
-            SimpleNamespace(id="2", symbol="TSLA", side="sell", type="limit", status="filled", qty="1", filled_qty="1", limit_price="300", filled_avg_price="300"),
+            SimpleNamespace(
+                id="1",
+                symbol="AAPL",
+                side="buy",
+                type="market",
+                status="new",
+                qty="2",
+                filled_qty="0",
+                filled_avg_price="0",
+                submitted_at="2026-03-31T09:55:00Z",
+            ),
+            SimpleNamespace(
+                id="2",
+                symbol="TSLA",
+                side="sell",
+                type="limit",
+                status="filled",
+                qty="1",
+                filled_qty="1",
+                limit_price="300",
+                filled_avg_price="300",
+                filled_at="2026-03-31T10:01:00Z",
+            ),
         ]
         return orders[:limit] if limit else orders
 
@@ -334,17 +385,72 @@ def test_alpaca_broker_normalizes_common_methods(monkeypatch):
     async def scenario():
         broker = AlpacaBroker(SimpleNamespace(api_key="key", secret="secret", mode="paper", sandbox=False))
         assert (await broker.fetch_ticker("AAPL"))["bid"] == 201.0
+        assert broker.exchange_name == "alpaca"
         assert (await broker.fetch_orderbook("AAPL"))["asks"][0][0] == 202.0
         assert len(await broker.fetch_ohlcv("AAPL", timeframe="1h", limit=2)) == 2
         assert "AAPL" in await broker.fetch_symbols()
-        assert (await broker.fetch_balance())["cash"] == 5000.0
+        markets = await broker.fetch_markets()
+        assert markets["AAPL"]["quote"] == "USD"
+        balance = await broker.fetch_balance()
+        assert balance["cash"] == 5000.0
+        assert balance["buying_power"] == 7000.0
+        assert balance["available_funds"] == 7000.0
+        assert balance["free"]["USD"] == 7000.0
+        assert balance["raw"]["status"] == "ACTIVE"
         assert (await broker.fetch_positions())[0]["symbol"] == "AAPL"
         order = await broker.create_order("AAPL", "buy", 2, type="limit", price=200)
         assert order["symbol"] == "AAPL"
         stop_limit = await broker.create_order("AAPL", "buy", 1, type="stop_limit", price=200, stop_price=201)
         assert stop_limit["type"] == "stop_limit"
         assert stop_limit["stop_price"] == 201.0
+        trade_rows = await broker.fetch_trades("AAPL", limit=5)
+        assert trade_rows[0]["symbol"] == "AAPL"
+        assert trade_rows[0]["price"] == 201.5
+        my_trades = await broker.fetch_my_trades(limit=5)
+        assert my_trades[0]["status"] == "filled"
         assert len(await broker.fetch_closed_orders(limit=5)) == 1
+        assert broker.api.latest_trade_feed == "iex"
+        assert broker.api.latest_quote_feed == "iex"
+        assert broker.api.bars_feed == "iex"
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_alpaca_entity_value_prefers_raw_payload_before_lazy_attributes():
+    class LazyTimestampEntity:
+        def __init__(self):
+            self._raw = {"submitted_at": "2026-03-31T09:55:00Z"}
+
+        def __getattr__(self, name):
+            raise AssertionError(f"lazy attribute access should not be triggered for {name}")
+
+    entity = LazyTimestampEntity()
+
+    assert AlpacaBroker._entity_value(entity, "filled_at", "submitted_at") == "2026-03-31T09:55:00Z"
+
+
+def test_alpaca_open_orders_snapshot_lists_orders_once_for_multiple_symbols(monkeypatch):
+    import broker.alpaca_broker as alpaca_module
+
+    class CountingAlpacaREST(FakeAlpacaREST):
+        def __init__(self, api_key, secret, base_url, api_version="v2"):
+            super().__init__(api_key, secret, base_url, api_version=api_version)
+            self.list_orders_calls = []
+
+        def list_orders(self, status="all", limit=None):
+            self.list_orders_calls.append({"status": status, "limit": limit})
+            return super().list_orders(status=status, limit=limit)
+
+    monkeypatch.setattr(alpaca_module, "tradeapi", SimpleNamespace(REST=CountingAlpacaREST))
+
+    async def scenario():
+        broker = AlpacaBroker(SimpleNamespace(api_key="key", secret="secret", mode="paper", sandbox=False))
+
+        orders = await broker.fetch_open_orders_snapshot(symbols=["AAPL", "TSLA", "MSFT"], limit=200)
+
+        assert {order["symbol"] for order in orders} == {"AAPL", "TSLA"}
+        assert broker.api.list_orders_calls == [{"status": "open", "limit": 200}]
         await broker.close()
 
     asyncio.run(scenario())
@@ -364,6 +470,20 @@ def test_non_ccxt_brokers_report_supported_market_venues(monkeypatch):
     assert oanda.supported_market_venues() == ["auto", "otc"]
     assert alpaca.supported_market_venues() == ["auto", "spot"]
     assert paper.supported_market_venues() == ["auto", "spot", "derivative", "option", "otc"]
+
+
+def test_alpaca_websocket_defaults_to_iex_and_limits_symbols_for_basic_feed():
+    ws = AlpacaWebSocket(
+        api_key="key",
+        secret_key="secret",
+        symbols=["AAPL", "TSLA", "MSFT"] * 20,
+        event_bus=SimpleNamespace(),
+    )
+
+    assert ws.feed == "iex"
+    assert ws.max_symbols == 30
+    assert ws.url.endswith("/v2/iex")
+    assert len(ws.symbols) >= 3
 
 
 def test_paper_broker_exposes_normalized_api(monkeypatch):

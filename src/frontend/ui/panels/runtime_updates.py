@@ -11,12 +11,16 @@ def _positions_refresh_interval_seconds(terminal):
     broker_name = _runtime_broker_name(terminal)
     if broker_name == "coinbase":
         return 6.0
+    if broker_name == "alpaca":
+        return 5.0
     return 0.0
 
 
 def _open_orders_refresh_interval_seconds(terminal):
     broker_name = _runtime_broker_name(terminal)
     if broker_name == "coinbase":
+        return 5.0
+    if broker_name == "alpaca":
         return 5.0
     return 0.0
 

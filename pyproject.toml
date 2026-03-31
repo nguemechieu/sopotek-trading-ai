@@ -6,9 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "sopotek-trading-ai"
 version = "1.0.0"
 description = "Enterprise-grade trading AI platform."
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary - Sopotek Corporation" }
 authors = [{ name = "Noel Nguemechieu" }]
+keywords = ["trading", "desktop", "telegram", "openai", "quant", "broker"]
 
 dependencies = [
     "numpy>=1.24,<2.0",
@@ -33,6 +35,11 @@ dependencies = [
     "SpeechRecognition>=3.10",
     "sounddevice>=0.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/nguemechieu/sopotek-trading-ai"
+Documentation = "https://github.com/nguemechieu/sopotek-trading-ai/tree/master/docs"
+Repository = "https://github.com/nguemechieu/sopotek-trading-ai"
 
 [project.optional-dependencies]
 ui = [

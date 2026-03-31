@@ -1124,6 +1124,53 @@ def test_preview_trade_submission_rejects_unsupported_market_venue():
         raise AssertionError("Expected unsupported venue selection to fail preflight")
 
 
+def test_preview_trade_submission_uses_alpaca_buying_power_for_stock_buys():
+    controller = _make_controller()
+    fresh_timestamp = _prime_trade_safety_buffers(controller, "AAPL")
+    _configure_trade_preflight_controller(
+        controller,
+        exchange_name="alpaca",
+        mode="live",
+        preference="spot",
+        markets={"AAPL": {"symbol": "AAPL", "base": "AAPL", "quote": "USD", "spot": True, "active": True}},
+        balances={
+            "cash": 5000.0,
+            "buying_power": 7000.0,
+            "available_funds": 7000.0,
+            "equity": 5200.0,
+            "free": {"USD": 7000.0},
+            "raw": {"cash": 5000.0, "buying_power": 7000.0, "equity": 5200.0},
+        },
+    )
+
+    async def fresh_ticker(symbol):
+        return {
+            "symbol": symbol,
+            "price": 105.0,
+            "last": 105.0,
+            "bid": 104.9,
+            "ask": 105.1,
+            "timestamp": fresh_timestamp,
+            "_received_at": fresh_timestamp,
+        }
+
+    controller._safe_fetch_ticker = fresh_ticker
+
+    preflight = asyncio.run(
+        controller.preview_trade_submission(
+            symbol="AAPL",
+            side="buy",
+            amount=60.0,
+            source="manual",
+            timeframe="1h",
+        )
+    )
+
+    assert preflight["symbol"] == "AAPL"
+    assert preflight["amount_units"] == 60.0
+    assert all("cash balance reduced" not in str(note).lower() for note in preflight.get("sizing_notes", []))
+
+
 def test_submit_market_chat_trade_ignores_invalid_ai_risk_param_rejection():
     controller = _make_controller()
     submitted = {}
@@ -1430,6 +1477,7 @@ def test_preview_trade_submission_caps_oanda_manual_trade_by_available_balance_w
 
 def test_get_market_stream_status_recovers_oanda_polling_when_task_is_missing():
     controller = _make_controller()
+    controller.get_market_stream_status = AppController.get_market_stream_status.__get__(controller, AppController)
     controller.connected = True
     controller.broker = SimpleNamespace(exchange_name="oanda")
     controller._ws_task = None

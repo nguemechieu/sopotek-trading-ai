@@ -9,6 +9,19 @@ Telegram integration is implemented in `src/integrations/telegram_service.py` an
 - Telegram bot token
 - Telegram chat ID
 
+### How To Get A Telegram Bot Token And Chat ID
+1. Open Telegram and start a chat with `@BotFather`.
+2. Send `/newbot` and follow the prompts to name the bot.
+3. Copy the bot token that BotFather returns and keep it private.
+4. Start a chat with your new bot and send at least one message such as `/start`.
+5. Open `https://api.telegram.org/bot<token>/getUpdates` in a browser, replacing `<token>` with the real token.
+6. Find `message.chat.id` in the JSON response and paste that value into `Settings -> Integrations -> Telegram chat ID`.
+
+Notes:
+- If you use a group chat, add the bot to the group and send a message there before checking `getUpdates`.
+- Group chat IDs are often negative numbers.
+- Official Telegram bot setup reference: `https://core.telegram.org/bots#botfather`
+
 ### Automatic Notifications
 Trade activity notifications can include:
 
@@ -83,6 +96,17 @@ OpenAI settings are stored through the desktop settings dialog.
 ### Settings Fields
 - OpenAI API key
 - OpenAI model
+
+### How To Get An OpenAI API Key
+1. Sign in to the OpenAI Platform at `https://platform.openai.com/`.
+2. Open the API keys page at `https://platform.openai.com/api-keys`.
+3. Create a new secret key and copy it immediately, because you may not be able to see the full key again later.
+4. Paste the key into `Settings -> Integrations -> OpenAI API key`.
+5. Choose the model you want to use and run `Test OpenAI` from the settings flow before relying on Sopotek Pilot or Telegram Q&A.
+
+Notes:
+- Treat the key like a password and do not share it in chat logs or screenshots.
+- If `Test OpenAI` fails, confirm the key was pasted fully and belongs to the project or account you intend to use.
 
 ### Current Use Cases
 - answer questions about the app runtime context

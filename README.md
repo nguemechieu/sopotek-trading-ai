@@ -19,6 +19,7 @@ Sopotek Trading AI is a desktop trading workstation built by Sopotek Corporation
 - Terminal workspace with chart tabs, detachable charts, tiled/cascaded layouts, and layout restore
 - MT4/MT5-style chart handling including candlesticks, indicators, orderbook heatmap, depth chart, market info, Fibonacci, and chart trading interactions
 - Manual trade ticket with broker-aware formatting, suggested SL/TP, chart-linked entry, take-profit levels, and live preflight sizing from balance, margin, or equity
+- Derivatives-ready broker layer for options and futures, including normalized instruments, multi-leg option structures, contract metadata, and broker-routed execution
 - AI trading controls, AI signal monitor, recommendations, Sopotek Pilot, news overlays, and Telegram command handling
 - Open orders, positions, trade log, closed journal, trade review, position analysis, performance analytics, system health tools, and Coinbase-style recent market trades in the Order Book dock
 - Risk and behavior protection including risk profiles, a dedicated `Risk` menu, behavior guard, kill switch, drawdown-aware restrictions, and session health status
@@ -88,8 +89,20 @@ flowchart LR
 - `crypto` through `CCXTBroker`
 - `forex` through `OandaBroker`
 - `stocks` through `AlpacaBroker`
+- `options` through `TDAmeritradeBroker` for Schwab-backed option routing
+- `futures` and broader `derivatives` through `IBKRBroker`
+- `futures` through `AMPFuturesBroker`
+- `futures` through `TradovateBroker`
 - `paper` through `PaperBroker`
 - `stellar` through `StellarBroker`
+
+### Derivatives Layer
+- Common broker contract now includes `connect()`, `disconnect()`, `get_account_info()`, `get_positions()`, `place_order()`, `cancel_order()`, and `stream_market_data()`.
+- Instrument modeling now supports `stock`, `option`, `future`, `forex`, and `crypto` with expiry, strike, option right, contract size, and multiplier metadata.
+- `OptionsEngine` adds normalized option-chain access, Black-Scholes Greeks, and multi-leg builders for spreads, straddles, and iron condors.
+- `FuturesEngine` adds normalized contract metadata, rollover checks, margin estimation, leverage tracking, and liquidation-threshold helpers.
+- `ExecutionManager` and `OrderRouter` now preserve derivative-specific payloads such as instrument metadata, multi-leg orders, bracket instructions, and broker hints.
+- `RiskEngine` now tracks derivatives-specific controls including margin usage, futures liquidation proximity, gamma exposure, and theta decay.
 
 ## Recent Reliability Updates
 
@@ -115,8 +128,11 @@ python -m pip install -r requirements.txt
 
 ### 2. Launch The Desktop App
 ```powershell
-python src\main.py
+python main.py
 ```
+
+The repository root `main.py` is the recommended launcher from the workspace root.
+It bootstraps the desktop app and delegates to the real entry point at `src/main.py`.
 
 ### 3. Start Safely
 1. Open the dashboard.
@@ -127,19 +143,28 @@ python src\main.py
 6. Validate Telegram or OpenAI integration only after the core trading path is stable.
 7. Use `live` only when the same workflow is already behaving correctly in a non-production session.
 
+### 4. Integration Credentials
+1. Create an OpenAI API key at `https://platform.openai.com/api-keys`, paste it into `Settings -> Integrations`, and run `Test OpenAI`.
+2. Create a Telegram bot with `@BotFather` using `/newbot`, paste the bot token into `Settings -> Integrations`, then message the bot once.
+3. Open `https://api.telegram.org/bot<token>/getUpdates`, copy `message.chat.id`, and paste it into `Settings -> Integrations -> Telegram chat ID`.
+4. Use `/help` in Telegram for the built-in command list and setup reminders after the bot is connected.
+
 ## Documentation Map
 
 - [Getting Started](docs/getting-started.md)
 - [Full App Guide](docs/FULL_APP_GUIDE.md)
+- [Release Notes](docs/release-notes.md)
 - [Architecture](docs/architecture.md)
 - [Strategies](docs/strategy_docs.md)
 - [Brokers And Modes](docs/brokers-and-modes.md)
+- [Derivatives Guide](docs/derivatives.md)
 - [UI Workspace Guide](docs/ui-workspace.md)
 - [Integrations](docs/integrations.md)
 - [Internal API Notes](docs/api.md)
 - [Refactor Roadmap](docs/refactor-roadmap.md)
 - [Testing And Operations](docs/testing-and-operations.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Contributing Guide](docs/contributing.md)
 - [Development Notes](docs/development.md)
 
 ## Built-In Command Surfaces

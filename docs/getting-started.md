@@ -25,10 +25,11 @@ python -m pip install mkdocs mkdocs-material
 ## Launch
 
 ```powershell
-python src\main.py
+python main.py
 ```
 
-This starts the PySide6 desktop application and builds the Qt event loop through `qasync`.
+This starts the PySide6 desktop application from the repository root bootstrap and builds the Qt event loop through `qasync`.
+The wrapper then hands off to the real desktop entry point at `src/main.py`.
 
 ## First Session Checklist
 
@@ -62,11 +63,14 @@ This starts the PySide6 desktop application and builds the Qt event loop through
 
 After the broker session is stable, this is the safest order:
 
-1. Open `Settings -> Integrations` and use `Test OpenAI`.
-2. Enable Telegram and send `/help`.
-3. Open `Sopotek Pilot` and ask for a short account summary.
-4. Try one screenshot flow from the toolbar or Telegram.
-5. Only then test AI trading toggles or remote trading commands.
+1. Create an OpenAI API key at `https://platform.openai.com/api-keys` and paste it into `Settings -> Integrations -> OpenAI API key`.
+2. Use `Test OpenAI` and confirm Sopotek Pilot can answer a simple question.
+3. Create a Telegram bot with `@BotFather` using `/newbot`, then copy the bot token into `Settings -> Integrations -> Telegram bot token`.
+4. Message the bot once, open `https://api.telegram.org/bot<token>/getUpdates`, and copy `message.chat.id` into `Settings -> Integrations -> Telegram chat ID`.
+5. Enable Telegram and send `/help`.
+6. Open `Sopotek Pilot` and ask for a short account summary.
+7. Try one screenshot flow from the toolbar or Telegram.
+8. Only then test AI trading toggles or remote trading commands.
 
 ## First Useful Windows To Open
 

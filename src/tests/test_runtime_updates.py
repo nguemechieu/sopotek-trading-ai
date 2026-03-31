@@ -153,6 +153,25 @@ def test_schedule_positions_refresh_throttles_coinbase(monkeypatch):
     schedule_positions_refresh(fake)
 
 
+def test_schedule_positions_refresh_throttles_alpaca(monkeypatch):
+    import frontend.ui.panels.runtime_updates as runtime_mod
+
+    fake = SimpleNamespace(
+        _positions_refresh_task=None,
+        _last_positions_refresh_at=runtime_mod.time.monotonic(),
+        controller=SimpleNamespace(broker=SimpleNamespace(exchange_name="alpaca")),
+        logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+        _refresh_positions_async=lambda: None,
+    )
+
+    def should_not_schedule():
+        raise AssertionError("Alpaca positions refresh should be throttled")
+
+    monkeypatch.setattr(runtime_mod.asyncio, "get_event_loop", should_not_schedule)
+
+    schedule_positions_refresh(fake)
+
+
 def test_schedule_open_orders_refresh_throttles_coinbase(monkeypatch):
     import frontend.ui.panels.runtime_updates as runtime_mod
 
@@ -166,6 +185,25 @@ def test_schedule_open_orders_refresh_throttles_coinbase(monkeypatch):
 
     def should_not_schedule():
         raise AssertionError("Coinbase open-orders refresh should be throttled")
+
+    monkeypatch.setattr(runtime_mod.asyncio, "get_event_loop", should_not_schedule)
+
+    schedule_open_orders_refresh(fake)
+
+
+def test_schedule_open_orders_refresh_throttles_alpaca(monkeypatch):
+    import frontend.ui.panels.runtime_updates as runtime_mod
+
+    fake = SimpleNamespace(
+        _open_orders_refresh_task=None,
+        _last_open_orders_refresh_at=runtime_mod.time.monotonic(),
+        controller=SimpleNamespace(broker=SimpleNamespace(exchange_name="alpaca")),
+        logger=SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+        _refresh_open_orders_async=lambda: None,
+    )
+
+    def should_not_schedule():
+        raise AssertionError("Alpaca open-orders refresh should be throttled")
 
     monkeypatch.setattr(runtime_mod.asyncio, "get_event_loop", should_not_schedule)
 

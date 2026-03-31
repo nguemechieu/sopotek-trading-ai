@@ -184,6 +184,8 @@ def test_help_command_requests_keyboard():
     assert service.messages[-1][1] is True
     assert "/menu" in service.messages[-1][0]
     assert "Keyboard sections:" in service.messages[-1][0]
+    assert "BotFather" in service.messages[-1][0]
+    assert "platform.openai.com/api-keys" in service.messages[-1][0]
     assert "/trade ..." not in service.messages[-1][0]
     assert "/chart SYMBOL" not in service.messages[-1][0]
 
