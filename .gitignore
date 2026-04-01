@@ -9,8 +9,14 @@ coverage.xml
 htmlcov/
 build/
 dist/
+.deps/
+.deps_legacy/
+.deps_ui/
+.codex-clean-push/
+.codex-publish-clean-*/
 
 src/logs/*.log
+logs/
 data/
 src/Sopotek_Screenshot_*.png
 src/reports/*.csv
