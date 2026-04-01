@@ -18,6 +18,7 @@ export SCREEN_HEIGHT="${SCREEN_HEIGHT:-900}"
 export SCREEN_DEPTH="${SCREEN_DEPTH:-24}"
 export VNC_PORT="${VNC_PORT:-5900}"
 export NOVNC_PORT="${NOVNC_PORT:-6080}"
+export X11VNC_EXTRA_ARGS="${X11VNC_EXTRA_ARGS:-}"
 
 mkdir -p "$XDG_RUNTIME_DIR" /app/logs
 chmod 700 "$XDG_RUNTIME_DIR"
@@ -43,18 +44,25 @@ fi
 fluxbox >/app/logs/fluxbox.log 2>&1 &
 FLUXBOX_PID=$!
 
-x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" -forever -shared -nopw -quiet >/app/logs/x11vnc.log 2>&1 &
+autocutsel -display "$DISPLAY" >/app/logs/autocutsel-clipboard.log 2>&1 &
+AUTOCUTSEL_CLIPBOARD_PID=$!
+
+autocutsel -display "$DISPLAY" -selection PRIMARY >/app/logs/autocutsel-primary.log 2>&1 &
+AUTOCUTSEL_PRIMARY_PID=$!
+
+x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" -forever -shared -nopw -quiet $X11VNC_EXTRA_ARGS >/app/logs/x11vnc.log 2>&1 &
 X11VNC_PID=$!
 
 /usr/share/novnc/utils/novnc_proxy --listen "$NOVNC_PORT" --vnc "localhost:${VNC_PORT}" >/app/logs/novnc.log 2>&1 &
 NOVNC_PID=$!
 
 cleanup() {
-    kill "$NOVNC_PID" "$X11VNC_PID" "$FLUXBOX_PID" "$XVFB_PID" 2>/dev/null || true
+    kill "$NOVNC_PID" "$X11VNC_PID" "$AUTOCUTSEL_PRIMARY_PID" "$AUTOCUTSEL_CLIPBOARD_PID" "$FLUXBOX_PID" "$XVFB_PID" 2>/dev/null || true
 }
 
 trap cleanup EXIT INT TERM
 
 printf '%s\n' "Browser UI available at http://localhost:${NOVNC_PORT}/vnc.html?autoconnect=1&resize=scale"
+printf '%s\n' "Clipboard bridge enabled. If your browser blocks Ctrl+V, use the noVNC clipboard panel to paste text into the app."
 
 python -m sopotek_trading "$@"

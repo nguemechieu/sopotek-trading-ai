@@ -302,6 +302,42 @@ def test_close_position_async_calls_controller_and_refreshes_views():
     assert refreshed["messages"]
 
 
+def test_populate_closed_journal_table_shows_final_outcome_column():
+    _app()
+    table = QTableWidget()
+    table.setColumnCount(11)
+    fake = SimpleNamespace(
+        _is_qt_object_alive=lambda _obj: True,
+        _format_trade_source_label=lambda value: str(value or ""),
+        _format_trade_log_value=lambda value: "" if value is None else str(value),
+        _safe_float=lambda value: None if value in (None, "", "-") else float(value),
+        _format_currency=lambda value: f"${float(value):.2f}",
+        _derived_trade_outcome=lambda trade: Terminal._derived_trade_outcome(SimpleNamespace(), trade),
+    )
+
+    Terminal._populate_closed_journal_table(
+        fake,
+        table,
+        [
+            {
+                "timestamp": "2026-03-20T14:30:00+00:00",
+                "symbol": "EUR/USD",
+                "source": "broker",
+                "side": "sell",
+                "price": 1.0825,
+                "size": 1000,
+                "order_type": "market",
+                "status": "closed",
+                "order_id": "close-123",
+                "pnl": -18.4,
+            }
+        ],
+    )
+
+    assert table.item(0, 8).text() == "Loss"
+    assert "Outcome: Loss" in table.item(0, 8).toolTip()
+
+
 def test_validate_manual_trade_amount_converts_micro_lots_to_oanda_units():
     fake = SimpleNamespace()
     fake.controller = SimpleNamespace(

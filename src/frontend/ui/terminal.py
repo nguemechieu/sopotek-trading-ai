@@ -120,6 +120,7 @@ from frontend.ui.panels.manual_trade_updates import (
     suggest_manual_trade_levels,
     validate_manual_trade_amount,
 )
+from storage.trade_repository import derive_trade_outcome
 from frontend.ui.panels.performance_updates import (
     performance_snapshot,
     populate_performance_symbol_table,
@@ -7174,6 +7175,7 @@ class Terminal(QMainWindow):
             return
         table.setRowCount(len(rows or []))
         for row_index, row in enumerate(rows or []):
+            outcome_text = str(row.get("outcome") or self._derived_trade_outcome(row) or "").strip()
             values = [
                 row.get("timestamp", ""),
                 row.get("symbol", ""),
@@ -7183,6 +7185,7 @@ class Terminal(QMainWindow):
                 row.get("size", ""),
                 row.get("order_type", ""),
                 row.get("status", ""),
+                outcome_text,
                 row.get("order_id", ""),
                 row.get("pnl", ""),
             ]
@@ -7196,8 +7199,8 @@ class Terminal(QMainWindow):
                 tooltip_lines.append(f"Reason: {row.get('reason')}")
             if row.get("setup"):
                 tooltip_lines.append(f"Setup: {row.get('setup')}")
-            if row.get("outcome"):
-                tooltip_lines.append(f"Outcome: {row.get('outcome')}")
+            if outcome_text:
+                tooltip_lines.append(f"Outcome: {outcome_text}")
             if row.get("lessons"):
                 tooltip_lines.append(f"Lessons: {row.get('lessons')}")
             if self._safe_float(row.get("stop_loss")) is not None:
@@ -7301,9 +7304,9 @@ class Terminal(QMainWindow):
             layout.addLayout(controls)
 
             table = QTableWidget()
-            table.setColumnCount(10)
+            table.setColumnCount(11)
             table.setHorizontalHeaderLabels(
-                ["Timestamp", "Symbol", "Source", "Side", "Price", "Size", "Order Type", "Status", "Order ID", "PnL"]
+                ["Timestamp", "Symbol", "Source", "Side", "Price", "Size", "Order Type", "Status", "Outcome", "Order ID", "PnL"]
             )
             table.cellDoubleClicked.connect(lambda *_: self._open_trade_review_from_journal(window))
             layout.addWidget(table)
@@ -7943,23 +7946,14 @@ class Terminal(QMainWindow):
     def _derived_trade_outcome(self, trade):
         if not isinstance(trade, dict):
             return ""
-        explicit = str(trade.get("outcome") or "").strip()
-        if explicit:
-            return explicit
-        pnl = self._safe_float(trade.get("pnl"))
-        status = str(trade.get("status") or "").strip().lower()
-        if pnl is not None:
-            if pnl > 0:
-                return "Win"
-            if pnl < 0:
-                return "Loss"
-            if status in {"filled", "closed"}:
-                return "Flat"
-        if status in {"rejected", "failed"}:
-            return "Rejected"
-        if status in {"canceled", "cancelled", "expired"}:
-            return "Canceled"
-        return status.title() if status else ""
+        return str(
+            derive_trade_outcome(
+                outcome=trade.get("outcome"),
+                pnl=trade.get("pnl"),
+                status=trade.get("status"),
+            )
+            or ""
+        ).strip()
 
     def _set_text_edit_value(self, widget, value):
         if widget is None:

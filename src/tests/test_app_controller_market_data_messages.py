@@ -662,3 +662,52 @@ def test_live_agent_runtime_feed_keeps_latest_rows_and_supports_filters():
     assert eur_rows == [all_rows[1]]
     assert bus_rows == [all_rows[0]]
     assert all_rows[0]["timestamp_label"]
+
+
+def test_fetch_closed_trade_journal_derives_final_outcome_from_broker_pnl():
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.closed_trade_outcome")
+    controller._repository_trade_rows_for_active_exchange = lambda _limit: []
+    controller._resolve_broker_capability = lambda name: name == "fetch_closed_orders"
+
+    async def fake_fetch_closed_orders(limit=150):
+        return [
+            {
+                "id": "close-123",
+                "symbol": "EUR/USD",
+                "side": "sell",
+                "price": 1.0825,
+                "filled": 1000,
+                "type": "market",
+                "status": "closed",
+                "timestamp": "2026-03-20T14:30:00+00:00",
+                "pnl": -18.4,
+            }
+        ]
+
+    controller.broker = SimpleNamespace(fetch_closed_orders=fake_fetch_closed_orders)
+
+    rows = asyncio.run(controller.fetch_closed_trade_journal(limit=10))
+
+    assert len(rows) == 1
+    assert rows[0]["order_id"] == "close-123"
+    assert rows[0]["pnl"] == -18.4
+    assert rows[0]["outcome"] == "Loss"
+
+
+def test_normalize_broker_trade_history_row_preserves_explicit_outcome():
+    controller = AppController.__new__(AppController)
+
+    normalized = controller._normalize_broker_trade_history_row(
+        {
+            "id": "close-456",
+            "symbol": "BTC/USD",
+            "side": "buy",
+            "status": "closed",
+            "pnl": 42.0,
+        },
+        repo_meta={"outcome": "Target hit cleanly"},
+    )
+
+    assert normalized is not None
+    assert normalized["outcome"] == "Target hit cleanly"

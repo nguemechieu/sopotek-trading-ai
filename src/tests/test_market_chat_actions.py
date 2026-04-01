@@ -926,7 +926,7 @@ def test_broker_certification_matrix_smoke_preflight(
     assert preflight["market_data_guard"]["blocked"] is False
 
 
-def test_assess_trade_market_data_guard_requires_fresh_orderbook_for_orderbook_brokers():
+def test_assess_trade_market_data_guard_refreshes_missing_orderbook_before_blocking():
     controller = _make_controller()
     fresh_timestamp = _prime_trade_safety_buffers(controller, "BTC/USDT", include_orderbook=False)
     _configure_trade_preflight_controller(
@@ -955,10 +955,70 @@ def test_assess_trade_market_data_guard_requires_fresh_orderbook_for_orderbook_b
         )
     )
 
-    assert guard["blocked"] is True
-    assert "orderbook data" in guard["reasons"][0].lower()
+    assert guard["blocked"] is False
     assert guard["orderbook"]["supported"] is True
-    assert guard["orderbook"]["fresh"] is False
+    assert guard["orderbook"]["fresh"] is True
+
+
+def test_assess_trade_market_data_guard_refreshes_missing_candles_before_blocking():
+    controller = _make_controller()
+    fresh_timestamp = _utc_now_iso()
+    controller.candle_buffers = {}
+    controller.candle_buffer = CandleBuffer()
+    controller.orderbook_buffer = OrderBookBuffer()
+    controller.orderbook_buffer.update(
+        "EUR/CHF",
+        bids=[[0.95, 1.0]],
+        asks=[[0.96, 1.0]],
+        updated_at=fresh_timestamp,
+    )
+    _configure_trade_preflight_controller(
+        controller,
+        exchange_name="oanda",
+        mode="live",
+        preference="otc",
+        markets={"EUR/CHF": {"symbol": "EUR/CHF", "base": "EUR", "quote": "CHF", "otc": True, "active": True}},
+        balances={"free_margin": 100000.0, "equity": 100000.0, "cash": 100000.0, "currency": "USD"},
+    )
+
+    calls = []
+
+    async def fake_request_candle_data(symbol, timeframe="1h", limit=None, start_time=None, end_time=None, history_scope="runtime"):
+        calls.append((symbol, timeframe, history_scope))
+        controller.candle_buffer.update(
+            symbol,
+            {
+                "timestamp": fresh_timestamp,
+                "open": 0.95,
+                "high": 0.97,
+                "low": 0.94,
+                "close": 0.96,
+                "volume": 10.0,
+            },
+        )
+        return True
+
+    controller.request_candle_data = fake_request_candle_data
+
+    guard = asyncio.run(
+        controller._assess_trade_market_data_guard(
+            "EUR/CHF",
+            timeframe="1h",
+            ticker={
+                "symbol": "EUR/CHF",
+                "price": 0.96,
+                "last": 0.96,
+                "bid": 0.9599,
+                "ask": 0.9601,
+                "timestamp": fresh_timestamp,
+                "_received_at": fresh_timestamp,
+            },
+        )
+    )
+
+    assert calls == [("EUR/CHF", "1h", "runtime")]
+    assert guard["blocked"] is False
+    assert guard["candles"]["fresh"] is True
 
 
 def test_preview_trade_submission_blocks_live_trade_when_quote_is_stale():

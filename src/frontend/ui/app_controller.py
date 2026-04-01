@@ -59,7 +59,7 @@ from storage.database import configure_database, get_database_url, init_database
 from storage.equity_repository import EquitySnapshotRepository
 from storage.market_data_repository import MarketDataRepository
 from storage.trade_audit_repository import TradeAuditRepository
-from storage.trade_repository import TradeRepository
+from storage.trade_repository import TradeRepository, derive_trade_outcome
 from strategy.strategy import Strategy
 from frontend.ui.services.trade_safety import age_seconds, format_age_label, timeframe_seconds
 
@@ -1338,7 +1338,7 @@ class AppController(QMainWindow):
                 raise
 
         self.database_mode = mode
-        self.database_url = raw_url
+        self.database_url = configured_url if mode == "remote" else ""
         self.database_connection_url = configured_url or get_database_url()
         self.market_data_repository = MarketDataRepository()
         self.trade_repository = TradeRepository()
@@ -1347,7 +1347,10 @@ class AppController(QMainWindow):
         self.agent_decision_repository = AgentDecisionRepository()
         self._rebind_storage_dependencies()
 
-        if persist:
+        should_persist_storage_settings = bool(persist) or (
+            mode == "remote" and bool(raw_url) and self.database_url != raw_url
+        )
+        if should_persist_storage_settings:
             self.settings.setValue("storage/database_mode", self.database_mode)
             self.settings.setValue("storage/database_url", self.database_url)
 
@@ -2830,6 +2833,59 @@ class AppController(QMainWindow):
                         return timestamp_value
         return None
 
+    async def _refresh_trade_guard_candle_data(self, symbol, timeframe):
+        request_candle_data = getattr(self, "request_candle_data", None)
+        if not callable(request_candle_data):
+            return None
+
+        history_limit_resolver = getattr(self, "_resolve_history_limit", None)
+        warmup_limit = 180
+        if callable(history_limit_resolver):
+            try:
+                warmup_limit = min(180, max(100, int(history_limit_resolver(180))))
+            except Exception:
+                warmup_limit = 180
+
+        try:
+            await request_candle_data(
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=warmup_limit,
+                history_scope="runtime",
+            )
+        except Exception as exc:
+            self.logger.debug("Trade guard candle refresh failed for %s %s: %s", symbol, timeframe, exc)
+
+        return self._latest_cached_candle_timestamp(symbol, timeframe=timeframe)
+
+    async def _refresh_trade_guard_orderbook(self, symbol):
+        fetch_orderbook = getattr(self, "_safe_fetch_orderbook", None)
+        if not callable(fetch_orderbook):
+            return None
+
+        try:
+            orderbook = await fetch_orderbook(symbol, limit=20)
+        except Exception as exc:
+            self.logger.debug("Trade guard orderbook refresh failed for %s: %s", symbol, exc)
+            return None
+
+        if not isinstance(orderbook, dict):
+            return None
+
+        bids = list(orderbook.get("bids") or [])
+        asks = list(orderbook.get("asks") or [])
+        if not bids and not asks:
+            return None
+
+        orderbook_buffer = getattr(self, "orderbook_buffer", None)
+        if orderbook_buffer is not None and hasattr(orderbook_buffer, "update"):
+            try:
+                orderbook_buffer.update(symbol, bids, asks)
+            except Exception:
+                self.logger.debug("Trade guard orderbook cache update failed for %s", symbol, exc_info=True)
+
+        return orderbook_buffer.get(symbol) if orderbook_buffer is not None and hasattr(orderbook_buffer, "get") else None
+
     async def _assess_trade_market_data_guard(self, symbol, *, timeframe=None, ticker=None):
         normalized_symbol = self._resolve_preferred_market_symbol(symbol) or self._normalize_market_data_symbol(symbol) or str(symbol or "").strip().upper()
         timeframe_value = str(timeframe or getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
@@ -2877,6 +2933,20 @@ class AppController(QMainWindow):
         candle_timestamp = self._latest_cached_candle_timestamp(normalized_symbol, timeframe=timeframe_value)
         candle_age_seconds = age_seconds(candle_timestamp)
         candle_fresh = candle_age_seconds is not None and candle_age_seconds <= candle_threshold_seconds
+        if not candle_fresh:
+            refreshed_candle_timestamp = await self._refresh_trade_guard_candle_data(normalized_symbol, timeframe_value)
+            refreshed_candle_age_seconds = age_seconds(refreshed_candle_timestamp)
+            refreshed_candle_fresh = (
+                refreshed_candle_age_seconds is not None
+                and refreshed_candle_age_seconds <= candle_threshold_seconds
+            )
+            if refreshed_candle_fresh or (
+                refreshed_candle_age_seconds is not None
+                and (candle_age_seconds is None or refreshed_candle_age_seconds < candle_age_seconds)
+            ):
+                candle_timestamp = refreshed_candle_timestamp
+                candle_age_seconds = refreshed_candle_age_seconds
+                candle_fresh = refreshed_candle_fresh
 
         orderbook_supported = bool(self.get_broker_capabilities().get("orderbook"))
         book_snapshot = getattr(self, "orderbook_buffer", None)
@@ -2889,6 +2959,20 @@ class AppController(QMainWindow):
             book_snapshot = None
         orderbook_age_seconds = age_seconds((book_snapshot or {}).get("updated_at"))
         orderbook_fresh = orderbook_age_seconds is not None and orderbook_age_seconds <= orderbook_threshold
+        if orderbook_supported and not orderbook_fresh:
+            refreshed_book_snapshot = await self._refresh_trade_guard_orderbook(normalized_symbol)
+            refreshed_orderbook_age_seconds = age_seconds((refreshed_book_snapshot or {}).get("updated_at"))
+            refreshed_orderbook_fresh = (
+                refreshed_orderbook_age_seconds is not None
+                and refreshed_orderbook_age_seconds <= orderbook_threshold
+            )
+            if refreshed_orderbook_fresh or (
+                refreshed_orderbook_age_seconds is not None
+                and (orderbook_age_seconds is None or refreshed_orderbook_age_seconds < orderbook_age_seconds)
+            ):
+                book_snapshot = refreshed_book_snapshot
+                orderbook_age_seconds = refreshed_orderbook_age_seconds
+                orderbook_fresh = refreshed_orderbook_fresh
 
         blocked_reasons = []
         if not quote_fresh:
@@ -8823,31 +8907,33 @@ class AppController(QMainWindow):
                 seen.add(order_id)
                 repo_meta = source_map.get(order_id, {})
                 rows.append(
-                    {
-                        "trade_db_id": repo_meta.get("trade_db_id"),
-                        "timestamp": row.get("timestamp") or repo_meta.get("timestamp") or "",
-                        "symbol": row.get("symbol") or "",
-                        "source": row.get("source") or repo_meta.get("source") or "broker",
-                        "side": row.get("side") or "",
-                        "price": row.get("average") or row.get("price") or repo_meta.get("price") or "",
-                        "size": row.get("filled") or row.get("amount") or repo_meta.get("size") or "",
-                        "order_type": row.get("type") or "",
-                        "status": row.get("status") or repo_meta.get("status") or "",
-                        "order_id": order_id,
-                        "pnl": row.get("pnl") or repo_meta.get("pnl") or "",
-                        "strategy_name": repo_meta.get("strategy_name") or "",
-                        "reason": repo_meta.get("reason") or "",
-                        "confidence": repo_meta.get("confidence") or "",
-                        "expected_price": repo_meta.get("expected_price") or "",
-                        "spread_bps": repo_meta.get("spread_bps") or "",
-                        "slippage_bps": repo_meta.get("slippage_bps") or "",
-                        "fee": repo_meta.get("fee") or "",
-                        "stop_loss": repo_meta.get("stop_loss") or "",
-                        "take_profit": repo_meta.get("take_profit") or "",
-                        "setup": repo_meta.get("setup") or "",
-                        "outcome": repo_meta.get("outcome") or "",
-                        "lessons": repo_meta.get("lessons") or "",
-                    }
+                    self._finalize_trade_history_row(
+                        {
+                            "trade_db_id": repo_meta.get("trade_db_id"),
+                            "timestamp": row.get("timestamp") or repo_meta.get("timestamp") or "",
+                            "symbol": row.get("symbol") or "",
+                            "source": row.get("source") or repo_meta.get("source") or "broker",
+                            "side": row.get("side") or "",
+                            "price": row.get("average") or row.get("price") or repo_meta.get("price") or "",
+                            "size": row.get("filled") or row.get("amount") or repo_meta.get("size") or "",
+                            "order_type": row.get("type") or "",
+                            "status": row.get("status") or repo_meta.get("status") or "",
+                            "order_id": order_id,
+                            "pnl": row.get("pnl") or repo_meta.get("pnl") or "",
+                            "strategy_name": repo_meta.get("strategy_name") or "",
+                            "reason": repo_meta.get("reason") or "",
+                            "confidence": repo_meta.get("confidence") or "",
+                            "expected_price": repo_meta.get("expected_price") or "",
+                            "spread_bps": repo_meta.get("spread_bps") or "",
+                            "slippage_bps": repo_meta.get("slippage_bps") or "",
+                            "fee": repo_meta.get("fee") or "",
+                            "stop_loss": repo_meta.get("stop_loss") or "",
+                            "take_profit": repo_meta.get("take_profit") or "",
+                            "setup": repo_meta.get("setup") or "",
+                            "outcome": repo_meta.get("outcome") or "",
+                            "lessons": repo_meta.get("lessons") or "",
+                        }
+                    )
                 )
 
         for trade in repo_rows or []:
@@ -8858,31 +8944,33 @@ class AppController(QMainWindow):
             if status not in {"filled", "closed", "canceled", "cancelled", "rejected", "expired", "failed"}:
                 continue
             rows.append(
-                {
-                    "trade_db_id": getattr(trade, "id", None),
-                    "timestamp": getattr(trade, "timestamp", "") or "",
-                    "symbol": getattr(trade, "symbol", "") or "",
-                    "source": getattr(trade, "source", "") or "",
-                    "side": getattr(trade, "side", "") or "",
-                    "price": getattr(trade, "price", "") or "",
-                    "size": getattr(trade, "quantity", "") or "",
-                    "order_type": getattr(trade, "order_type", "") or "",
-                    "status": getattr(trade, "status", "") or "",
-                    "order_id": order_id,
-                    "pnl": getattr(trade, "pnl", "") or "",
-                    "strategy_name": getattr(trade, "strategy_name", "") or "",
-                    "reason": getattr(trade, "reason", "") or "",
-                    "confidence": getattr(trade, "confidence", "") or "",
-                    "expected_price": getattr(trade, "expected_price", "") or "",
-                    "spread_bps": getattr(trade, "spread_bps", "") or "",
-                    "slippage_bps": getattr(trade, "slippage_bps", "") or "",
-                    "fee": getattr(trade, "fee", "") or "",
-                    "stop_loss": getattr(trade, "stop_loss", "") or "",
-                    "take_profit": getattr(trade, "take_profit", "") or "",
-                    "setup": getattr(trade, "setup", "") or "",
-                    "outcome": getattr(trade, "outcome", "") or "",
-                    "lessons": getattr(trade, "lessons", "") or "",
-                }
+                self._finalize_trade_history_row(
+                    {
+                        "trade_db_id": getattr(trade, "id", None),
+                        "timestamp": getattr(trade, "timestamp", "") or "",
+                        "symbol": getattr(trade, "symbol", "") or "",
+                        "source": getattr(trade, "source", "") or "",
+                        "side": getattr(trade, "side", "") or "",
+                        "price": getattr(trade, "price", "") or "",
+                        "size": getattr(trade, "quantity", "") or "",
+                        "order_type": getattr(trade, "order_type", "") or "",
+                        "status": getattr(trade, "status", "") or "",
+                        "order_id": order_id,
+                        "pnl": getattr(trade, "pnl", "") or "",
+                        "strategy_name": getattr(trade, "strategy_name", "") or "",
+                        "reason": getattr(trade, "reason", "") or "",
+                        "confidence": getattr(trade, "confidence", "") or "",
+                        "expected_price": getattr(trade, "expected_price", "") or "",
+                        "spread_bps": getattr(trade, "spread_bps", "") or "",
+                        "slippage_bps": getattr(trade, "slippage_bps", "") or "",
+                        "fee": getattr(trade, "fee", "") or "",
+                        "stop_loss": getattr(trade, "stop_loss", "") or "",
+                        "take_profit": getattr(trade, "take_profit", "") or "",
+                        "setup": getattr(trade, "setup", "") or "",
+                        "outcome": getattr(trade, "outcome", "") or "",
+                        "lessons": getattr(trade, "lessons", "") or "",
+                    }
+                )
             )
 
         rows.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
@@ -9045,6 +9133,20 @@ class AppController(QMainWindow):
             return value.astimezone(timezone.utc).isoformat()
         return str(value)
 
+    def _finalize_trade_history_row(self, row):
+        if not isinstance(row, dict):
+            return row
+        finalized = dict(row)
+        finalized["outcome"] = (
+            derive_trade_outcome(
+                outcome=finalized.get("outcome"),
+                pnl=finalized.get("pnl"),
+                status=finalized.get("status"),
+            )
+            or ""
+        )
+        return finalized
+
     def _normalize_broker_trade_history_row(self, row, repo_meta=None):
         if not isinstance(row, dict):
             return None
@@ -9123,7 +9225,7 @@ class AppController(QMainWindow):
         }
         if not normalized["symbol"] and not normalized["order_id"]:
             return None
-        return normalized
+        return self._finalize_trade_history_row(normalized)
 
     def _trade_history_dedupe_key(self, row):
         if not isinstance(row, dict):
@@ -9390,7 +9492,8 @@ class AppController(QMainWindow):
             for item in recent:
                 pnl = item.get("pnl")
                 pnl_text = "-" if pnl is None else f"{float(pnl):.2f}"
-                recent_bits.append(f"{item.get('symbol')} {item.get('side')} {item.get('status')} pnl {pnl_text}")
+                outcome_text = str(item.get("outcome") or item.get("status") or "").strip()
+                recent_bits.append(f"{item.get('symbol')} {item.get('side')} {outcome_text} pnl {pnl_text}")
             lines.append("Recent trades: " + " ; ".join(recent_bits))
         lines.append("Use Tools -> Closed Journal and Journal Review for the detailed history and review.")
         return "\n".join(lines)

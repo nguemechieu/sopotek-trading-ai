@@ -39,6 +39,7 @@ class MockBroker:
         params=None,
         stop_loss=None,
         take_profit=None,
+        stop_price=None,
     ):
         return {
             "id": "order-123",
@@ -76,6 +77,7 @@ class TrackingBroker(MockBroker):
         params=None,
         stop_loss=None,
         take_profit=None,
+        stop_price=None,
     ):
         return {
             "id": "order-track-1",
@@ -357,6 +359,34 @@ def test_trade_repository_round_trips_trade_journal_fields():
     assert stored.setup == "Retest after breakout candle close"
     assert stored.outcome == "Strong win"
     assert stored.lessons == "Wait for retest instead of chasing first impulse."
+
+
+def test_trade_repository_derives_and_preserves_closed_trade_outcome():
+    repo = TradeRepository()
+
+    created = repo.save_or_update_trade(
+        symbol="BTC/USDT",
+        side="SELL",
+        quantity=0.25,
+        price=101.5,
+        exchange="paper",
+        order_id="close-1",
+        status="closed",
+        pnl=12.75,
+    )
+    refreshed = repo.save_or_update_trade(
+        symbol="BTC/USDT",
+        side="SELL",
+        quantity=0.25,
+        price=101.5,
+        exchange="paper",
+        order_id="close-1",
+        status="closed",
+    )
+
+    assert created.outcome == "Win"
+    assert refreshed.outcome == "Win"
+    assert refreshed.pnl == 12.75
 
 
 def test_trade_repository_filters_trade_history_by_exchange():

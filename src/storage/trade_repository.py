@@ -1,8 +1,43 @@
 from datetime import datetime, timezone
+import math
 
 from sqlalchemy import Column, DateTime, Float, Integer, String, Text, select
 
 from storage import database as storage_db
+
+
+def _safe_outcome_float(value):
+    if value in (None, "", "-"):
+        return None
+    try:
+        numeric = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return numeric
+
+
+def derive_trade_outcome(outcome=None, pnl=None, status=None):
+    explicit = str(outcome or "").strip()
+    if explicit:
+        return explicit
+
+    normalized_status = str(status or "").strip().lower()
+    normalized_pnl = _safe_outcome_float(pnl)
+    if normalized_pnl is not None:
+        if normalized_pnl > 0:
+            return "Win"
+        if normalized_pnl < 0:
+            return "Loss"
+        if normalized_status in {"filled", "closed"}:
+            return "Flat"
+
+    if normalized_status in {"rejected", "failed"}:
+        return "Rejected"
+    if normalized_status in {"canceled", "cancelled", "expired"}:
+        return "Canceled"
+    return normalized_status.title() if normalized_status else None
 
 
 class Trade(storage_db.Base):
@@ -46,6 +81,15 @@ class TradeRepository:
 
     def save_trade(self, symbol, side, quantity, price, exchange=None, order_id=None, order_type=None, status=None, timestamp=None, source=None, pnl=None, strategy_name=None, reason=None, confidence=None, expected_price=None, spread_bps=None, slippage_bps=None, fee=None, stop_loss=None, take_profit=None, setup=None, outcome=None, lessons=None, timeframe=None, signal_source_agent=None, consensus_status=None, adaptive_weight=None, adaptive_score=None):
         """Persist a new trade record into the database."""
+        normalized_status = self._normalize_text(status)
+        normalized_pnl = self._normalize_float(pnl)
+        normalized_outcome = self._normalize_text(
+            derive_trade_outcome(
+                outcome=self._normalize_text(outcome),
+                pnl=normalized_pnl,
+                status=normalized_status,
+            )
+        )
         trade = Trade(
             exchange=self._normalize_exchange(exchange),
             order_id=self._normalize_text(order_id),
@@ -53,10 +97,10 @@ class TradeRepository:
             side=self._normalize_text(side),
             source=self._normalize_text(source),
             order_type=self._normalize_text(order_type),
-            status=self._normalize_text(status),
+            status=normalized_status,
             quantity=self._normalize_float(quantity),
             price=self._normalize_float(price),
-            pnl=self._normalize_float(pnl),
+            pnl=normalized_pnl,
             strategy_name=self._normalize_text(strategy_name),
             reason=self._normalize_text(reason),
             confidence=self._normalize_float(confidence),
@@ -67,7 +111,7 @@ class TradeRepository:
             stop_loss=self._normalize_float(stop_loss),
             take_profit=self._normalize_float(take_profit),
             setup=self._normalize_text(setup),
-            outcome=self._normalize_text(outcome),
+            outcome=normalized_outcome,
             lessons=self._normalize_text(lessons),
             timeframe=self._normalize_text(timeframe),
             signal_source_agent=self._normalize_text(signal_source_agent),
@@ -87,6 +131,9 @@ class TradeRepository:
         """Insert a trade record or update an existing trade with the same order ID."""
         normalized_exchange = self._normalize_exchange(exchange)
         normalized_order_id = self._normalize_text(order_id)
+        normalized_status = self._normalize_text(status)
+        normalized_pnl = self._normalize_float(pnl)
+        normalized_outcome = self._normalize_text(outcome)
 
         with storage_db.SessionLocal() as session:
             trade = None
@@ -101,16 +148,21 @@ class TradeRepository:
                 trade = Trade()
                 session.add(trade)
 
+            existing_status = getattr(trade, "status", None)
+            existing_pnl = getattr(trade, "pnl", None)
+            existing_outcome = getattr(trade, "outcome", None)
+
             trade.exchange = normalized_exchange
             trade.order_id = normalized_order_id
             trade.symbol = self._normalize_text(symbol)
             trade.side = self._normalize_text(side)
             trade.source = self._normalize_text(source)
             trade.order_type = self._normalize_text(order_type)
-            trade.status = self._normalize_text(status)
+            trade.status = normalized_status if normalized_status is not None else existing_status
             trade.quantity = self._normalize_float(quantity)
             trade.price = self._normalize_float(price)
-            trade.pnl = self._normalize_float(pnl)
+            if normalized_pnl is not None:
+                trade.pnl = normalized_pnl
             trade.strategy_name = self._normalize_text(strategy_name)
             trade.reason = self._normalize_text(reason)
             trade.confidence = self._normalize_float(confidence)
@@ -121,7 +173,13 @@ class TradeRepository:
             trade.stop_loss = self._normalize_float(stop_loss)
             trade.take_profit = self._normalize_float(take_profit)
             trade.setup = self._normalize_text(setup)
-            trade.outcome = self._normalize_text(outcome)
+            trade.outcome = self._normalize_text(
+                derive_trade_outcome(
+                    outcome=normalized_outcome or existing_outcome,
+                    pnl=normalized_pnl if normalized_pnl is not None else existing_pnl,
+                    status=normalized_status or existing_status,
+                )
+            )
             trade.lessons = self._normalize_text(lessons)
             trade.timeframe = self._normalize_text(timeframe)
             trade.signal_source_agent = self._normalize_text(signal_source_agent)
