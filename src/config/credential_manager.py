@@ -1,17 +1,31 @@
 import json
 import keyring
 import traceback
+from keyring.errors import NoKeyringError
 
 from security.credential_manager import FileCredentialManager
 
 
 _credential_manager_instance = None
+_legacy_keyring_disabled = False
 
 
 class CredentialManager:
 
     SERVICE_NAME = "SopotekTradingAI"
     ACCOUNT_INDEX = "accounts_index"
+
+    @staticmethod
+    def _legacy_keyring_enabled():
+        return not _legacy_keyring_disabled
+
+    @staticmethod
+    def _handle_legacy_keyring_exception(exc):
+        global _legacy_keyring_disabled
+        if isinstance(exc, NoKeyringError):
+            _legacy_keyring_disabled = True
+            return
+        traceback.print_exc()
 
     @staticmethod
     def _manager():
@@ -22,6 +36,8 @@ class CredentialManager:
 
     @staticmethod
     def _legacy_read_account_index():
+        if not CredentialManager._legacy_keyring_enabled():
+            return []
         try:
             data = keyring.get_password(
                 CredentialManager.SERVICE_NAME,
@@ -31,23 +47,27 @@ class CredentialManager:
                 return []
             parsed = json.loads(data)
             return parsed if isinstance(parsed, list) else []
-        except Exception:
-            traceback.print_exc()
+        except Exception as exc:
+            CredentialManager._handle_legacy_keyring_exception(exc)
             return []
 
     @staticmethod
     def _legacy_write_account_index(accounts):
+        if not CredentialManager._legacy_keyring_enabled():
+            return
         try:
             keyring.set_password(
                 CredentialManager.SERVICE_NAME,
                 CredentialManager.ACCOUNT_INDEX,
                 json.dumps(list(accounts or []))
             )
-        except Exception:
-            traceback.print_exc()
+        except Exception as exc:
+            CredentialManager._handle_legacy_keyring_exception(exc)
 
     @staticmethod
     def _legacy_load_account(account_name: str):
+        if not CredentialManager._legacy_keyring_enabled():
+            return None
         try:
             data = keyring.get_password(
                 CredentialManager.SERVICE_NAME,
@@ -56,19 +76,21 @@ class CredentialManager:
             if not data:
                 return None
             return json.loads(data)
-        except Exception:
-            traceback.print_exc()
+        except Exception as exc:
+            CredentialManager._handle_legacy_keyring_exception(exc)
             return None
 
     @staticmethod
     def _legacy_delete_account(account_name):
+        if not CredentialManager._legacy_keyring_enabled():
+            return
         try:
             keyring.delete_password(
                 CredentialManager.SERVICE_NAME,
                 account_name
             )
-        except Exception:
-            traceback.print_exc()
+        except Exception as exc:
+            CredentialManager._handle_legacy_keyring_exception(exc)
 
     @staticmethod
     def _migrate_legacy_account(account_name):

@@ -9364,10 +9364,11 @@ class AppController(QMainWindow):
         if stats.get("avg_pnl") is not None or stats.get("profit_factor") is not None:
             profit_factor = stats.get("profit_factor")
             pf_text = "-" if profit_factor is None else ("infinite" if profit_factor == float("inf") else f"{float(profit_factor):.2f}")
+            avg_slippage = stats.get("avg_slippage")
+            avg_slippage_text = "-" if avg_slippage is None else f"{float(avg_slippage):.2f} bps"
             lines.append(
                 f"Avg trade: {float(stats.get('avg_pnl') or 0.0):.2f} | Profit factor: {pf_text} | "
-                f"Fees: {float(stats.get('fees', 0.0) or 0.0):.2f} | Avg slippage: "
-                f"{('-' if stats.get('avg_slippage') is None else f'{float(stats.get('avg_slippage')):.2f} bps')}"
+                f"Fees: {float(stats.get('fees', 0.0) or 0.0):.2f} | Avg slippage: {avg_slippage_text}"
             )
         if source_parts:
             lines.append("Sources: " + " | ".join(source_parts[:4]))

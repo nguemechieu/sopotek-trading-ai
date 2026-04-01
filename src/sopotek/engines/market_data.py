@@ -167,3 +167,41 @@ class MarketDataEngine:
         payload = dict(tick or {})
         payload["symbol"] = payload.get("symbol", symbol)
         await self.bus.publish(EventType.MARKET_TICK, payload, priority=20, source="market_data_engine")
+
+    async def fetch_history(self, symbol: str, *, timeframe: str = "1m", limit: int = 200) -> list[Candle]:
+        rows = await self.broker.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        candles: list[Candle] = []
+        seconds = timeframe_to_seconds(timeframe)
+        for row in rows or []:
+            try:
+                timestamp_ms, open_, high, low, close, volume = row[:6]
+            except Exception:
+                continue
+            start = _normalize_timestamp(float(timestamp_ms) / 1000.0 if float(timestamp_ms) > 1e11 else timestamp_ms)
+            candles.append(
+                Candle(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    open=float(open_),
+                    high=float(high),
+                    low=float(low),
+                    close=float(close),
+                    volume=float(volume),
+                    start=start,
+                    end=start + timedelta(seconds=seconds),
+                )
+            )
+        return candles
+
+    async def publish_history(self, symbol: str, *, timeframe: str = "1m", limit: int = 200) -> list[Candle]:
+        candles = await self.fetch_history(symbol, timeframe=timeframe, limit=limit)
+        for candle in candles:
+            await self.bus.publish(EventType.HISTORICAL_CANDLE, candle, priority=35, source="market_data_engine")
+            await self.bus.publish(EventType.CANDLE, candle, priority=40, source="market_data_engine")
+            await self.bus.publish(
+                EventType.MARKET_TICK,
+                {"symbol": candle.symbol, "price": candle.close, "timestamp": candle.end},
+                priority=20,
+                source="market_data_engine",
+            )
+        return candles

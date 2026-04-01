@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from cryptography.fernet import Fernet
+from keyring.errors import NoKeyringError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -24,6 +25,17 @@ class FakeKeyring:
 
     def delete_password(self, service, username):
         self.store.pop((service, username), None)
+
+
+class FailingKeyring:
+    def get_password(self, service, username):
+        raise NoKeyringError("no backend")
+
+    def set_password(self, service, username, password):
+        raise NoKeyringError("no backend")
+
+    def delete_password(self, service, username):
+        raise NoKeyringError("no backend")
 
 
 def test_save_account_moves_latest_profile_to_front(monkeypatch, tmp_path):
@@ -116,3 +128,23 @@ def test_list_accounts_migrates_legacy_keyring_profiles(monkeypatch, tmp_path):
     loaded = CredentialManager.load_account("coinbase_main")
     assert loaded["broker"]["api_key"] == "organizations/test/apiKeys/key-1"
     assert fake_keyring.get_password(CredentialManager.SERVICE_NAME, "coinbase_main") is None
+
+
+def test_list_accounts_ignores_missing_system_keyring_backend(monkeypatch, tmp_path):
+    manager = FileCredentialManager(
+        encryption=EncryptionManager(Fernet.generate_key()),
+        path=tmp_path / "credentials.json",
+    )
+    manager.save_account("paper_demo", {"broker": {"exchange": "paper"}})
+    monkeypatch.setattr("config.credential_manager.keyring", FailingKeyring())
+    monkeypatch.setattr(credential_manager_module, "_credential_manager_instance", manager)
+    monkeypatch.setattr(credential_manager_module, "_legacy_keyring_disabled", False)
+
+    printed = []
+    monkeypatch.setattr(credential_manager_module.traceback, "print_exc", lambda: printed.append("traceback"))
+
+    accounts = CredentialManager.list_accounts()
+
+    assert accounts == ["paper_demo"]
+    assert printed == []
+    assert credential_manager_module._legacy_keyring_disabled is True

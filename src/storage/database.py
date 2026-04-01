@@ -128,6 +128,7 @@ def init_database():
     from storage import equity_repository  # noqa: F401
     from storage import market_data_repository  # noqa: F401
     from storage import paper_trade_learning_repository  # noqa: F401
+    from sopotek.storage import repository as sopotek_quant_repository  # noqa: F401
     from storage import trade_audit_repository  # noqa: F401
     from storage import trade_repository  # noqa: F401
 

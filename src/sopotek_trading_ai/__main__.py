@@ -1,9 +1,7 @@
-"""Package entrypoint for basic startup validation."""
+"""Package entrypoint for the desktop runtime."""
 
-
-def main():
-    print("sopotek_trading_ai package is installed and importable.")
+from .launcher import main
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

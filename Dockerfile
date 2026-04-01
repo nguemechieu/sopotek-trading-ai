@@ -11,6 +11,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
+    fluxbox \
     git \
     libasound2 \
     libdbus-1-3 \
@@ -43,15 +44,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 \
     libxkbcommon-x11-0 \
     libxtst6 \
+    novnc \
+    websockify \
+    x11-utils \
+    x11vnc \
+    xauth \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
 COPY main.py ./main.py
+COPY scripts ./scripts
 COPY src ./src
 
 RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install ".[ui,brokers,ml]"
 
+RUN chmod +x /app/scripts/docker/start_http_ui.sh
+
 RUN mkdir -p /app/data /app/logs /app/output
 
-CMD ["python", "src/main.py"]
+CMD ["python", "-m", "sopotek_trading"]

@@ -12,6 +12,7 @@ class PortfolioEngine:
         self.cash = float(starting_cash)
         self.peak_equity = float(starting_cash)
         self.positions: dict[str, Position] = {}
+        self.latest_snapshot = PortfolioSnapshot(cash=self.cash, equity=self.cash)
         self.bus.subscribe(EventType.ORDER_FILLED, self._on_fill)
         self.bus.subscribe(EventType.MARKET_TICK, self._on_tick)
 
@@ -22,7 +23,9 @@ class PortfolioEngine:
         if not isinstance(report, ExecutionReport):
             report = ExecutionReport(**dict(report))
         price = float(report.fill_price or report.requested_price or 0.0)
-        quantity = float(report.quantity)
+        quantity = float(report.filled_quantity if report.filled_quantity is not None else report.quantity)
+        if quantity <= 0:
+            return
         signed_quantity = quantity if str(report.side).lower() == "buy" else -quantity
         position = self.positions.setdefault(report.symbol, Position(symbol=report.symbol))
 
@@ -76,4 +79,5 @@ class PortfolioEngine:
             unrealized_pnl=unrealized,
             drawdown_pct=drawdown_pct,
         )
+        self.latest_snapshot = snapshot
         await self.bus.publish(EventType.PORTFOLIO_SNAPSHOT, snapshot, priority=90, source="portfolio_engine")

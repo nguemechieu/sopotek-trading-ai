@@ -13,6 +13,7 @@ import asyncio
 
 import html
 import json
+import os
 from pathlib import Path
 import random
 import re
@@ -6774,6 +6775,8 @@ class Terminal(QMainWindow):
         """
 
     def _trader_tv_web_view_class(self):
+        if str(os.getenv("SOPOTEK_DISABLE_WEBENGINE") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            return None
         try:
             from PySide6.QtWebEngineWidgets import QWebEngineView  # type: ignore
         except Exception:

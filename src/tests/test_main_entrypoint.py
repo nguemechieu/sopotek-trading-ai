@@ -6,6 +6,8 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main as app_main
+from sopotek_trading import main as compat_main
+from sopotek_trading_ai import launcher as package_launcher
 
 
 def test_qt_windows_noise_filter_matches_known_console_noise():
@@ -75,3 +77,99 @@ def test_install_asyncio_exception_filter_delegates_non_dns_errors_to_previous_h
     loop.installed_handler(loop, payload)
 
     assert forwarded == [(loop, payload)]
+
+
+def test_configure_qt_platform_defaults_to_offscreen_without_linux_display(monkeypatch):
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr(app_main.sys, "platform", "linux")
+
+    selected = app_main._configure_qt_platform()
+
+    assert selected == "offscreen"
+    assert app_main.os.environ["QT_QPA_PLATFORM"] == "offscreen"
+
+
+def test_configure_qt_platform_preserves_explicit_setting(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "xcb")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr(app_main.sys, "platform", "linux")
+
+    selected = app_main._configure_qt_platform()
+
+    assert selected == "xcb"
+    assert app_main.os.environ["QT_QPA_PLATFORM"] == "xcb"
+
+
+def test_configure_qt_platform_leaves_gui_mode_when_display_exists(monkeypatch):
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr(app_main.sys, "platform", "linux")
+
+    selected = app_main._configure_qt_platform()
+
+    assert selected is None
+    assert "QT_QPA_PLATFORM" not in app_main.os.environ
+
+
+def test_configure_browser_qt_runtime_sets_software_container_defaults(monkeypatch):
+    monkeypatch.setenv("SOPOTEK_HTTP_UI", "1")
+    monkeypatch.delenv("SOPOTEK_DISABLE_WEBENGINE", raising=False)
+    monkeypatch.delenv("LIBGL_ALWAYS_SOFTWARE", raising=False)
+    monkeypatch.delenv("QT_OPENGL", raising=False)
+    monkeypatch.delenv("QT_QUICK_BACKEND", raising=False)
+    monkeypatch.delenv("QSG_RHI_BACKEND", raising=False)
+    monkeypatch.delenv("QT_XCB_GL_INTEGRATION", raising=False)
+    monkeypatch.delenv("QTWEBENGINE_DISABLE_SANDBOX", raising=False)
+    monkeypatch.delenv("QTWEBENGINE_CHROMIUM_FLAGS", raising=False)
+    monkeypatch.setattr(app_main.sys, "platform", "linux")
+
+    enabled = app_main._configure_browser_qt_runtime()
+
+    assert enabled is True
+    assert app_main.os.environ["LIBGL_ALWAYS_SOFTWARE"] == "1"
+    assert app_main.os.environ["QT_OPENGL"] == "software"
+    assert app_main.os.environ["QT_QUICK_BACKEND"] == "software"
+    assert app_main.os.environ["QSG_RHI_BACKEND"] == "software"
+    assert app_main.os.environ["QT_XCB_GL_INTEGRATION"] == "none"
+    assert app_main.os.environ["QTWEBENGINE_DISABLE_SANDBOX"] == "1"
+    flags = app_main.os.environ["QTWEBENGINE_CHROMIUM_FLAGS"]
+    assert "--disable-gpu" in flags
+    assert "--disable-features=Vulkan,VulkanFromANGLE,UseSkiaRenderer" in flags
+
+
+def test_configure_browser_qt_runtime_is_noop_without_browser_env(monkeypatch):
+    monkeypatch.delenv("SOPOTEK_HTTP_UI", raising=False)
+    monkeypatch.delenv("SOPOTEK_DISABLE_WEBENGINE", raising=False)
+    monkeypatch.setattr(app_main.sys, "platform", "linux")
+
+    enabled = app_main._configure_browser_qt_runtime()
+
+    assert enabled is False
+
+
+def test_packaged_launcher_delegates_to_desktop_entrypoint(monkeypatch):
+    calls = []
+    fake_module = SimpleNamespace(main=lambda argv=None: calls.append(argv) or 7)
+    monkeypatch.setattr(package_launcher, "_load_desktop_entrypoint", lambda: fake_module)
+
+    assert package_launcher.main(["--headless"]) == 7
+    assert calls == [["--headless"]]
+
+
+def test_packaged_launcher_requires_callable_main(monkeypatch):
+    monkeypatch.setattr(package_launcher, "_load_desktop_entrypoint", lambda: SimpleNamespace())
+
+    try:
+        package_launcher.main()
+    except RuntimeError as exc:
+        assert "callable main" in str(exc)
+    else:
+        raise AssertionError("launcher should reject entrypoints without a callable main")
+
+
+def test_compat_module_exports_packaged_launcher():
+    assert compat_main is package_launcher.main

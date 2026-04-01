@@ -5,6 +5,7 @@ from abc import ABC
 from collections import defaultdict
 from typing import Any
 
+from sopotek.agents.strategy_agents import SignalAgent
 from sopotek.core.event_bus import AsyncEventBus
 from sopotek.core.event_types import EventType
 from sopotek.core.models import Signal
@@ -101,3 +102,22 @@ class StrategyEngine:
         strategies = list(payload.get("strategies") or [])
         if symbol and strategies:
             self.registry.set_active(symbol, strategies)
+
+
+class MultiAgentStrategyEngine:
+    """Coordinates event-driven strategy agents that publish signals directly."""
+
+    def __init__(self, event_bus: AsyncEventBus) -> None:
+        self.bus = event_bus
+        self._agents: dict[str, SignalAgent] = {}
+
+    def register(self, agent: SignalAgent) -> SignalAgent:
+        self._agents[agent.name] = agent
+        agent.attach(self.bus)
+        return agent
+
+    def get(self, name: str) -> SignalAgent | None:
+        return self._agents.get(str(name))
+
+    def list_agents(self) -> list[SignalAgent]:
+        return list(self._agents.values())

@@ -5,10 +5,14 @@ from sopotek.core.models import (
     AnalystInsight,
     Candle,
     ExecutionReport,
+    FeatureVector,
+    ModelDecision,
     OrderBookSnapshot,
     OrderIntent,
+    PerformanceMetrics,
     PortfolioSnapshot,
     Signal,
+    TradeFeedback,
     TradeReview,
 )
 
@@ -17,9 +21,13 @@ __all__ = [
     "Candle",
     "EventType",
     "ExecutionReport",
+    "FeatureVector",
+    "ModelDecision",
     "OrderBookSnapshot",
     "OrderIntent",
+    "PerformanceMetrics",
     "PortfolioSnapshot",
     "Signal",
+    "TradeFeedback",
     "TradeReview",
 ]

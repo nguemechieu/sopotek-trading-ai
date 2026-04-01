@@ -103,6 +103,7 @@ class TelegramService:
         pnl = trade.get("pnl", "-")
         order_id = trade.get("order_id", trade.get("id", "-"))
         timestamp = trade.get("timestamp") or datetime.utcnow().isoformat()
+        reason_line = f"Reason: <code>{html.escape(reason)}</code>\n" if reason else ""
         message = (
             "<b>Trading Activity</b>\n"
             f"Symbol: <code>{symbol}</code>\n"
@@ -111,7 +112,7 @@ class TelegramService:
             f"Price: <code>{price}</code>\n"
             f"Size: <code>{size}</code>\n"
             f"PnL: <code>{pnl}</code>\n"
-            f"{f'Reason: <code>{html.escape(reason)}</code>\\n' if reason else ''}"
+            f"{reason_line}"
             f"Order ID: <code>{order_id}</code>\n"
             f"Time: <code>{timestamp}</code>"
         )

@@ -86,6 +86,10 @@ class ExecutionReport:
     latency_ms: float
     slippage_bps: float = 0.0
     strategy_name: str = "unknown"
+    filled_quantity: float | None = None
+    remaining_quantity: float = 0.0
+    partial: bool = False
+    fee: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=utcnow)
 
@@ -129,5 +133,65 @@ class AnalystInsight:
     momentum: float = 0.0
     volatility: float = 1.0
     preferred_strategy: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=utcnow)
+
+
+@dataclass(slots=True)
+class FeatureVector:
+    symbol: str
+    timeframe: str
+    values: dict[str, float] = field(default_factory=dict)
+    strategy_name: str = "market"
+    close: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=utcnow)
+
+
+@dataclass(slots=True)
+class ModelDecision:
+    symbol: str
+    strategy_name: str
+    model_name: str
+    probability: float
+    threshold: float
+    approved: bool
+    side: str = ""
+    features: dict[str, float] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=utcnow)
+
+
+@dataclass(slots=True)
+class TradeFeedback:
+    symbol: str
+    strategy_name: str
+    side: str
+    quantity: float
+    entry_price: float
+    exit_price: float
+    pnl: float
+    success: bool
+    timeframe: str = "1m"
+    model_name: str | None = None
+    model_probability: float | None = None
+    features: dict[str, float] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=utcnow)
+
+
+@dataclass(slots=True)
+class PerformanceMetrics:
+    total_trades: int = 0
+    closed_trades: int = 0
+    win_rate: float = 0.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    equity: float = 0.0
+    gross_exposure: float = 0.0
+    net_exposure: float = 0.0
+    max_drawdown_pct: float = 0.0
+    sharpe_like: float = 0.0
+    symbols: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=utcnow)

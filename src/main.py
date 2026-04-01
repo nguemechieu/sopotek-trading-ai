@@ -18,6 +18,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 
 _FAULTHANDLER_STATE: dict[str, TextIO | None] = {"stream": None}
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def _src_root() -> Path:
@@ -65,6 +66,68 @@ def _load_app_controller() -> type[Any]:
     _ensure_src_on_path()
     module = importlib.import_module("frontend.ui.app_controller")
     return module.AppController
+
+
+def _configure_qt_platform() -> str | None:
+    """Choose a safe Qt platform plugin for the current environment."""
+    configured = str(os.getenv("QT_QPA_PLATFORM") or "").strip()
+    if configured:
+        return configured
+
+    has_display = bool(str(os.getenv("DISPLAY") or "").strip() or str(os.getenv("WAYLAND_DISPLAY") or "").strip())
+    if sys.platform.startswith("linux") and not has_display:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        return "offscreen"
+
+    return None
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name) or "").strip().lower() in _TRUE_ENV_VALUES
+
+
+def _append_chromium_flag(existing_flags: str, flag: str) -> str:
+    text = str(existing_flags or "").strip()
+    normalized_flag = str(flag or "").strip()
+    if not normalized_flag:
+        return text
+    parts = text.split()
+    if normalized_flag in parts:
+        return text
+    return f"{text} {normalized_flag}".strip()
+
+
+def _configure_browser_qt_runtime() -> bool:
+    """Force safer software-only Qt settings for browser/Xvfb container runs."""
+    if not sys.platform.startswith("linux"):
+        return False
+    if not (_env_truthy("SOPOTEK_HTTP_UI") or _env_truthy("SOPOTEK_DISABLE_WEBENGINE")):
+        return False
+
+    defaults = {
+        "LIBGL_ALWAYS_SOFTWARE": "1",
+        "QT_OPENGL": "software",
+        "QT_QUICK_BACKEND": "software",
+        "QSG_RHI_BACKEND": "software",
+        "QT_XCB_GL_INTEGRATION": "none",
+        "QTWEBENGINE_DISABLE_SANDBOX": "1",
+    }
+    for key, value in defaults.items():
+        os.environ.setdefault(key, value)
+
+    chromium_flags = str(os.getenv("QTWEBENGINE_CHROMIUM_FLAGS") or "").strip()
+    for flag in (
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-gpu-compositing",
+        "--disable-gpu-rasterization",
+        "--disable-dev-shm-usage",
+        "--disable-features=Vulkan,VulkanFromANGLE,UseSkiaRenderer",
+    ):
+        chromium_flags = _append_chromium_flag(chromium_flags, flag)
+    if chromium_flags:
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = chromium_flags
+    return True
 
 
 def _install_faulthandler() -> None:
@@ -224,6 +287,17 @@ def _install_qt_message_filter() -> None:
 def main(argv: list[str] | None = None) -> int:
     _install_faulthandler()
     _install_qt_message_filter()
+    browser_runtime = _configure_browser_qt_runtime()
+    platform_plugin = _configure_qt_platform()
+    if platform_plugin == "offscreen":
+        sys.stderr.write(
+            "No Linux display detected; using Qt offscreen mode. "
+            "Set DISPLAY or WAYLAND_DISPLAY and override QT_QPA_PLATFORM if you need an interactive GUI.\n"
+        )
+    elif browser_runtime:
+        sys.stderr.write(
+            "Browser container mode detected; forcing software Qt rendering and disabling embedded WebEngine panels.\n"
+        )
 
     app = QtWidgets.QApplication(sys.argv if argv is None else list(argv))
     app.setStyle("Fusion")

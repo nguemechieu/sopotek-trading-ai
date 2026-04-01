@@ -322,6 +322,15 @@ def test_learning_windows_use_market_snapshot_in_text_payload():
     assert "Ready-For-Live Checklist" in captured[0]["html"]
 
 
+def test_trader_tv_web_view_class_respects_disable_webengine_env(monkeypatch):
+    fake = SimpleNamespace()
+    monkeypatch.setenv("SOPOTEK_DISABLE_WEBENGINE", "1")
+
+    result = Terminal._trader_tv_web_view_class(fake)
+
+    assert result is None
+
+
 def test_create_toolbar_keeps_symbol_and_screenshot_on_same_row_and_drops_toolbar_timeframes():
     _app()
     terminal = _ToolbarTerminal()

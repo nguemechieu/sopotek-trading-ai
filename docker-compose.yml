@@ -38,13 +38,14 @@ services:
       QT_X11_NO_MITSHM: "1"
       DISPLAY: ${DISPLAY:-}
     volumes:
+      - ./credentials.json:/app/credentials.json
       - ./data:/app/data
       - ./logs:/app/logs
       - ./output:/app/output
       - ./.env:/app/.env:ro
     stdin_open: true
     tty: true
-    command: python src/main.py
+    command: python -m sopotek_trading
 
   app-headless:
     build:
@@ -61,13 +62,55 @@ services:
       SOPOTEK_DATABASE_URL: mysql+pymysql://${MYSQL_USER:-sopotek}:${MYSQL_PASSWORD:-sopotek_local}@mysql:3306/${MYSQL_DATABASE:-sopotek_trading}?charset=utf8mb4
       QT_QPA_PLATFORM: offscreen
     volumes:
+      - ./credentials.json:/app/credentials.json
       - ./data:/app/data
       - ./logs:/app/logs
       - ./output:/app/output
       - ./.env:/app/.env:ro
     profiles:
       - headless
-    command: python src/main.py
+    command: python -m sopotek_trading
+
+  app-http:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sopotek-trading-ai:latest
+    container_name: sopotek_trading_app_http
+    working_dir: /app
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      PYTHONPATH: /app/src
+      SOPOTEK_DATABASE_URL: mysql+pymysql://${MYSQL_USER:-sopotek}:${MYSQL_PASSWORD:-sopotek_local}@mysql:3306/${MYSQL_DATABASE:-sopotek_trading}?charset=utf8mb4
+      SOPOTEK_HTTP_UI: "1"
+      SOPOTEK_DISABLE_WEBENGINE: "1"
+      DISPLAY: :99
+      QT_QPA_PLATFORM: xcb
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      QT_OPENGL: software
+      QT_QUICK_BACKEND: software
+      QSG_RHI_BACKEND: software
+      QT_XCB_GL_INTEGRATION: none
+      QTWEBENGINE_DISABLE_SANDBOX: "1"
+      QTWEBENGINE_CHROMIUM_FLAGS: --no-sandbox --disable-gpu --disable-gpu-compositing --disable-gpu-rasterization --disable-dev-shm-usage --disable-features=Vulkan,VulkanFromANGLE,UseSkiaRenderer
+      SCREEN_WIDTH: ${SCREEN_WIDTH:-1600}
+      SCREEN_HEIGHT: ${SCREEN_HEIGHT:-900}
+      SCREEN_DEPTH: ${SCREEN_DEPTH:-24}
+      NOVNC_PORT: 6080
+      VNC_PORT: 5900
+    volumes:
+      - ./credentials.json:/app/credentials.json
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./output:/app/output
+      - ./.env:/app/.env:ro
+    ports:
+      - "127.0.0.1:${APP_HTTP_PORT:-6080}:6080"
+    profiles:
+      - browser
+    command: /app/scripts/docker/start_http_ui.sh
 
 volumes:
   mysql_data:

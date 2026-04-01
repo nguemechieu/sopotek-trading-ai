@@ -4,7 +4,11 @@
   <img alt="Sopotek Trading AI logo" src="src/assets/logo.png" width="170" height="170">
 </p>
 
-Sopotek Trading AI is a desktop trading workstation built by Sopotek Corporation. It combines broker connectivity, live charting, manual and AI-assisted execution, order and position tracking, backtesting, operational safety tooling, Telegram integration, and OpenAI-assisted workflows in one PySide6 application.
+Sopotek Trading AI is a next-generation trading workstation engineered by Sopotek Corporation to bridge the gap between retail platforms and institutional trading systems.
+
+The platform combines real-time market connectivity, AI-driven decision support, execution infrastructure, and risk-aware automation into a single desktop environment.
+
+With integrated backtesting, multi-asset support, and intelligent workflow automation, Sopotek empowers traders to scale from manual strategies to fully autonomous trading systems.
 
 ## Version And Status
 
@@ -134,6 +138,9 @@ python main.py
 The repository root `main.py` is the recommended launcher from the workspace root.
 It bootstraps the desktop app and delegates to the real entry point at `src/main.py`.
 
+For one-click launch on Windows, double-click `Launch Sopotek Trading AI.cmd`.
+That launcher uses the repo's vendored desktop dependencies, starts the UI on the host machine, and writes timestamped startup logs under `logs/`. The newest log file paths are recorded in `logs/host-ui-latest.txt`.
+
 ### 3. Start Safely
 1. Open the dashboard.
 2. Choose broker type, exchange, and mode.
@@ -246,6 +253,21 @@ Run the local MySQL-backed stack:
 ```powershell
 docker compose up -d mysql app
 ```
+
+Run the desktop UI in your browser over local HTTP:
+
+```powershell
+docker compose --profile browser up app-http
+```
+
+Then open:
+
+```text
+http://localhost:6080/vnc.html?autoconnect=1&resize=scale
+```
+
+The browser UI is published only on `127.0.0.1` by default, so it is local-machine only unless you deliberately change the port binding.
+The browser profile forces software rendering and disables embedded Qt WebEngine panels inside the container, so desk tools such as Trader TV fall back to browser-launch links instead of in-app TradingView or YouTube embeds. This avoids the common Vulkan / Chromium crashes that happen under Xvfb and noVNC.
 
 Run the headless profile:
 

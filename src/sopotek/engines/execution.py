@@ -25,20 +25,29 @@ class ExecutionEngine:
         event_bus: AsyncEventBus,
         *,
         max_retries: int = 2,
+        listen_event_type: str = EventType.RISK_APPROVED,
     ) -> None:
         self.broker = broker
         self.bus = event_bus
         self.max_retries = max(1, int(max_retries))
         self.order_states: dict[str, OrderState] = {}
-        self.bus.subscribe(EventType.RISK_APPROVED, self._on_risk_approved)
+        self.listen_event_type = str(listen_event_type or EventType.RISK_APPROVED)
+        self.bus.subscribe(self.listen_event_type, self._on_review_approved)
 
-    async def _on_risk_approved(self, event) -> None:
+    async def _on_review_approved(self, event) -> None:
         review = getattr(event, "data", None)
         if review is None:
             return
         if not isinstance(review, TradeReview):
             review = TradeReview(**dict(review))
         report = await self.execute(review)
+        if report.partial:
+            await self.bus.publish(
+                EventType.ORDER_PARTIALLY_FILLED,
+                report,
+                priority=79,
+                source="execution_engine",
+            )
         await self.bus.publish(EventType.ORDER_FILLED, report, priority=80, source="execution_engine")
         await self.bus.publish(EventType.EXECUTION_REPORT, report, priority=85, source="execution_engine")
 
@@ -79,10 +88,14 @@ class ExecutionEngine:
                     requested_price=order.price,
                     fill_price=fill_price,
                     status=str((raw or {}).get("status") or "filled"),
-                    latency_ms=latency_ms,
-                    slippage_bps=self._slippage_bps(order.price, fill_price, order.side),
+                    latency_ms=float((raw or {}).get("latency_ms") or latency_ms),
+                    slippage_bps=float((raw or {}).get("slippage_bps") or self._slippage_bps(order.price, fill_price, order.side)),
                     strategy_name=order.strategy_name,
-                    metadata={"attempt": attempt, "raw": raw or {}},
+                    filled_quantity=self._extract_quantity(raw, fallback=order.quantity),
+                    remaining_quantity=float((raw or {}).get("remaining_quantity") or 0.0),
+                    partial=bool((raw or {}).get("partial") or float((raw or {}).get("remaining_quantity") or 0.0) > 0.0),
+                    fee=float((raw or {}).get("fee") or 0.0),
+                    metadata={"attempt": attempt, "raw": raw or {}, **dict(order.metadata)},
                 )
                 self.order_states[order_id] = OrderState.FILLED
                 return report
@@ -130,3 +143,16 @@ class ExecutionEngine:
             return 0.0
         raw_bps = ((filled - requested) / requested) * 10000.0
         return raw_bps if str(side).lower() == "buy" else -raw_bps
+
+    def _extract_quantity(self, payload, *, fallback):
+        if not isinstance(payload, dict):
+            return float(fallback)
+        for key in ("filled_quantity", "filled", "amount", "executedQty", "quantity"):
+            value = payload.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except Exception:
+                continue
+        return float(fallback)
