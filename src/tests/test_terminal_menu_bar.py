@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -64,6 +64,81 @@ class _FakeTerminal(QMainWindow):
         if name.startswith("_"):
             return lambda *args, **kwargs: None
         raise AttributeError(name)
+
+
+class _ToolbarTerminal(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.controller = SimpleNamespace(
+            language_code="en",
+            set_language=lambda _code: None,
+            symbols=["BTC/USDT", "ETH/USDT"],
+        )
+        self.symbol = "BTC/USDT"
+        self.current_timeframe = "1h"
+        self.timeframe_buttons = {}
+        self.toolbar = None
+        self.toolbar_timeframe_label = None
+        self.secondary_toolbar = None
+        self.autotrading_enabled = False
+        self.autotrade_scope_value = "all"
+        self.connection_indicator = QLabel("CONNECTED")
+        self.heartbeat = QLabel("●")
+        self.symbol_label = None
+        self.open_symbol_button = None
+        self.screenshot_button = None
+        self.session_mode_badge = None
+        self.license_badge = None
+        self.live_trading_bar_frame = None
+        self.live_trading_bar_label = None
+        self.live_trading_bar = None
+        self.kill_switch_button = None
+        self.trading_activity_label = None
+        self.symbol_picker = None
+        self.autotrade_scope_picker = None
+        self.auto_button = None
+
+    def _tr(self, key, **kwargs):
+        return key
+
+    def _action_button_style(self):
+        return ""
+
+    def _danger_button_style(self):
+        return ""
+
+    def _toggle_emergency_stop(self):
+        return None
+
+    def _open_symbol_from_picker(self):
+        return None
+
+    def _change_autotrade_scope(self, *_args, **_kwargs):
+        return None
+
+    def _toggle_autotrading(self):
+        return None
+
+    def _apply_autotrade_scope(self, *_args, **_kwargs):
+        return None
+
+    def _update_autotrade_button(self):
+        return None
+
+    def _update_session_badge(self):
+        return None
+
+    def _update_live_trading_bar(self):
+        return None
+
+    def _update_kill_switch_button(self):
+        return None
+
+    def _set_active_timeframe_button(self, _timeframe):
+        return None
+
+    def take_screen_shot(self):
+        return None
 
 
 def test_create_menu_bar_groups_actions_into_single_clear_menus():
@@ -200,27 +275,72 @@ def test_learning_windows_use_market_snapshot_in_text_payload():
     )
     fake._learning_market_snapshot = lambda: Terminal._learning_market_snapshot(fake)
     fake._trader_tv_html = lambda: Terminal._trader_tv_html(fake)
+    fake._trader_tv_symbol = lambda snapshot=None: Terminal._trader_tv_symbol(fake, snapshot)
+    fake._trader_tv_chart_url = lambda snapshot=None: Terminal._trader_tv_chart_url(fake, snapshot)
+    fake._trader_tv_video_url = lambda snapshot=None: Terminal._trader_tv_video_url(fake, snapshot)
+    fake._trader_tv_browser_fallback_html = lambda title, description, primary_label, primary_url, secondary_label=None, secondary_url=None: (
+        Terminal._trader_tv_browser_fallback_html(
+            fake,
+            title,
+            description,
+            primary_label,
+            primary_url,
+            secondary_label,
+            secondary_url,
+        )
+    )
     fake._education_center_html = lambda: Terminal._education_center_html(fake)
     fake._open_text_window = lambda key, title, markup, width=0, height=0: captured.append(
         {"key": key, "title": title, "html": markup, "width": width, "height": height}
     )
 
-    Terminal._open_trader_tv_window(fake)
+    trader_tv_html = Terminal._trader_tv_html(fake)
+    snapshot = Terminal._learning_market_snapshot(fake)
     Terminal._open_education_center_window(fake)
 
-    assert captured[0]["key"] == "education_trader_tv"
-    assert captured[0]["title"] == "Trader TV"
-    assert captured[0]["width"] == 920
-    assert "Current Desk Snapshot" in captured[0]["html"]
-    assert "SCHWAB" in captured[0]["html"]
-    assert "Focus symbol:</b> ES" in captured[0]["html"]
-    assert "Live feed off" in captured[0]["html"]
+    assert snapshot["focus_symbol"] == "ES"
+    assert snapshot["exchange"] == "SCHWAB"
+    assert "Current Desk Snapshot" in trader_tv_html
+    assert "Live feed off" in trader_tv_html
+    assert Terminal._trader_tv_symbol(fake, snapshot) == "CME_MINI:ES1!"
+    assert "tradingview.com/chart/?symbol=CME_MINI%3AES1%21" in Terminal._trader_tv_chart_url(fake, snapshot)
+    assert "youtube.com/results?search_query=ES+SCHWAB+market+analysis+live+trading" in Terminal._trader_tv_video_url(fake, snapshot)
+    assert "Launch TradingView chart" in Terminal._trader_tv_browser_fallback_html(
+        fake,
+        "TradingView Panel",
+        "Fallback",
+        "Launch TradingView chart",
+        Terminal._trader_tv_chart_url(fake, snapshot),
+        "Open YouTube market feed",
+        Terminal._trader_tv_video_url(fake, snapshot),
+    )
 
-    assert captured[1]["key"] == "education_center"
-    assert captured[1]["title"] == "Education Center"
-    assert captured[1]["width"] == 940
-    assert "Practice Loop Inside This App" in captured[1]["html"]
-    assert "Ready-For-Live Checklist" in captured[1]["html"]
+    assert captured[0]["key"] == "education_center"
+    assert captured[0]["title"] == "Education Center"
+    assert captured[0]["width"] == 940
+    assert "Practice Loop Inside This App" in captured[0]["html"]
+    assert "Ready-For-Live Checklist" in captured[0]["html"]
+
+
+def test_create_toolbar_keeps_symbol_and_screenshot_on_same_row_and_drops_toolbar_timeframes():
+    _app()
+    terminal = _ToolbarTerminal()
+
+    Terminal._create_toolbar(terminal)
+
+    main_toolbar_widgets = [terminal.toolbar.widgetForAction(action) for action in terminal.toolbar.actions()]
+    controls_toolbar_widgets = [
+        terminal.secondary_toolbar.widgetForAction(action) for action in terminal.secondary_toolbar.actions()
+    ]
+
+    assert terminal.toolbar_timeframe_label is None
+    assert terminal.timeframe_buttons == {}
+    assert any(widget is not None and widget.isAncestorOf(terminal.symbol_picker) for widget in main_toolbar_widgets)
+    assert any(widget is not None and widget.isAncestorOf(terminal.screenshot_button) for widget in main_toolbar_widgets)
+    assert not any(
+        widget is not None and widget.isAncestorOf(terminal.screenshot_button)
+        for widget in controls_toolbar_widgets
+    )
 
 
 def test_set_status_value_ignores_deleted_qt_labels():

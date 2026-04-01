@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import quote_plus
 import shiboken6 # type: ignore[import-untyped]
 import traceback
 import numpy as np
@@ -2319,6 +2320,8 @@ class Terminal(QMainWindow):
 
     def _create_toolbar(self):
         frame_style = "QFrame { background-color: #0f1726; border: 1px solid #24324a; border-radius: 16px; }"
+        self.timeframe_buttons.clear()
+        self.toolbar_timeframe_label = None
 
         toolbar = QToolBar("Main Toolbar")
         toolbar.setObjectName("terminal_main_toolbar")
@@ -2383,26 +2386,6 @@ class Terminal(QMainWindow):
 
         toolbar.addWidget(symbol_box)
 
-        timeframe_box = QFrame()
-        timeframe_box.setStyleSheet(frame_style)
-        timeframe_layout = QHBoxLayout(timeframe_box)
-        timeframe_layout.setContentsMargins(10, 6, 10, 6)
-        timeframe_layout.setSpacing(6)
-
-        self.toolbar_timeframe_label = QLabel(self._tr("terminal.toolbar.timeframe"))
-        self.toolbar_timeframe_label.setStyleSheet("color: #9fb0c7; font-weight: 700; padding-right: 6px;")
-        timeframe_layout.addWidget(self.toolbar_timeframe_label)
-
-        for tf in ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1mn"]:
-            btn = QPushButton(tf)
-            btn.setCheckable(True)
-            btn.setStyleSheet(self._timeframe_button_style())
-            btn.clicked.connect(lambda _, t=tf: self._set_timeframe(t))
-            timeframe_layout.addWidget(btn)
-            self.timeframe_buttons[tf] = btn
-
-        toolbar.addWidget(timeframe_box)
-
         toolbar_spacer = QWidget()
         toolbar_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(toolbar_spacer)
@@ -2457,7 +2440,7 @@ class Terminal(QMainWindow):
         self.trading_activity_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         utility_layout.addWidget(self.trading_activity_label)
 
-        controls_toolbar.addWidget(utility_box)
+        toolbar.addWidget(utility_box)
 
         controls_spacer = QWidget()
         controls_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -6621,6 +6604,182 @@ class Terminal(QMainWindow):
             </ul>
         """
 
+    def _trader_tv_interval(self, timeframe=None):
+        mapping = {
+            "1m": "1",
+            "3m": "3",
+            "5m": "5",
+            "15m": "15",
+            "30m": "30",
+            "45m": "45",
+            "1h": "60",
+            "2h": "120",
+            "4h": "240",
+            "1d": "D",
+            "1w": "W",
+            "1mn": "M",
+            "1mo": "M",
+        }
+        key = str(timeframe or getattr(self, "current_timeframe", "1h") or "1h").strip().lower()
+        return mapping.get(key, "60")
+
+    def _trader_tv_symbol(self, snapshot=None):
+        snapshot = snapshot or self._learning_market_snapshot()
+        raw_symbol = str(snapshot.get("focus_symbol") or "").strip().upper()
+        exchange = str(snapshot.get("exchange") or "").strip().upper()
+        if not raw_symbol or raw_symbol == "NO ACTIVE SYMBOL":
+            return "COINBASE:BTCUSD"
+
+        if ":" in raw_symbol and "/" not in raw_symbol:
+            return raw_symbol
+
+        futures_symbols = {
+            "ES": "CME_MINI:ES1!",
+            "MES": "CME_MINI:MES1!",
+            "NQ": "CME_MINI:NQ1!",
+            "MNQ": "CME_MINI:MNQ1!",
+            "YM": "CBOT_MINI:YM1!",
+            "MYM": "CBOT_MINI:MYM1!",
+            "RTY": "CME_MINI:RTY1!",
+            "M2K": "CME_MINI:M2K1!",
+            "CL": "NYMEX:CL1!",
+            "MCL": "NYMEX:MCL1!",
+            "GC": "COMEX:GC1!",
+            "MGC": "COMEX:MGC1!",
+            "SI": "COMEX:SI1!",
+            "HG": "COMEX:HG1!",
+            "ZB": "CBOT:ZB1!",
+            "ZN": "CBOT:ZN1!",
+            "6E": "CME:6E1!",
+            "6J": "CME:6J1!",
+        }
+        if raw_symbol in futures_symbols:
+            return futures_symbols[raw_symbol]
+
+        exchange_map = {
+            "ALPACA": "NASDAQ",
+            "AMP": "CME_MINI",
+            "BINANCE": "BINANCE",
+            "BINANCEUS": "BINANCE",
+            "COINBASE": "COINBASE",
+            "IBKR": "NASDAQ",
+            "KRAKEN": "KRAKEN",
+            "OANDA": "OANDA",
+            "PAPER": "COINBASE",
+            "SCHWAB": "NASDAQ",
+            "STELLAR": "CRYPTO",
+            "TDAMERITRADE": "NASDAQ",
+            "TRADOVATE": "CME_MINI",
+        }
+
+        if "/" in raw_symbol:
+            base, quote = raw_symbol.split("/", 1)
+            base = re.sub(r"[^A-Z0-9]", "", base)
+            quote = re.sub(r"[^A-Z0-9]", "", quote.split(":", 1)[0])
+            if exchange == "OANDA" and len(base) == 3 and len(quote) == 3:
+                return f"OANDA:{base}{quote}"
+            provider = exchange_map.get(exchange)
+            if provider is None:
+                if len(base) == 3 and len(quote) == 3:
+                    provider = "OANDA"
+                elif quote in {"USD", "USDT", "USDC"}:
+                    provider = "COINBASE"
+                else:
+                    provider = "NASDAQ"
+            return f"{provider}:{base}{quote}"
+
+        if re.fullmatch(r"[A-Z]{1,5}", raw_symbol or ""):
+            return f"{exchange_map.get(exchange, 'NASDAQ')}:{raw_symbol}"
+
+        return "COINBASE:BTCUSD"
+
+    def _trader_tv_chart_url(self, snapshot=None):
+        snapshot = snapshot or self._learning_market_snapshot()
+        return f"https://www.tradingview.com/chart/?symbol={quote_plus(self._trader_tv_symbol(snapshot))}"
+
+    def _trader_tv_video_url(self, snapshot=None):
+        snapshot = snapshot or self._learning_market_snapshot()
+        focus_symbol = str(snapshot.get("focus_symbol") or "").strip().upper()
+        exchange = str(snapshot.get("exchange") or "").strip().upper()
+        if focus_symbol and focus_symbol != "NO ACTIVE SYMBOL":
+            query = f"{focus_symbol} {exchange} market analysis live trading"
+        else:
+            query = "market analysis live trading"
+        return f"https://www.youtube.com/results?search_query={quote_plus(query.strip())}"
+
+    def _trader_tv_chart_embed_html(self, snapshot=None):
+        snapshot = snapshot or self._learning_market_snapshot()
+        widget_config = {
+            "autosize": True,
+            "symbol": self._trader_tv_symbol(snapshot),
+            "interval": self._trader_tv_interval(snapshot.get("timeframe")),
+            "timezone": "Etc/UTC",
+            "theme": "dark",
+            "style": "1",
+            "locale": "en",
+            "withdateranges": True,
+            "hide_side_toolbar": False,
+            "allow_symbol_change": True,
+            "watchlist": [],
+            "details": True,
+            "hotlist": True,
+            "calendar": False,
+            "support_host": "https://www.tradingview.com",
+            "container_id": "trader_tv_chart_widget",
+        }
+        return f"""
+            <!doctype html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    html, body {{
+                        margin: 0;
+                        background: #0b1220;
+                        height: 100%;
+                        overflow: hidden;
+                    }}
+                    .tradingview-widget-container,
+                    #trader_tv_chart_widget {{
+                        height: 100%;
+                        width: 100%;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="tradingview-widget-container">
+                    <div id="trader_tv_chart_widget"></div>
+                    <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+                    {json.dumps(widget_config)}
+                    </script>
+                </div>
+            </body>
+            </html>
+        """
+
+    def _trader_tv_browser_fallback_html(self, title, description, primary_label, primary_url, secondary_label=None, secondary_url=None):
+        primary_label = html.escape(str(primary_label or "Open"))
+        primary_url = html.escape(str(primary_url or ""))
+        secondary_html = ""
+        if secondary_label and secondary_url:
+            secondary_html = (
+                f'<p><a href="{html.escape(str(secondary_url))}">{html.escape(str(secondary_label))}</a></p>'
+            )
+        return f"""
+            <h2>{html.escape(str(title or "Trader TV"))}</h2>
+            <p>{html.escape(str(description or ""))}</p>
+            <p><a href="{primary_url}">{primary_label}</a></p>
+            {secondary_html}
+            <p>Install the Qt WebEngine components to view live embedded media directly inside Trader TV.</p>
+        """
+
+    def _trader_tv_web_view_class(self):
+        try:
+            from PySide6.QtWebEngineWidgets import QWebEngineView  # type: ignore
+        except Exception:
+            return None
+        return QWebEngineView
+
     def _education_center_html(self):
         snapshot = self._learning_market_snapshot()
         focus_symbol = html.escape(snapshot["focus_symbol"])
@@ -6665,13 +6824,182 @@ class Terminal(QMainWindow):
         """
 
     def _open_trader_tv_window(self):
-        return self._open_text_window(
+        window = self._get_or_create_tool_window(
             "education_trader_tv",
             "Trader TV",
-            self._trader_tv_html(),
-            width=920,
-            height=720,
+            width=1160,
+            height=820,
         )
+
+        if getattr(window, "_trader_tv_tabs", None) is None:
+            container = QWidget()
+            container.setStyleSheet("background-color: #0b1220;")
+            layout = QVBoxLayout(container)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(12)
+
+            intro = QLabel(
+                "Trader TV now gives you a live chart surface, a market-video feed, and the desk brief in one place."
+            )
+            intro.setWordWrap(True)
+            intro.setStyleSheet(
+                "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
+                "border-radius: 12px; padding: 12px; font-size: 14px; font-weight: 600;"
+            )
+            layout.addWidget(intro)
+
+            action_row = QHBoxLayout()
+            action_row.setSpacing(8)
+
+            refresh_button = QPushButton("Refresh Trader TV")
+            refresh_button.setStyleSheet(self._action_button_style())
+            refresh_button.clicked.connect(lambda: self._open_trader_tv_window())
+            action_row.addWidget(refresh_button)
+
+            open_chart_button = QPushButton("Open TradingView")
+            open_chart_button.setStyleSheet(self._action_button_style())
+            open_chart_button.clicked.connect(
+                lambda: QDesktopServices.openUrl(QUrl(str(getattr(window, "_trader_tv_chart_url", ""))))
+            )
+            action_row.addWidget(open_chart_button)
+
+            open_video_button = QPushButton("Open YouTube Feed")
+            open_video_button.setStyleSheet(self._action_button_style())
+            open_video_button.clicked.connect(
+                lambda: QDesktopServices.openUrl(QUrl(str(getattr(window, "_trader_tv_video_url", ""))))
+            )
+            action_row.addWidget(open_video_button)
+
+            action_row.addStretch(1)
+            layout.addLayout(action_row)
+
+            status = QLabel()
+            status.setWordWrap(True)
+            status.setStyleSheet("color: #8fa7c6; padding: 0 2px 2px 2px;")
+            layout.addWidget(status)
+
+            tabs = QTabWidget()
+            tabs.setDocumentMode(True)
+            tabs.setStyleSheet(
+                "QTabWidget::pane { border: 1px solid #20324d; background-color: #0b1220; }"
+                "QTabBar::tab { background-color: #101a2d; color: #cfe0f7; padding: 8px 12px; margin-right: 4px; border-top-left-radius: 8px; border-top-right-radius: 8px; }"
+                "QTabBar::tab:selected { background-color: #163150; color: #ffffff; }"
+            )
+            layout.addWidget(tabs, stretch=1)
+
+            brief_browser = QTextBrowser()
+            brief_browser.setOpenExternalLinks(True)
+            brief_browser.setStyleSheet(
+                "QTextBrowser { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; border-radius: 10px; padding: 14px; }"
+            )
+            tabs.addTab(brief_browser, "Desk Brief")
+
+            web_view_class = self._trader_tv_web_view_class()
+            chart_surface = None
+            chart_mode = "fallback"
+            if web_view_class is not None:
+                try:
+                    chart_surface = web_view_class()
+                    chart_mode = "web"
+                except Exception:
+                    chart_surface = None
+                    chart_mode = "fallback"
+            if chart_surface is None:
+                chart_surface = QTextBrowser()
+                chart_surface.setOpenExternalLinks(True)
+                chart_surface.setStyleSheet(
+                    "QTextBrowser { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; border-radius: 10px; padding: 14px; }"
+                )
+            tabs.addTab(chart_surface, "TradingView")
+
+            video_surface = None
+            video_mode = "fallback"
+            if web_view_class is not None:
+                try:
+                    video_surface = web_view_class()
+                    video_mode = "web"
+                except Exception:
+                    video_surface = None
+                    video_mode = "fallback"
+            if video_surface is None:
+                video_surface = QTextBrowser()
+                video_surface.setOpenExternalLinks(True)
+                video_surface.setStyleSheet(
+                    "QTextBrowser { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; border-radius: 10px; padding: 14px; }"
+                )
+            tabs.addTab(video_surface, "Market Video")
+
+            window.setCentralWidget(container)
+            window._trader_tv_tabs = tabs
+            window._trader_tv_intro = intro
+            window._trader_tv_status = status
+            window._trader_tv_brief_browser = brief_browser
+            window._trader_tv_chart_surface = chart_surface
+            window._trader_tv_chart_mode = chart_mode
+            window._trader_tv_video_surface = video_surface
+            window._trader_tv_video_mode = video_mode
+            window._trader_tv_open_chart_button = open_chart_button
+            window._trader_tv_open_video_button = open_video_button
+
+        snapshot = self._learning_market_snapshot()
+        chart_url = self._trader_tv_chart_url(snapshot)
+        video_url = self._trader_tv_video_url(snapshot)
+        window._trader_tv_chart_url = chart_url
+        window._trader_tv_video_url = video_url
+
+        focus_symbol = html.escape(str(snapshot.get("focus_symbol") or "No active symbol"))
+        timeframe = html.escape(str(snapshot.get("timeframe") or "1h"))
+        exchange = html.escape(str(snapshot.get("exchange") or "DESK"))
+        status = getattr(window, "_trader_tv_status", None)
+        if status is not None:
+            mode_label = "embedded live panels" if (
+                getattr(window, "_trader_tv_chart_mode", "fallback") == "web"
+                and getattr(window, "_trader_tv_video_mode", "fallback") == "web"
+            ) else "browser-linked media panels"
+            status.setText(
+                f"Watching {focus_symbol} on {timeframe} from {exchange}. Trader TV is running in {mode_label} mode."
+            )
+
+        brief_browser = getattr(window, "_trader_tv_brief_browser", None)
+        if brief_browser is not None:
+            brief_browser.setHtml(self._trader_tv_html())
+
+        chart_surface = getattr(window, "_trader_tv_chart_surface", None)
+        if chart_surface is not None:
+            if getattr(window, "_trader_tv_chart_mode", "fallback") == "web":
+                chart_surface.setHtml(self._trader_tv_chart_embed_html(snapshot), QUrl("https://www.tradingview.com/"))
+            else:
+                chart_surface.setHtml(
+                    self._trader_tv_browser_fallback_html(
+                        "TradingView Panel",
+                        "Open the live chart in your browser when Qt WebEngine is unavailable in this environment.",
+                        "Launch TradingView chart",
+                        chart_url,
+                        "Open the market video feed",
+                        video_url,
+                    )
+                )
+
+        video_surface = getattr(window, "_trader_tv_video_surface", None)
+        if video_surface is not None:
+            if getattr(window, "_trader_tv_video_mode", "fallback") == "web":
+                video_surface.load(QUrl(video_url))
+            else:
+                video_surface.setHtml(
+                    self._trader_tv_browser_fallback_html(
+                        "Market Video Feed",
+                        "Open a YouTube market-analysis feed focused on the current desk symbol.",
+                        "Launch YouTube market feed",
+                        video_url,
+                        "Open TradingView chart",
+                        chart_url,
+                    )
+                )
+
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        return window
 
     def _open_education_center_window(self):
         return self._open_text_window(

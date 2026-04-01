@@ -1,9 +1,18 @@
 .git
 .github
 .idea
+.codex-tmp
+.deps
+.deps_legacy
+.deps_ui
+.mypy_cache
 .pytest_cache
 .venv
 .vscode
+.coverage
+coverage.xml
+htmlcov
+build
 __pycache__
 *.pyc
 *.pyo
@@ -17,3 +26,4 @@ tmp
 data
 logs
 src/tests/.pytest_cache
+Sopotek_Screenshot_*.png

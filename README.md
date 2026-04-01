@@ -201,6 +201,12 @@ Run a focused subset:
 python -m pytest src\tests\test_execution.py src\tests\test_other_broker_adapters.py src\tests\test_storage_runtime.py -q
 ```
 
+Run the suite with coverage output:
+
+```powershell
+python -m pytest src\tests -q --cov=src --cov-branch --cov-report=term-missing:skip-covered --cov-report=xml --cov-report=html
+```
+
 ## Packaging And Docs
 
 Build package artifacts:
@@ -221,9 +227,44 @@ Serve docs locally:
 python -m mkdocs serve -f docs\mkdocs.yml
 ```
 
+## Docker
+
+Build the container image:
+
+```powershell
+docker build -t sopotek-trading-ai .
+```
+
+Validate the compose stack:
+
+```powershell
+docker compose config
+```
+
+Run the local MySQL-backed stack:
+
+```powershell
+docker compose up -d mysql app
+```
+
+Run the headless profile:
+
+```powershell
+docker compose --profile headless up app-headless
+```
+
+Compose defaults the app to the local `mysql` service using `mysql+pymysql://`. Override `MYSQL_DATABASE`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_ROOT_PASSWORD`, or `MYSQL_PORT` in your shell or `.env` before launch if you want different local credentials.
+
+## CI And Release Workflows
+
+- `CI`: runs flake8, full pytest coverage, package build validation, and Docker image smoke checks on pull requests and pushes to `master`.
+- `Publish Docker Image`: builds and pushes multi-arch images to GitHub Container Registry for `master` and version tags.
+- `Publish Python Package`: builds and validates wheel and sdist artifacts, then publishes them to PyPI on GitHub releases or manual dispatch.
+
 ## Storage And Runtime Files
 
-- Local database: `data/sopotek_trading.db`
+- Local Docker database: MySQL persisted in the `mysql_data` volume
+- Local non-Docker fallback database: `data/sopotek_trading.db`
 - Logs: `logs/` and `src/logs/`
 - Generated screenshots: `output/screenshots/`
 - Detached chart layouts and most operator preferences: persisted through `QSettings`

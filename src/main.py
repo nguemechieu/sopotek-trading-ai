@@ -88,11 +88,13 @@ def _install_faulthandler() -> None:
 def _setup_faulthandler_file_logging():
     log_dir = _src_root() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    stream: os.TextIOWrapper[_WrappedBuffer] = (log_dir / "native_crash.log").open(  # pylint: disable=consider-using-with
-        "a",
+    stream: os.TextIOWrapper[_WrappedBuffer] = (log_dir / "native_crash.log").open(  
+        mode="a",
+        buffering=-1,
         encoding="utf-8",
-        buffering=1,
-    )
+        errors=None,
+        newline=None
+)
     stream.write(f"\n=== Native crash trace session pid={os.getpid()} ===\n")
     faulthandler.enable(file=stream, all_threads=True)
     _FAULTHANDLER_STATE["stream"] = stream

@@ -4,6 +4,11 @@ __pycache__/
 
 .pytest_cache/
 .mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
 
 src/logs/*.log
 data/
