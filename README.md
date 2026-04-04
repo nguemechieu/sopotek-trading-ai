@@ -269,7 +269,6 @@ http://localhost:6080/vnc.html?autoconnect=1&resize=scale
 The browser UI is published only on `127.0.0.1` by default, so it is local-machine only unless you deliberately change the port binding.
 The browser profile forces software rendering and disables embedded Qt WebEngine panels inside the container, so desk tools such as Trader TV fall back to browser-launch links instead of in-app TradingView or YouTube embeds. This avoids the common Vulkan / Chromium crashes that happen under Xvfb and noVNC.
 The browser profile also starts an X11 clipboard bridge so copy and paste work more reliably inside the containerized Qt desktop. Because this is still running through noVNC in a browser tab, your browser may block direct `Ctrl+V` access to the system clipboard. If that happens, use the noVNC clipboard panel to paste text into the app.
-
 Run the headless profile:
 
 ```powershell
@@ -286,7 +285,6 @@ When you configure the database in the app Preferences, use one of these URLs:
   `mysql+pymysql://sopotek:sopotek_local@mysql:3306/sopotek_trading?charset=utf8mb4`
 
 If you changed `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE`, or `MYSQL_PORT` in `.env`, replace those values in the URL.
-
 ## CI And Release Workflows
 
 - `CI`: runs flake8, full pytest coverage, package build validation, and Docker image smoke checks on pull requests and pushes to `master`.

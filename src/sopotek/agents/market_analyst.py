@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+from collections import defaultdict, deque
+
 from sopotek.agents.base import BaseAgent
 from sopotek.core.event_bus import AsyncEventBus
 from sopotek.core.event_types import EventType
 from sopotek.core.models import AnalystInsight, Candle
+from sopotek.ml.regime_engine import RegimeEngine
 
 
 class MarketAnalystAgent(BaseAgent):
     name = "market_analyst"
 
-    def __init__(self) -> None:
+    def __init__(self, *, timeframe: str = "1m", lookback: int = 96, regime_engine: RegimeEngine | None = None) -> None:
         self.bus: AsyncEventBus | None = None
         self.latest_insights: dict[str, AnalystInsight] = {}
+        self.timeframe = timeframe
+        self.lookback = max(24, int(lookback))
+        self.history: dict[str, deque[Candle]] = defaultdict(lambda: deque(maxlen=self.lookback))
+        self.regime_engine = regime_engine or RegimeEngine()
 
     def attach(self, event_bus: AsyncEventBus) -> None:
         self.bus = event_bus
@@ -23,17 +30,29 @@ class MarketAnalystAgent(BaseAgent):
             return
         if not isinstance(candle, Candle):
             candle = Candle(**dict(candle))
-        delta = candle.close - candle.open
-        regime = "bullish" if delta > 0 else "bearish" if delta < 0 else "neutral"
-        range_size = max(0.0, candle.high - candle.low)
-        volatility = 1.0 + ((range_size / candle.close) if candle.close else 0.0)
-        preferred_strategy = "trend" if regime == "bullish" else "mean_reversion" if regime == "neutral" else "defensive"
+        if self.timeframe and candle.timeframe != self.timeframe:
+            return
+        bucket = self.history[candle.symbol]
+        bucket.append(candle)
+        snapshot = self.regime_engine.classify_candles(list(bucket))
+        regime = snapshot.regime
+        preferred_strategy = snapshot.preferred_strategy or (
+            "trend_following" if regime == "bullish" else "mean_reversion" if regime == "neutral" else "ml_agent"
+        )
         insight = AnalystInsight(
             symbol=candle.symbol,
             regime=regime,
-            momentum=delta,
-            volatility=volatility,
+            momentum=snapshot.momentum,
+            volatility=1.0 + float(snapshot.atr_pct or 0.0),
             preferred_strategy=preferred_strategy,
+            metadata={
+                "timeframe": candle.timeframe,
+                "trend_strength": snapshot.trend_strength,
+                "volatility_regime": snapshot.volatility_regime,
+                "cluster_id": snapshot.cluster_id,
+                **dict(snapshot.metadata),
+            },
         )
         self.latest_insights[candle.symbol] = insight
+        await self.bus.publish(EventType.REGIME, snapshot, priority=48, source=self.name)
         await self.bus.publish(EventType.ANALYST_INSIGHT, insight, priority=50, source=self.name)

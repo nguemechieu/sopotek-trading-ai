@@ -330,7 +330,6 @@ def test_trader_tv_web_view_class_respects_disable_webengine_env(monkeypatch):
 
     assert result is None
 
-
 def test_create_toolbar_keeps_symbol_and_screenshot_on_same_row_and_drops_toolbar_timeframes():
     _app()
     terminal = _ToolbarTerminal()

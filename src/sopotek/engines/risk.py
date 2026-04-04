@@ -14,17 +14,19 @@ class RiskEngine:
         max_risk_per_trade: float = 0.01,
         max_portfolio_exposure: float = 1.5,
         daily_drawdown_limit: float = 0.05,
+        listen_event_type: str = EventType.SIGNAL,
     ) -> None:
         self.bus = event_bus
         self.starting_equity = max(1.0, float(starting_equity))
         self.max_risk_per_trade = max(0.0001, float(max_risk_per_trade))
         self.max_portfolio_exposure = max(0.01, float(max_portfolio_exposure))
         self.daily_drawdown_limit = max(0.001, float(daily_drawdown_limit))
+        self.listen_event_type = str(listen_event_type or EventType.SIGNAL)
         self.latest_snapshot = PortfolioSnapshot(cash=self.starting_equity, equity=self.starting_equity)
         self.insights: dict[str, AnalystInsight] = {}
         self.kill_switch_reason: str | None = None
 
-        self.bus.subscribe(EventType.SIGNAL, self._on_signal)
+        self.bus.subscribe(self.listen_event_type, self._on_signal)
         self.bus.subscribe(EventType.PORTFOLIO_SNAPSHOT, self._on_portfolio_snapshot)
         self.bus.subscribe(EventType.ANALYST_INSIGHT, self._on_analyst_insight)
 
@@ -150,6 +152,8 @@ class RiskEngine:
             take_profit=signal.take_profit,
             strategy_name=signal.strategy_name,
             metadata={
+                **dict(signal.metadata or {}),
+                "signal_reason": signal.reason,
                 "requested_quantity": signal.quantity,
                 "volatility_multiplier": volatility_multiplier,
                 "confidence": signal.confidence,

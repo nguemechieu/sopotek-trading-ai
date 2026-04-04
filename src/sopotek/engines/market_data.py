@@ -65,7 +65,9 @@ class LiveFeedManager:
         async for tick in self.broker.stream_ticks(symbol):
             payload = dict(tick or {})
             payload["symbol"] = payload.get("symbol", symbol)
+            await self.bus.publish(EventType.MARKET_DATA_EVENT, payload, priority=19, source="live_feed")
             await self.bus.publish(EventType.MARKET_TICK, payload, priority=20, source="live_feed")
+            await self.bus.publish(EventType.PRICE_UPDATE, payload, priority=21, source="live_feed")
 
 
 class CandleAggregator:
@@ -166,7 +168,9 @@ class MarketDataEngine:
     async def publish_tick(self, symbol: str, tick: dict[str, Any]) -> None:
         payload = dict(tick or {})
         payload["symbol"] = payload.get("symbol", symbol)
+        await self.bus.publish(EventType.MARKET_DATA_EVENT, payload, priority=19, source="market_data_engine")
         await self.bus.publish(EventType.MARKET_TICK, payload, priority=20, source="market_data_engine")
+        await self.bus.publish(EventType.PRICE_UPDATE, payload, priority=21, source="market_data_engine")
 
     async def fetch_history(self, symbol: str, *, timeframe: str = "1m", limit: int = 200) -> list[Candle]:
         rows = await self.broker.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
@@ -199,9 +203,21 @@ class MarketDataEngine:
             await self.bus.publish(EventType.HISTORICAL_CANDLE, candle, priority=35, source="market_data_engine")
             await self.bus.publish(EventType.CANDLE, candle, priority=40, source="market_data_engine")
             await self.bus.publish(
+                EventType.MARKET_DATA_EVENT,
+                {"symbol": candle.symbol, "price": candle.close, "timestamp": candle.end},
+                priority=19,
+                source="market_data_engine",
+            )
+            await self.bus.publish(
                 EventType.MARKET_TICK,
                 {"symbol": candle.symbol, "price": candle.close, "timestamp": candle.end},
                 priority=20,
+                source="market_data_engine",
+            )
+            await self.bus.publish(
+                EventType.PRICE_UPDATE,
+                {"symbol": candle.symbol, "price": candle.close, "timestamp": candle.end},
+                priority=21,
                 source="market_data_engine",
             )
         return candles

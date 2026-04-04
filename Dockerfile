@@ -62,7 +62,8 @@ COPY src ./src
 RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install ".[ui,brokers,ml]"
 
-RUN chmod +x /app/scripts/docker/start_http_ui.sh
+RUN sed -i 's/\r$//' /app/scripts/docker/start_http_ui.sh \
+    && chmod +x /app/scripts/docker/start_http_ui.sh
 
 RUN mkdir -p /app/data /app/logs /app/output
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sopotek.core.event_bus import AsyncEventBus
 from sopotek.core.event_types import EventType
-from sopotek.core.models import ExecutionReport, PortfolioSnapshot, Position
+from sopotek.core.models import ExecutionReport, PortfolioSnapshot, Position, PositionUpdate
 
 
 class PortfolioEngine:
@@ -37,17 +37,19 @@ class PortfolioEngine:
                 ) / new_quantity
             position.quantity = new_quantity
         else:
+            prior_quantity = position.quantity
             closing_quantity = min(abs(position.quantity), abs(signed_quantity))
-            pnl_direction = 1.0 if position.quantity > 0 else -1.0
+            pnl_direction = 1.0 if prior_quantity > 0 else -1.0
             position.realized_pnl += (price - position.average_price) * closing_quantity * pnl_direction
             position.quantity += signed_quantity
             if position.quantity == 0:
                 position.average_price = 0.0
-            else:
+            elif (prior_quantity > 0 and position.quantity < 0) or (prior_quantity < 0 and position.quantity > 0):
                 position.average_price = price
 
         position.last_price = price
         self.cash -= signed_quantity * price
+        await self._publish_position_update(position)
         await self._publish_snapshot()
 
     async def _on_tick(self, event) -> None:
@@ -58,8 +60,22 @@ class PortfolioEngine:
         price = float(payload.get("price") or payload.get("last") or payload.get("close") or 0.0)
         if price <= 0:
             return
-        self.positions[symbol].last_price = price
+        position = self.positions[symbol]
+        position.last_price = price
+        await self._publish_position_update(position)
         await self._publish_snapshot()
+
+    async def _publish_position_update(self, position: Position) -> None:
+        update = PositionUpdate(
+            symbol=position.symbol,
+            quantity=float(position.quantity),
+            average_price=float(position.average_price),
+            current_price=float(position.last_price),
+            unrealized_pnl=float(position.unrealized_pnl),
+            realized_pnl=float(position.realized_pnl),
+            market_value=float(position.market_value),
+        )
+        await self.bus.publish(EventType.POSITION_UPDATE, update, priority=88, source="portfolio_engine")
 
     async def _publish_snapshot(self) -> None:
         unrealized = sum(position.unrealized_pnl for position in self.positions.values())

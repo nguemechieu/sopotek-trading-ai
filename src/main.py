@@ -68,14 +68,42 @@ def _load_app_controller() -> type[Any]:
     return module.AppController
 
 
+def _local_x11_socket(display: str | None) -> str | None:
+    """Return the expected Unix socket path for a local X11 display."""
+    value = str(display or "").strip()
+    if not value:
+        return None
+    if value.lower().startswith("unix/"):
+        value = value[5:]
+    if not value.startswith(":"):
+        return None
+
+    display_id = value[1:].split(".", 1)[0].strip()
+    if not display_id.isdigit():
+        return None
+    return f"/tmp/.X11-unix/X{display_id}"
+
+
+def _has_usable_linux_display() -> bool:
+    """Check whether the current Linux display environment is usable."""
+    display = str(os.getenv("DISPLAY") or "").strip()
+    wayland_display = str(os.getenv("WAYLAND_DISPLAY") or "").strip()
+    if not (display or wayland_display):
+        return False
+
+    socket_path = _local_x11_socket(display)
+    if socket_path and not os.path.exists(socket_path):
+        return False
+    return True
+
+
 def _configure_qt_platform() -> str | None:
     """Choose a safe Qt platform plugin for the current environment."""
     configured = str(os.getenv("QT_QPA_PLATFORM") or "").strip()
     if configured:
         return configured
 
-    has_display = bool(str(os.getenv("DISPLAY") or "").strip() or str(os.getenv("WAYLAND_DISPLAY") or "").strip())
-    if sys.platform.startswith("linux") and not has_display:
+    if sys.platform.startswith("linux") and not _has_usable_linux_display():
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
         return "offscreen"
 
@@ -291,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     platform_plugin = _configure_qt_platform()
     if platform_plugin == "offscreen":
         sys.stderr.write(
-            "No Linux display detected; using Qt offscreen mode. "
+            "No usable Linux display detected; using Qt offscreen mode. "
             "Set DISPLAY or WAYLAND_DISPLAY and override QT_QPA_PLATFORM if you need an interactive GUI.\n"
         )
     elif browser_runtime:

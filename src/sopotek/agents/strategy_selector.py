@@ -12,9 +12,9 @@ class StrategySelectorAgent(BaseAgent):
     def __init__(self, strategy_map: dict[str, list[str]] | None = None) -> None:
         self.bus: AsyncEventBus | None = None
         self.strategy_map = strategy_map or {
-            "bullish": ["trend", "breakout"],
-            "bearish": ["defensive", "mean_reversion"],
-            "neutral": ["mean_reversion"],
+            "bullish": ["trend_following", "trend", "breakout", "ml_agent"],
+            "bearish": ["mean_reversion", "defensive", "ml_agent"],
+            "neutral": ["mean_reversion", "ml_agent"],
         }
 
     def attach(self, event_bus: AsyncEventBus) -> None:

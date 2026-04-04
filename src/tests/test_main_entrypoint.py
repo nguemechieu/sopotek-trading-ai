@@ -79,11 +79,30 @@ def test_install_asyncio_exception_filter_delegates_non_dns_errors_to_previous_h
     assert forwarded == [(loop, payload)]
 
 
+def test_local_x11_socket_extracts_local_display_path():
+    assert app_main._local_x11_socket(":99") == "/tmp/.X11-unix/X99"
+    assert app_main._local_x11_socket("unix/:2.0") == "/tmp/.X11-unix/X2"
+    assert app_main._local_x11_socket("host.docker.internal:0.0") is None
+
+
 def test_configure_qt_platform_defaults_to_offscreen_without_linux_display(monkeypatch):
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.setattr(app_main.sys, "platform", "linux")
+
+    selected = app_main._configure_qt_platform()
+
+    assert selected == "offscreen"
+    assert app_main.os.environ["QT_QPA_PLATFORM"] == "offscreen"
+
+
+def test_configure_qt_platform_uses_offscreen_when_local_x11_socket_is_missing(monkeypatch):
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr(app_main.sys, "platform", "linux")
+    monkeypatch.setattr(app_main.os.path, "exists", lambda path: False)
 
     selected = app_main._configure_qt_platform()
 
@@ -108,6 +127,7 @@ def test_configure_qt_platform_leaves_gui_mode_when_display_exists(monkeypatch):
     monkeypatch.setenv("DISPLAY", ":0")
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.setattr(app_main.sys, "platform", "linux")
+    monkeypatch.setattr(app_main.os.path, "exists", lambda path: True)
 
     selected = app_main._configure_qt_platform()
 

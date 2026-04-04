@@ -5,7 +5,14 @@ from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, select
 
-from sopotek.core.models import FeatureVector, ModelDecision, PerformanceMetrics, TradeFeedback
+from sopotek.core.models import (
+    FeatureVector,
+    ModelDecision,
+    PerformanceMetrics,
+    TradeFeedback,
+    TradeJournalEntry,
+    TradeJournalSummary,
+)
 from storage import database as storage_db
 
 
@@ -21,15 +28,19 @@ def _utc_naive(value=None):
 
 
 def _dump_json(payload) -> str:
-    return json.dumps(payload or {}, sort_keys=True)
+    if payload is None:
+        payload = {}
+    return json.dumps(payload, sort_keys=True)
 
 
-def _load_json(payload) -> dict:
+def _load_json(payload):
     if not payload:
         return {}
     if isinstance(payload, dict):
         return dict(payload)
-    return dict(json.loads(payload))
+    if isinstance(payload, list):
+        return list(payload)
+    return json.loads(payload)
 
 
 class QuantFeatureRecord(storage_db.Base):
@@ -96,6 +107,47 @@ class TradeFeedbackRecord(storage_db.Base):
     model_name = Column(String, index=True)
     model_probability = Column(Float)
     features_json = Column(Text)
+    metadata_json = Column(Text)
+    timestamp = Column(DateTime, default=_utc_naive, index=True)
+
+
+class TradeJournalEntryRecord(storage_db.Base):
+    __tablename__ = "quant_trade_journal_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    strategy_name = Column(String, index=True)
+    side = Column(String)
+    quantity = Column(Float)
+    pnl = Column(Float)
+    success = Column(Boolean, default=False, index=True)
+    outcome = Column(String, index=True)
+    summary = Column(Text)
+    why_it_lost_json = Column(Text)
+    what_worked_json = Column(Text)
+    what_to_improve_json = Column(Text)
+    tags_json = Column(Text)
+    confidence = Column(Float)
+    model_probability = Column(Float)
+    metadata_json = Column(Text)
+    timestamp = Column(DateTime, default=_utc_naive, index=True)
+
+
+class TradeJournalSummaryRecord(storage_db.Base):
+    __tablename__ = "quant_trade_journal_summaries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    trades_analyzed = Column(Integer)
+    wins = Column(Integer)
+    losses = Column(Integer)
+    win_rate = Column(Float)
+    average_pnl = Column(Float)
+    average_win = Column(Float)
+    average_loss = Column(Float)
+    recurring_loss_patterns_json = Column(Text)
+    recurring_strengths_json = Column(Text)
+    improvement_priorities_json = Column(Text)
+    summary = Column(Text)
     metadata_json = Column(Text)
     timestamp = Column(DateTime, default=_utc_naive, index=True)
 
@@ -185,6 +237,55 @@ class QuantRepository:
             session.refresh(row)
             return row
 
+    def save_trade_journal_entry(self, entry: TradeJournalEntry | dict) -> TradeJournalEntryRecord:
+        journal = entry if isinstance(entry, TradeJournalEntry) else TradeJournalEntry(**dict(entry))
+        row = TradeJournalEntryRecord(
+            symbol=journal.symbol,
+            strategy_name=journal.strategy_name,
+            side=journal.side,
+            quantity=journal.quantity,
+            pnl=journal.pnl,
+            success=bool(journal.success),
+            outcome=journal.outcome,
+            summary=journal.summary,
+            why_it_lost_json=_dump_json(journal.why_it_lost),
+            what_worked_json=_dump_json(journal.what_worked),
+            what_to_improve_json=_dump_json(journal.what_to_improve),
+            tags_json=_dump_json(journal.tags),
+            confidence=journal.confidence,
+            model_probability=journal.model_probability,
+            metadata_json=_dump_json(journal.metadata),
+            timestamp=_utc_naive(journal.timestamp),
+        )
+        with storage_db.SessionLocal() as session:
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return row
+
+    def save_trade_journal_summary(self, summary: TradeJournalSummary | dict) -> TradeJournalSummaryRecord:
+        journal = summary if isinstance(summary, TradeJournalSummary) else TradeJournalSummary(**dict(summary))
+        row = TradeJournalSummaryRecord(
+            trades_analyzed=journal.trades_analyzed,
+            wins=journal.wins,
+            losses=journal.losses,
+            win_rate=journal.win_rate,
+            average_pnl=journal.average_pnl,
+            average_win=journal.average_win,
+            average_loss=journal.average_loss,
+            recurring_loss_patterns_json=_dump_json(journal.recurring_loss_patterns),
+            recurring_strengths_json=_dump_json(journal.recurring_strengths),
+            improvement_priorities_json=_dump_json(journal.improvement_priorities),
+            summary=journal.summary,
+            metadata_json=_dump_json(journal.metadata),
+            timestamp=_utc_naive(journal.timestamp),
+        )
+        with storage_db.SessionLocal() as session:
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return row
+
     def load_feedback(self, *, limit: int | None = None, symbol: str | None = None) -> list[TradeFeedback]:
         with storage_db.SessionLocal() as session:
             stmt = select(TradeFeedbackRecord).order_by(TradeFeedbackRecord.timestamp.asc(), TradeFeedbackRecord.id.asc())
@@ -227,4 +328,62 @@ class QuantRepository:
         with storage_db.SessionLocal() as session:
             stmt = select(PerformanceMetricRecord).order_by(PerformanceMetricRecord.timestamp.desc(), PerformanceMetricRecord.id.desc()).limit(int(limit))
             return list(session.execute(stmt).scalars().all())
+
+    def load_trade_journal_entries(self, *, limit: int = 100, symbol: str | None = None) -> list[TradeJournalEntry]:
+        with storage_db.SessionLocal() as session:
+            stmt = select(TradeJournalEntryRecord).order_by(
+                TradeJournalEntryRecord.timestamp.desc(),
+                TradeJournalEntryRecord.id.desc(),
+            )
+            if symbol:
+                stmt = stmt.where(TradeJournalEntryRecord.symbol == str(symbol))
+            stmt = stmt.limit(int(limit))
+            rows = list(session.execute(stmt).scalars().all())
+        return [
+            TradeJournalEntry(
+                symbol=row.symbol,
+                strategy_name=row.strategy_name,
+                side=row.side,
+                quantity=float(row.quantity or 0.0),
+                pnl=float(row.pnl or 0.0),
+                success=bool(row.success),
+                outcome=row.outcome or ("Win" if row.success else "Loss"),
+                summary=row.summary or "",
+                why_it_lost=list(_load_json(row.why_it_lost_json) or []),
+                what_worked=list(_load_json(row.what_worked_json) or []),
+                what_to_improve=list(_load_json(row.what_to_improve_json) or []),
+                tags=list(_load_json(row.tags_json) or []),
+                confidence=row.confidence,
+                model_probability=row.model_probability,
+                metadata=_load_json(row.metadata_json),
+                timestamp=row.timestamp.replace(tzinfo=timezone.utc) if row.timestamp and row.timestamp.tzinfo is None else row.timestamp,
+            )
+            for row in rows
+        ]
+
+    def load_trade_journal_summaries(self, *, limit: int = 20) -> list[TradeJournalSummary]:
+        with storage_db.SessionLocal() as session:
+            stmt = select(TradeJournalSummaryRecord).order_by(
+                TradeJournalSummaryRecord.timestamp.desc(),
+                TradeJournalSummaryRecord.id.desc(),
+            ).limit(int(limit))
+            rows = list(session.execute(stmt).scalars().all())
+        return [
+            TradeJournalSummary(
+                trades_analyzed=int(row.trades_analyzed or 0),
+                wins=int(row.wins or 0),
+                losses=int(row.losses or 0),
+                win_rate=float(row.win_rate or 0.0),
+                average_pnl=float(row.average_pnl or 0.0),
+                average_win=float(row.average_win or 0.0),
+                average_loss=float(row.average_loss or 0.0),
+                recurring_loss_patterns=list(_load_json(row.recurring_loss_patterns_json) or []),
+                recurring_strengths=list(_load_json(row.recurring_strengths_json) or []),
+                improvement_priorities=list(_load_json(row.improvement_priorities_json) or []),
+                summary=row.summary or "",
+                metadata=_load_json(row.metadata_json),
+                timestamp=row.timestamp.replace(tzinfo=timezone.utc) if row.timestamp and row.timestamp.tzinfo is None else row.timestamp,
+            )
+            for row in rows
+        ]
 

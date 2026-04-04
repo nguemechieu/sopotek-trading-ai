@@ -6,16 +6,12 @@ from typing import Any
 
 import joblib
 import pandas as pd
-from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
-from sklearn.metrics import accuracy_score, roc_auc_score
-from sklearn.model_selection import train_test_split
 
 from sopotek.core.models import TradeFeedback
-
-try:
-    from xgboost import XGBClassifier
-except Exception:  # pragma: no cover - optional dependency
-    XGBClassifier = None
+from sopotek.ml.dataset_builder import TARGET_COLUMN, TradeDatasetBuilder
+from sopotek.ml.inference_engine import InferenceEngine
+from sopotek.ml.model_registry import ModelRegistry
+from sopotek.ml.model_trainer import TradeModelTrainer
 
 
 @dataclass(slots=True)
@@ -27,87 +23,70 @@ class TrainingReport:
 
 
 class TradeOutcomeTrainingPipeline:
-    """Trains a probability-of-success model from trade feedback records."""
+    """End-to-end trade outcome pipeline for dataset building, training, and inference."""
 
     def __init__(
         self,
         *,
         model_name: str = "trade_success_model",
         model_dir: str | Path = "data/models",
+        dataset_builder: TradeDatasetBuilder | None = None,
+        trainer: TradeModelTrainer | None = None,
+        model_registry: ModelRegistry | None = None,
+        inference_engine: InferenceEngine | None = None,
     ) -> None:
-        self.model_name = model_name
+        self.model_name = str(model_name or "trade_success_model").strip() or "trade_success_model"
         self.model_dir = Path(model_dir)
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        self.model: Any | None = None
+        self.dataset_builder = dataset_builder or TradeDatasetBuilder()
+        self.trainer = trainer or TradeModelTrainer(model_name=self.model_name, model_dir=self.model_dir)
+        self.model_registry = model_registry or ModelRegistry(self.model_dir)
+        self.inference_engine = inference_engine or InferenceEngine()
         self.feature_columns: list[str] = []
         self.metrics: dict[str, float] = {}
+        self.model: Any | None = None
 
     @property
     def model_path(self) -> Path:
-        return self.model_dir / f"{self.model_name}.joblib"
+        active_path = self.model_registry.resolve_path(self.model_name)
+        return active_path or self.trainer.model_path
 
     @property
     def is_fitted(self) -> bool:
-        return self.model is not None and bool(self.feature_columns)
+        return self.inference_engine.is_ready
 
     def build_training_frame(self, feedback_rows: list[TradeFeedback | dict[str, Any]]) -> pd.DataFrame:
-        records: list[dict[str, float | int]] = []
-        for row in feedback_rows:
-            feedback = row if isinstance(row, TradeFeedback) else TradeFeedback(**dict(row))
-            if not feedback.features:
-                continue
-            record: dict[str, float | int] = {key: float(value) for key, value in feedback.features.items()}
-            record["side_bias"] = 1.0 if str(feedback.side).lower() == "buy" else -1.0
-            record["target"] = int(bool(feedback.success))
-            if feedback.model_probability is not None:
-                record["prior_model_probability"] = float(feedback.model_probability)
-            records.append(record)
-        return pd.DataFrame.from_records(records)
+        dataset = self.dataset_builder.build_dataset(feedback_rows, dataset_name="trade_feedback")
+        return dataset.frame.copy()
 
     def fit_from_feedback(
         self,
         feedback_rows: list[TradeFeedback | dict[str, Any]],
         *,
-        model_family: str = "auto",
+        model_family: str = "xgboost",
         test_size: float = 0.25,
         random_state: int = 7,
     ) -> TrainingReport:
-        frame = self.build_training_frame(feedback_rows)
-        if frame.empty or frame["target"].nunique() < 2:
+        dataset = self.dataset_builder.build_dataset(feedback_rows, dataset_name="trade_feedback")
+        frame = dataset.frame
+        if frame.empty or frame[TARGET_COLUMN].nunique() < 2:
             raise ValueError("Need at least two labeled trade outcomes to train the ML pipeline.")
 
-        X = frame.drop(columns=["target"]).fillna(0.0)
-        y = frame["target"].astype(int)
-        self.feature_columns = list(X.columns)
-        class_count = int(y.nunique())
-        test_fraction = float(test_size)
-        if len(frame) < 8:
-            test_fraction = 0.5
-        test_count = max(int(round(len(frame) * test_fraction)), class_count)
-        if test_count >= len(frame):
-            test_count = max(1, len(frame) - class_count)
-        can_stratify = class_count > 1 and int(y.value_counts().min()) >= 2 and test_count >= class_count
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            X,
-            y,
-            test_size=test_count if len(frame) < 20 else test_fraction,
+        artifact = self.trainer.train(
+            dataset,
+            model_family=model_family,
+            test_size=test_size,
             random_state=random_state,
-            stratify=y if can_stratify else None,
         )
-
-        self.model = self._build_model(model_family=model_family, random_state=random_state)
-        self.model.fit(X_train, y_train)
-
-        probabilities = self.model.predict_proba(X_test)[:, 1]
-        predictions = (probabilities >= 0.5).astype(int)
-        self.metrics = {
-            "accuracy": float(accuracy_score(y_test, predictions)),
-            "roc_auc": float(roc_auc_score(y_test, probabilities)) if y_test.nunique() > 1 else 0.5,
-            "train_samples": float(len(X_train)),
-            "test_samples": float(len(X_test)),
-        }
-        self.save()
+        self.load(artifact.model_path)
+        self.model_registry.register(
+            self.model_name,
+            artifact.model_path,
+            feature_columns=artifact.feature_columns,
+            metrics=artifact.metrics,
+            metadata=artifact.metadata,
+            set_active=True,
+        )
         return TrainingReport(
             model_name=self.model_name,
             sample_count=int(len(frame)),
@@ -116,51 +95,35 @@ class TradeOutcomeTrainingPipeline:
         )
 
     def predict_probability(self, features: dict[str, float]) -> float:
-        if not self.is_fitted:
-            return 0.5
-        row = {column: float(features.get(column, 0.0)) for column in self.feature_columns}
-        frame = pd.DataFrame([row], columns=self.feature_columns).fillna(0.0)
-        probability = float(self.model.predict_proba(frame)[:, 1][0])
-        return max(0.0, min(1.0, probability))
+        return self.inference_engine.predict_probability(features)
 
     def save(self, path: str | Path | None = None) -> Path:
         if not self.is_fitted:
             raise ValueError("Cannot save an unfitted ML pipeline.")
-        target = Path(path) if path is not None else self.model_path
         payload = {
-            "model_name": self.model_name,
+            "model_name": self.inference_engine.model_name,
+            "model_family": self.inference_engine.model_family,
             "feature_columns": list(self.feature_columns),
             "metrics": dict(self.metrics),
+            "metadata": dict(self.inference_engine.metadata),
             "model": self.model,
         }
+        target = Path(path) if path is not None else self.model_path
         joblib.dump(payload, target)
         return target
 
     def load(self, path: str | Path | None = None) -> "TradeOutcomeTrainingPipeline":
-        source = Path(path) if path is not None else self.model_path
+        source = Path(path) if path is not None else (self.model_registry.resolve_path("latest") or self.model_path)
         payload = joblib.load(source)
-        self.model_name = str(payload.get("model_name") or self.model_name)
-        self.feature_columns = list(payload.get("feature_columns") or [])
-        self.metrics = dict(payload.get("metrics") or {})
-        self.model = payload.get("model")
+        self.inference_engine.load(payload)
+        self.model_name = self.inference_engine.model_name
+        self.feature_columns = list(self.inference_engine.feature_columns)
+        self.metrics = dict(self.inference_engine.metrics)
+        self.model = self.inference_engine.model
         return self
 
-    def _build_model(self, *, model_family: str, random_state: int):
-        family = str(model_family or "auto").strip().lower()
-        if family in {"xgboost", "auto"} and XGBClassifier is not None:
-            return XGBClassifier(
-                n_estimators=60,
-                max_depth=3,
-                learning_rate=0.08,
-                subsample=0.9,
-                colsample_bytree=0.9,
-                eval_metric="logloss",
-                random_state=random_state,
-            )
-        if family == "tree":
-            return RandomForestClassifier(
-                n_estimators=120,
-                max_depth=5,
-                random_state=random_state,
-            )
-        return GradientBoostingClassifier(random_state=random_state)
+    def load_active(self) -> "TradeOutcomeTrainingPipeline":
+        active = self.model_registry.resolve_path("latest")
+        if active is None:
+            raise FileNotFoundError("No active model is registered.")
+        return self.load(active)

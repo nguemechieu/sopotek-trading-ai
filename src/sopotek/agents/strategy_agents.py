@@ -57,6 +57,7 @@ class SignalAgent(BaseAgent, ABC):
         if not isinstance(signal, Signal):
             signal = Signal(**dict(signal))
         await self.bus.publish(EventType.SIGNAL, signal, priority=60, source=self.name)
+        await self.bus.publish(EventType.SIGNAL_EVENT, signal, priority=61, source=self.name)
 
     @abstractmethod
     def generate_signal(self, symbol: str, candles: list[Candle]) -> Signal | None:

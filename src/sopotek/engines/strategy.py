@@ -95,6 +95,7 @@ class StrategyEngine:
             if not isinstance(signal, Signal):
                 signal = Signal(**dict(signal))
             await self.bus.publish(EventType.SIGNAL, signal, priority=60, source=strategy.name)
+            await self.bus.publish(EventType.SIGNAL_EVENT, signal, priority=61, source=strategy.name)
 
     async def _on_strategy_selection(self, event) -> None:
         payload = dict(getattr(event, "data", {}) or {})
