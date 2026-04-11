@@ -253,6 +253,75 @@ def test_sopotek_trading_process_symbol_routes_through_central_pipeline():
     assert trading.pipeline_status_snapshot()["BTC/USDT"]["stage"] == "execution_manager"
 
 
+def test_sopotek_trading_process_symbol_can_publish_signal_without_starting_ai_trading():
+    published_ai = []
+    published_debug = []
+
+    controller = SimpleNamespace(
+        broker=DummyBroker(),
+        symbols=["BTC/USDT"],
+        time_frame="1h",
+        limit=200,
+        strategy_name="Trend Following",
+        strategy_params={},
+        max_portfolio_risk=0.10,
+        max_risk_per_trade=0.02,
+        max_position_size_pct=0.10,
+        max_gross_exposure_pct=2.0,
+        balances={"total": {"USDT": 10000}},
+        initial_capital=10000,
+        market_data_repository=None,
+        trade_repository=None,
+        handle_trade_execution=lambda trade: None,
+        publish_ai_signal=lambda symbol, signal, candles=None: published_ai.append((symbol, dict(signal), list(candles or []))),
+        publish_strategy_debug=lambda symbol, signal, candles=None, features=None: published_debug.append(
+            (symbol, dict(signal), list(candles or []), features)
+        ),
+    )
+
+    trading = SopotekTrading(controller=controller)
+    dataset = FakeDataset(_sample_frame())
+
+    async def fake_get_symbol_dataset(**kwargs):
+        return dataset
+
+    async def forbidden_process_signal(*args, **kwargs):
+        raise AssertionError("passive signal scans must not execute trades")
+
+    async def forbidden_execute(**kwargs):
+        raise AssertionError("execution manager must stay idle during passive scans")
+
+    trading.data_hub.get_symbol_dataset = fake_get_symbol_dataset
+    trading.process_signal = forbidden_process_signal
+    trading.execution_manager.execute = forbidden_execute
+    trading.signal_engine.generate_signal = lambda **kwargs: {
+        "symbol": "BTC/USDT",
+        "side": "buy",
+        "amount": 0.25,
+        "confidence": 0.78,
+        "reason": "breakout detected",
+        "strategy_name": "Trend Following",
+    }
+
+    result = asyncio.run(
+        trading.process_symbol(
+            "BTC/USDT",
+            timeframe="15m",
+            limit=50,
+            allow_execution=False,
+        )
+    )
+
+    assert result["status"] == "signal"
+    assert result["symbol"] == "BTC/USDT"
+    assert result["signal"]["side"] == "buy"
+    assert result["display_signal"]["symbol"] == "BTC/USDT"
+    assert published_ai and published_ai[0][0] == "BTC/USDT"
+    assert published_debug and published_debug[0][0] == "BTC/USDT"
+    assert trading.pipeline_status_snapshot()["BTC/USDT"]["stage"] == "signal_engine"
+    assert trading.pipeline_status_snapshot()["BTC/USDT"]["status"] == "signal"
+
+
 def test_sopotek_trading_process_symbol_uses_symbol_assigned_strategy_variants():
     controller = SimpleNamespace(
         broker=DummyBroker(),

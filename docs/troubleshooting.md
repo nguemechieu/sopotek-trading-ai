@@ -48,6 +48,17 @@ Check these items:
 - refresh markets after login if the symbol list may be stale
 - if the symbol is unsupported, the app should now skip order book and recent-trades refreshes instead of raising repeated background task errors
 
+## Coinbase Futures Still Look Like Spot Markets
+
+Check these items:
+- use `Broker Type = crypto`, not the IBKR-style `futures` profile
+- set `Exchange = coinbase`
+- set `Venue = derivative`
+- reconnect after broker updates so Coinbase futures products are reloaded from the current runtime
+- if you are validating credentials from the command line, use `python src/scripts/test_coinbase_credentials.py --market-type derivative`
+- derivative mode should now show native contract IDs like `SLP-20DEC30-CDE` instead of spot-style aliases such as `BTC/USD:USD`
+- if you still only see spot symbols, verify the connected Coinbase account actually has futures permissions on the account you are using
+
 ## Depth Chart Or Market Info Looks Blank
 
 Check these items:

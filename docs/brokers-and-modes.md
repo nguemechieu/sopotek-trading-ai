@@ -8,6 +8,9 @@
 - supports market data, order submission, order queries, balances, and open orders where the underlying exchange supports them
 - now also carries venue preference handling such as `auto`, `spot`, or `derivative` when available on the venue
 - Coinbase is now treated as venue-aware rather than permanently spot-only, but stock and option paths remain intentionally disabled until a dedicated broker implementation exists
+- Coinbase futures are reached through this crypto adapter path by selecting `Exchange = coinbase` and `Venue = derivative`
+- Coinbase derivative mode now defaults to the futures contract path and reads CFM futures balances and positions directly when the bundled CCXT version lacks native futures account coverage
+- Native Coinbase futures contract IDs such as `SLP-20DEC30-CDE` and `BTC-USD-20241227` are preserved through symbol lists, chart loading, and order submission in derivative mode
 - unsupported or stale symbols are skipped more defensively so background ticker, order book, and recent-trades tasks fail closed instead of flooding the UI with `BadSymbol` errors
 - larger OHLCV requests can be backfilled in chunks on exchanges that return too little history for a single request
 

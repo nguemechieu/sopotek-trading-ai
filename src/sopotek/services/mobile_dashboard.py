@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections import deque
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -51,6 +52,7 @@ class MobileDashboardService:
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.max_alerts = max(10, int(max_alerts))
+        self._temp_write_token = f"{id(self):x}"
         self.positions: dict[str, dict[str, Any]] = {}
         self.recent_alerts: deque[dict[str, Any]] = deque(maxlen=self.max_alerts)
         self.snapshot = MobileDashboardSnapshot()
@@ -190,9 +192,29 @@ class MobileDashboardService:
 
     def _write_json(self, filename: str, payload: dict[str, Any]) -> Path:
         target = self.base_dir / filename
-        temp = target.with_suffix(f"{target.suffix}.tmp")
-        temp.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True), encoding="utf-8")
-        temp.replace(target)
+        temp = target.with_name(f"{target.name}.{self._temp_write_token}.tmp")
+        serialized = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True)
+        last_error: PermissionError | None = None
+        for attempt in range(5):
+            try:
+                temp.write_text(serialized, encoding="utf-8")
+                temp.replace(target)
+                return target
+            except PermissionError as exc:
+                last_error = exc
+                time.sleep(0.05 * (attempt + 1))
+            finally:
+                try:
+                    if temp.exists():
+                        temp.unlink()
+                except OSError:
+                    pass
+        try:
+            target.write_text(serialized, encoding="utf-8")
+        except PermissionError:
+            if last_error is not None:
+                raise last_error
+            raise
         return target
 
     def _append_jsonl(self, filename: str, payload: dict[str, Any]) -> Path:

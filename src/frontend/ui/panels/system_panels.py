@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDockWidget, QGridLayout, QLabel, QTableWidget, QWidget
+from PySide6.QtWidgets import QDockWidget, QGridLayout, QLabel, QTableWidget, QTextBrowser, QVBoxLayout, QWidget
 
 from frontend.console.system_console import SystemConsole
 
@@ -50,6 +50,8 @@ def create_system_status_panel(terminal):
         "License",
         "Risk Profile",
         "Trade Venue",
+        "Data Provider",
+        "Swap Provider",
         "News Mode",
         "Symbols Loaded",
         "Equity",
@@ -67,6 +69,10 @@ def create_system_status_panel(terminal):
         "Behavior Guard",
         "Guard Reason",
         "Health Check",
+        "Readiness",
+        "Quote Health",
+        "Candle Health",
+        "Orderbook Health",
         "Pipeline",
         "Timeframe",
     ]
@@ -105,5 +111,59 @@ def create_ai_signal_panel(terminal):
 
     dock.setWidget(terminal.ai_table)
 
+    def _refresh_on_visibility(visible):
+        if not visible:
+            return
+        refresh = getattr(terminal, "_refresh_ai_monitor_table", None)
+        table = getattr(terminal, "ai_table", None)
+        if callable(refresh) and table is not None:
+            refresh(table, force=True)
+
+    dock.visibilityChanged.connect(_refresh_on_visibility)
+
     terminal.addDockWidget(Qt.RightDockWidgetArea, dock)
+    return dock
+
+
+def create_live_agent_timeline_panel(terminal):
+    dock = QDockWidget("Agent Runtime Monitor", terminal)
+    dock.setObjectName("live_agent_timeline_dock")
+    terminal.live_agent_timeline_dock = dock
+
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(10, 10, 10, 10)
+    layout.setSpacing(8)
+
+    summary = QLabel("Waiting for agent runtime activity in the current session.")
+    summary.setWordWrap(True)
+    summary.setStyleSheet(
+        "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
+        "border-radius: 12px; padding: 10px; font-size: 12px; font-weight: 600;"
+    )
+    layout.addWidget(summary)
+
+    browser = QTextBrowser()
+    browser.setOpenExternalLinks(False)
+    browser.setStyleSheet(
+        "QTextBrowser { background-color: #0f1726; color: #d9e6f7; border: 1px solid #20324d; "
+        "border-radius: 12px; padding: 10px; }"
+    )
+    layout.addWidget(browser, 1)
+
+    terminal.live_agent_timeline_summary = summary
+    terminal.live_agent_timeline_browser = browser
+    dock.setWidget(container)
+
+    def _refresh_on_visibility(visible):
+        if not visible:
+            return
+        refresh = getattr(terminal, "_refresh_live_agent_timeline_panel", None)
+        if callable(refresh):
+            refresh(force=True)
+
+    dock.visibilityChanged.connect(_refresh_on_visibility)
+
+    terminal.addDockWidget(Qt.RightDockWidgetArea, dock)
+    dock.hide()
     return dock

@@ -13,6 +13,8 @@ from frontend.ui.app_controller import AppController, _bounded_window_extent
 from event_bus.event_types import EventType
 from market_data.ticker_buffer import TickerBuffer
 from market_data.ticker_stream import TickerStream
+from market_data.websocket.oanda_web_socket import OandaWebSocket
+from sopotek.core.models import TraderDecision
 
 
 class _SignalRecorder:
@@ -155,6 +157,55 @@ def test_request_candle_data_warns_when_no_history_is_available():
     assert controller.candle_signal.calls == []
 
 
+def test_request_candle_data_skips_runtime_shortfall_warning_after_signal_history_floor():
+    base_timestamp_ms = 1710000000000
+    candles = [
+        [base_timestamp_ms + (index * 3600000), 100.0, 101.0, 99.0, 100.5, 10.0]
+        for index in range(135)
+    ]
+    controller, logs = _make_controller(candles)
+
+    df = asyncio.run(controller.request_candle_data("DEXT/USDC", timeframe="1h", limit=500))
+
+    assert df is not None
+    assert not any("Not enough data for DEXT/USDC (1h)" in message for message, _ in logs)
+
+
+def test_request_candle_data_ignores_malformed_market_symbol_before_fetch():
+    logs = []
+    fetch_calls = []
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.market_data_messages.invalid_symbol")
+    controller.time_frame = "1h"
+    controller.terminal = SimpleNamespace(
+        system_console=SimpleNamespace(log=lambda message, level="INFO": logs.append((message, level)))
+    )
+    controller.candle_buffers = {}
+    controller.candle_buffer = _BufferRecorder()
+    controller.candle_signal = _SignalRecorder()
+    controller._market_data_shortfall_notices = {}
+    controller._market_data_warning_timestamps = {}
+    controller._resolve_history_limit = lambda limit=None: int(limit or 200)
+
+    async def fake_fetch(symbol, timeframe="1h", limit=200, start_time=None, end_time=None, history_scope="runtime"):
+        fetch_calls.append(symbol)
+        return [[1710000000000, 100.0, 101.0, 99.0, 100.5, 10.0]]
+
+    controller._safe_fetch_ohlcv = fake_fetch
+
+    df = asyncio.run(controller.request_candle_data("00/USD", timeframe="1h", limit=120))
+
+    assert df is None
+    assert fetch_calls == []
+    assert logs == [
+        (
+            "Ignoring malformed market symbol 00/USD. The app will skip scans and live market data for this symbol until a valid market is selected.",
+            "WARN",
+        )
+    ]
+    assert controller.candle_signal.calls == []
+
+
 def test_safe_fetch_ohlcv_does_not_synthesize_history_from_single_ticker():
     logs = []
     controller = AppController.__new__(AppController)
@@ -268,6 +319,116 @@ def test_safe_fetch_ticker_rate_limits_hotspot_warning_without_cache():
     ]
 
 
+def test_safe_fetch_ticker_uses_solana_network_label_for_transient_failures():
+    logs = []
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.market_data_messages.solana_warning")
+    controller.terminal = SimpleNamespace(
+        system_console=SimpleNamespace(log=lambda message, level="INFO": logs.append((message, level)))
+    )
+    controller.ticker_stream = TickerStream()
+    controller.ticker_buffer = TickerBuffer(max_length=20)
+    controller._market_data_warning_timestamps = {}
+
+    async def failing_fetch(symbol):
+        raise OSError("Cannot connect to host api.mainnet-beta.solana.com:443 ssl:default [getaddrinfo failed]")
+
+    controller.broker = SimpleNamespace(exchange_name="solana", fetch_ticker=failing_fetch)
+
+    result = asyncio.run(controller._safe_fetch_ticker("SOL/USDC"))
+
+    assert result is None
+    assert logs == [
+        (
+            "Solana DEX is temporarily unreachable (Cannot connect to host api.mainnet-beta.solana.com:443 ssl:default [getaddrinfo failed]). The app will keep retrying automatically.",
+            "WARN",
+        )
+    ]
+
+
+def test_safe_fetch_ticker_uses_reconnecting_message_for_oanda_session_shutdown():
+    logs = []
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.market_data_messages.oanda_reconnect_warning")
+    controller.terminal = SimpleNamespace(
+        system_console=SimpleNamespace(log=lambda message, level="INFO": logs.append((message, level)))
+    )
+    controller.ticker_stream = TickerStream()
+    controller.ticker_buffer = TickerBuffer(max_length=20)
+    controller._market_data_warning_timestamps = {}
+
+    async def failing_fetch(symbol):
+        raise RuntimeError("Cannot write to closing transport")
+
+    controller.broker = SimpleNamespace(exchange_name="oanda", fetch_ticker=failing_fetch)
+
+    result = asyncio.run(controller._safe_fetch_ticker("EUR/USD"))
+
+    assert result is None
+    assert logs == [
+        (
+            "OANDA session is reconnecting after a transport shutdown. The app will retry automatically.",
+            "WARN",
+        )
+    ]
+
+
+def test_safe_fetch_ticker_caches_snapshot_for_readiness_gate():
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.market_data_messages.cache_ticker")
+    controller.ticker_stream = TickerStream()
+    controller.ticker_buffer = TickerBuffer(max_length=20)
+    controller._market_data_warning_timestamps = {}
+    controller._log_market_data_warning_once = lambda *args, **kwargs: None
+    controller._normalize_market_data_symbol = lambda symbol: str(symbol or "").strip().upper()
+    controller._resolve_preferred_market_symbol = lambda symbol: str(symbol or "").strip().upper()
+    controller._broker_supports_market_symbol = lambda symbol: True
+    controller._log_unsupported_market_symbol = lambda *args, **kwargs: None
+    controller._is_transient_market_data_error = lambda exc: False
+    controller._is_reconnecting_market_data_error = lambda exc: False
+    controller._cached_ticker_snapshot = lambda symbol: None
+    controller.broker = SimpleNamespace(
+        exchange_name="oanda",
+        fetch_ticker=lambda symbol: asyncio.sleep(
+            0,
+            result={"symbol": symbol, "bid": 10.0, "ask": 10.2, "last": 10.2},
+        ),
+    )
+
+    result = asyncio.run(controller._safe_fetch_ticker("EUR/USD"))
+
+    assert result["symbol"] == "EUR/USD"
+    assert result.get("_received_at")
+    assert controller.ticker_buffer.latest("EUR/USD")["symbol"] == "EUR/USD"
+    assert controller.ticker_stream.get("EUR/USD")["symbol"] == "EUR/USD"
+
+
+def test_evaluate_live_readiness_report_async_warms_market_data_before_report():
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.market_data_messages.readiness_async")
+    controller.time_frame = "1h"
+    calls = []
+    controller._primary_runtime_symbol = lambda symbol=None: str(symbol or "EUR/USD").strip().upper()
+
+    async def fake_assess(symbol, *, timeframe=None, ticker=None):
+        calls.append((symbol, timeframe))
+        return {"blocked": False}
+
+    controller._assess_trade_market_data_guard = fake_assess
+    controller.get_live_readiness_report = lambda symbol=None, timeframe=None: {
+        "ready": True,
+        "symbol": symbol,
+        "timeframe": timeframe,
+    }
+
+    result = asyncio.run(controller.evaluate_live_readiness_report_async(symbol="EUR/USD", timeframe="15m"))
+
+    assert calls == [("EUR/USD", "15m")]
+    assert result["ready"] is True
+    assert result["symbol"] == "EUR/USD"
+    assert result["timeframe"] == "15m"
+
+
 def test_safe_fetch_ticker_skips_unsupported_coinbase_symbol():
     logs = []
     controller = AppController.__new__(AppController)
@@ -321,36 +482,38 @@ def test_request_candle_data_resolves_coinbase_derivative_contract_symbol():
         exchange_name="coinbase",
         market_preference="derivative",
         resolved_market_preference="derivative",
-        symbols=["BTC/USD:USD"],
+        symbols=["SLP-20DEC30-CDE"],
         exchange=SimpleNamespace(
             markets={
-                "BTC/USD": {
-                    "symbol": "BTC/USD",
-                    "base": "BTC",
+                "SLP/USD": {
+                    "symbol": "SLP/USD",
+                    "base": "SLP",
                     "quote": "USD",
                     "spot": True,
                     "active": True,
                 },
-                "BTC/USD:USD": {
-                    "symbol": "BTC/USD:USD",
-                    "base": "BTC",
+                "SLP-20DEC30-CDE": {
+                    "symbol": "SLP-20DEC30-CDE",
+                    "base": "SLP",
                     "quote": "USD",
                     "settle": "USD",
                     "contract": True,
                     "future": True,
+                    "native_symbol": "SLP-20DEC30-CDE",
+                    "underlying_symbol": "SLP/USD",
                     "active": True,
                 },
             }
         ),
     )
 
-    df = asyncio.run(controller.request_candle_data("BTC/USD", timeframe="1h", limit=2))
+    df = asyncio.run(controller.request_candle_data("SLP/USD", timeframe="1h", limit=2))
 
-    assert requested_symbols == ["BTC/USD:USD"]
+    assert requested_symbols == ["SLP-20DEC30-CDE"]
     assert df is not None
-    assert controller.candle_signal.calls[-1][0] == "BTC/USD:USD"
-    assert "BTC/USD:USD" in controller.candle_buffers
-    assert "BTC/USD" in controller.candle_buffers
+    assert controller.candle_signal.calls[-1][0] == "SLP-20DEC30-CDE"
+    assert "SLP-20DEC30-CDE" in controller.candle_buffers
+    assert "SLP/USD" in controller.candle_buffers
 
 
 def test_extract_balance_equity_value_reads_nested_nav():
@@ -445,6 +608,111 @@ def test_set_forex_candle_price_component_updates_live_oanda_preferences():
     assert controller.settings._values["market_data/forex_candle_price_component"] == "bid"
     assert controller.config.broker.options["candle_price_component"] == "bid"
     assert observed == ["bid"]
+
+
+def test_build_ws_client_returns_oanda_stream_client():
+    controller = AppController.__new__(AppController)
+    controller.symbols = ["EUR/USD", "GBP/USD"]
+    controller.ws_bus = SimpleNamespace()
+    controller.config = SimpleNamespace(
+        broker=SimpleNamespace(
+            exchange="oanda",
+            api_key="token",
+            account_id="acct-1",
+            mode="practice",
+        )
+    )
+    controller.broker = SimpleNamespace(mode="practice")
+    controller.logger = logging.getLogger("test.market_data_messages.oanda_ws_client")
+
+    client = AppController._build_ws_client(controller, "oanda")
+
+    assert isinstance(client, OandaWebSocket)
+    assert client.symbols == ["EUR_USD", "GBP_USD"]
+    assert client.url == "https://stream-fxpractice.oanda.com/v3/accounts/acct-1/pricing/stream"
+
+
+def test_start_market_stream_uses_ws_client_for_oanda_instead_of_forcing_polling():
+    controller = AppController.__new__(AppController)
+    controller.config = SimpleNamespace(broker=SimpleNamespace(exchange="oanda"))
+    controller.logger = logging.getLogger("test.market_data_messages.oanda_ws_start")
+    controller.symbols = ["EUR/USD"]
+    controller.ws_manager = None
+    controller.ws_bus = None
+    controller._ws_task = None
+    controller._ws_bus_task = None
+    controller._ticker_task = None
+
+    async def fake_on_ws_market_tick(event):
+        return None
+
+    async def fake_connect():
+        return None
+
+    polling_calls = []
+    created_tasks = []
+
+    class _Task:
+        def done(self):
+            return False
+
+        def cancel(self):
+            return None
+
+        def add_done_callback(self, callback):
+            return None
+
+    async def fake_start_ticker_polling():
+        polling_calls.append("poll")
+        return None
+
+    def fake_build_ws_client(exchange):
+        assert exchange == "oanda"
+        return SimpleNamespace(connect=fake_connect)
+
+    def fake_create_task(coro, name):
+        created_tasks.append(name)
+        coro.close()
+        return _Task()
+
+    controller._on_ws_market_tick = fake_on_ws_market_tick
+    controller._start_ticker_polling = fake_start_ticker_polling
+    controller._build_ws_client = fake_build_ws_client
+    controller._create_task = fake_create_task
+
+    asyncio.run(AppController._start_market_stream(controller))
+
+    assert polling_calls == []
+    assert created_tasks == ["ws_event_bus", "ws_connect"]
+    assert controller.ws_manager is not None
+
+
+def test_on_ws_market_tick_normalizes_oanda_symbols_for_buffers_and_ui():
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.market_data_messages.oanda_ws_tick_normalization")
+    controller.ticker_stream = TickerStream()
+    controller.ticker_buffer = TickerBuffer(max_length=20)
+    controller.ticker_signal = _SignalRecorder()
+    controller._prepare_ticker_snapshot = AppController._prepare_ticker_snapshot.__get__(controller, AppController)
+
+    event = SimpleNamespace(
+        data={
+            "symbol": "EUR_USD",
+            "instrument": "EUR_USD",
+            "bid": 1.1,
+            "ask": 1.1002,
+            "price": 1.1001,
+            "timestamp": "2026-04-06T12:00:00Z",
+        }
+    )
+
+    asyncio.run(AppController._on_ws_market_tick(controller, event))
+
+    cached = controller.ticker_stream.get("EUR/USD")
+    assert isinstance(cached, dict)
+    assert cached["symbol"] == "EUR/USD"
+    assert controller.ticker_buffer.latest("EUR/USD")["symbol"] == "EUR/USD"
+    assert controller.ticker_signal.calls == [("EUR/USD", 1.1, 1.1002)]
 
 
 def test_safe_fetch_ohlcv_returns_live_broker_rows_for_non_range_requests():
@@ -622,6 +890,70 @@ def test_handle_trading_agent_bus_event_emits_runtime_message():
     assert payload["event_type"] == EventType.RISK_ALERT
     assert payload["symbol"] == "EUR/USD"
     assert "Risk blocked the trade" in payload["message"]
+
+
+def test_handle_trading_agent_bus_event_normalizes_trader_decision_dataclass():
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.app_controller.trader_agent")
+    controller.agent_runtime_signal = _SignalRecorder()
+    controller._live_agent_decision_events = {}
+    controller._live_agent_runtime_feed = []
+
+    event = SimpleNamespace(
+        type=EventType.DECISION_EVENT,
+        source="TraderAgent",
+        timestamp=datetime(2026, 3, 17, 10, 8, tzinfo=timezone.utc),
+        data=TraderDecision(
+            profile_id="growth",
+            symbol="EUR/USD",
+            action="BUY",
+            side="buy",
+            quantity=1.25,
+            price=1.0842,
+            confidence=0.78,
+            selected_strategy="Trend Following",
+            reasoning="BUY because weighted voting favored Trend Following.",
+            model_probability=0.84,
+            applied_constraints=["growth profile", "full size"],
+            votes={"buy": 1.25, "sell": 0.42},
+            features={"rsi": 31.2},
+            metadata={"risk_level": "medium"},
+            timestamp=datetime(2026, 3, 17, 10, 7, tzinfo=timezone.utc),
+        ),
+    )
+
+    asyncio.run(controller._handle_trading_agent_bus_event(event))
+
+    payload = controller.agent_runtime_signal.calls[0][0]
+    assert payload["event_type"] == EventType.DECISION_EVENT
+    assert payload["agent_name"] == "TraderAgent"
+    assert payload["profile_id"] == "growth"
+    assert payload["action"] == "BUY"
+    assert payload["strategy_name"] == "Trend Following"
+    assert payload["stage"] == "buy"
+    assert "TraderAgent chose BUY" in payload["message"]
+    assert payload["votes"]["buy"] == 1.25
+    assert controller.live_agent_runtime_feed(limit=5)[0]["symbol"] == "EUR/USD"
+
+
+def test_bind_trading_runtime_streams_subscribes_to_trader_decision_events():
+    class _EventBusRecorder:
+        def __init__(self):
+            self.calls = []
+
+        def subscribe(self, event_type, handler):
+            self.calls.append((event_type, handler))
+
+    recorder = _EventBusRecorder()
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.app_controller.runtime_bindings")
+    controller.trading_system = SimpleNamespace(agent_memory=None, event_bus=recorder)
+    controller._handle_trading_agent_bus_event = lambda event: None
+
+    controller._bind_trading_runtime_streams()
+
+    subscribed_event_types = {event_type for event_type, _handler in recorder.calls}
+    assert EventType.DECISION_EVENT in subscribed_event_types
 
 
 def test_live_agent_runtime_feed_keeps_latest_rows_and_supports_filters():

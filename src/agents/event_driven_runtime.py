@@ -36,6 +36,11 @@ class EventDrivenAgentRuntime:
         self.bus.subscribe(EventType.ORDER_REQUEST, self._on_order_request)
         self.bus.subscribe(EventType.ORDER_FILLED, self._on_order_filled)
 
+    async def _process_optional_agent(self, agent, context):
+        if agent is None:
+            return dict(context or {})
+        return await agent.process(dict(context or {}))
+
     async def start(self):
         if self._started:
             return
@@ -96,9 +101,9 @@ class EventDrivenAgentRuntime:
         if not isinstance(context.get("signal"), dict):
             self._complete(context)
             return
-        context = await self.regime_agent.process(context)
-        context = await self.portfolio_agent.process(context)
-        context = await self.risk_agent.process(context)
+        context = await self._process_optional_agent(self.regime_agent, context)
+        context = await self._process_optional_agent(self.portfolio_agent, context)
+        context = await self._process_optional_agent(self.risk_agent, context)
         review = dict(context.get("trade_review") or {})
         if not review.get("approved"):
             self._complete(context)
@@ -118,6 +123,9 @@ class EventDrivenAgentRuntime:
     async def _on_order_request(self, event):
         context = dict(getattr(event, "data", {}) or {})
         if not context.get("symbol"):
+            return
+        if self.execution_agent is None:
+            self._complete(context)
             return
         context = await self.execution_agent.process(context)
         if context.get("execution_result") is None:

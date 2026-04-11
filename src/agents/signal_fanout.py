@@ -24,19 +24,65 @@ def _merge_assignment_rows(existing_rows, new_rows):
     return merged_rows
 
 
+def _candidate_fingerprint(candidate):
+    signal = dict((candidate or {}).get("signal") or {})
+    return (
+        str((candidate or {}).get("agent_name") or "").strip(),
+        str(signal.get("strategy_name") or (candidate or {}).get("strategy_name") or "").strip(),
+        str(signal.get("timeframe") or (candidate or {}).get("timeframe") or "").strip(),
+        str(signal.get("side") or (candidate or {}).get("side") or "").strip().lower(),
+    )
+
+
+def _candidate_rank(candidate):
+    signal = dict((candidate or {}).get("signal") or {})
+    adaptive_score = float(signal.get("adaptive_score", 0.0) or 0.0)
+    weighted_confidence = float(signal.get("confidence", 0.0) or 0.0) * max(
+        0.0001, float(signal.get("strategy_assignment_weight", 0.0) or 0.0)
+    )
+    return (
+        adaptive_score,
+        weighted_confidence,
+        float(signal.get("confidence", 0.0) or 0.0),
+    )
+
+
 def merge_signal_agent_results(context, results):
     working = dict(context or {})
     merged_assignments = _merge_assignment_rows(working.get("assigned_strategies") or [], [])
-    merged_candidates = [dict(candidate) for candidate in list(working.get("signal_candidates") or []) if isinstance(candidate, dict)]
+    merged_candidates = []
+    seen_candidates = {}
     blocked_reasons = []
+
+    for candidate in list(working.get("signal_candidates") or []):
+        if not isinstance(candidate, dict):
+            continue
+        candidate_copy = dict(candidate)
+        fingerprint = _candidate_fingerprint(candidate_copy)
+        existing_index = seen_candidates.get(fingerprint)
+        if existing_index is None:
+            seen_candidates[fingerprint] = len(merged_candidates)
+            merged_candidates.append(candidate_copy)
+            continue
+        if _candidate_rank(candidate_copy) > _candidate_rank(merged_candidates[existing_index]):
+            merged_candidates[existing_index] = candidate_copy
 
     for result in list(results or []):
         if not isinstance(result, dict):
             continue
         merged_assignments = _merge_assignment_rows(merged_assignments, result.get("assigned_strategies") or [])
         for candidate in list(result.get("signal_candidates") or []):
-            if isinstance(candidate, dict):
-                merged_candidates.append(dict(candidate))
+            if not isinstance(candidate, dict):
+                continue
+            candidate_copy = dict(candidate)
+            fingerprint = _candidate_fingerprint(candidate_copy)
+            existing_index = seen_candidates.get(fingerprint)
+            if existing_index is None:
+                seen_candidates[fingerprint] = len(merged_candidates)
+                merged_candidates.append(candidate_copy)
+                continue
+            if _candidate_rank(candidate_copy) > _candidate_rank(merged_candidates[existing_index]):
+                merged_candidates[existing_index] = candidate_copy
         if result.get("blocked_by_news_bias"):
             reason = str(result.get("news_bias_reason") or "").strip()
             if reason:

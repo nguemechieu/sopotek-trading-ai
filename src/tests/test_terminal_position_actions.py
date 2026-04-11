@@ -371,8 +371,10 @@ def test_update_risk_heatmap_uses_live_position_snapshot():
         def __init__(self):
             self.image = None
             self.levels = None
+            self.calls = 0
 
         def setImage(self, image, autoLevels=False, levels=None):
+            self.calls += 1
             self.image = image
             self.levels = levels
 
@@ -403,6 +405,40 @@ def test_update_risk_heatmap_uses_live_position_snapshot():
     assert fake.risk_map.image.shape == (1, 1)
     assert "Live risk snapshot across 1 position" in state["message"]
     assert state["tone"] == "positive"
+
+
+def test_update_risk_heatmap_skips_duplicate_renders_for_identical_positions():
+    class _RiskMap:
+        def __init__(self):
+            self.calls = 0
+
+        def setImage(self, image, autoLevels=False, levels=None):
+            self.calls += 1
+
+    fake = SimpleNamespace(
+        risk_map=_RiskMap(),
+        _latest_positions_snapshot=[
+            {
+                "symbol": "EUR/USD",
+                "side": "long",
+                "amount": 1000.0,
+                "entry_price": 1.10,
+                "mark_price": 1.11,
+                "value": 1110.0,
+            }
+        ],
+        _normalize_position_entry=lambda raw: Terminal._normalize_position_entry(
+            SimpleNamespace(_lookup_symbol_mid_price=lambda _symbol: None), raw
+        ),
+        _portfolio_positions_snapshot=lambda: [],
+        _set_risk_heatmap_status=lambda *_args, **_kwargs: None,
+        _risk_heatmap_signature=None,
+    )
+
+    Terminal._update_risk_heatmap(fake)
+    Terminal._update_risk_heatmap(fake)
+
+    assert fake.risk_map.calls == 1
 
 
 def test_populate_strategy_picker_groups_family_variants_together():
@@ -1145,15 +1181,22 @@ def test_handle_agent_runtime_event_refreshes_selected_strategy_assignment_and_p
     _app()
     window = SimpleNamespace(_strategy_assignment_selected_symbol="EUR/USD")
     timeline_window = object()
+    trader_monitor_window = object()
     refreshed = []
     timeline_refreshes = []
+    trader_monitor_refreshes = []
     notifications = []
     logs = []
     fake = SimpleNamespace(
         _ui_shutting_down=False,
-        detached_tool_windows={"strategy_assignments": window, "agent_timeline": timeline_window},
+        detached_tool_windows={
+            "strategy_assignments": window,
+            "agent_timeline": timeline_window,
+            "trader_agent_monitor": trader_monitor_window,
+        },
         _is_qt_object_alive=lambda obj: obj is not None,
         _refresh_agent_timeline_window=lambda window=None: timeline_refreshes.append(window),
+        _refresh_trader_agent_monitor_window=lambda window=None: trader_monitor_refreshes.append(window),
         _refresh_strategy_assignment_window=lambda window=None, message=None: refreshed.append((window, message)),
         _push_notification=lambda *args, **kwargs: notifications.append((args, kwargs)),
         system_console=SimpleNamespace(log=lambda message, level="INFO": logs.append((message, level))),
@@ -1183,5 +1226,6 @@ def test_handle_agent_runtime_event_refreshes_selected_strategy_assignment_and_p
     assert refreshed[0][0] is window
     assert "Live agent update" in refreshed[0][1]
     assert timeline_refreshes == [timeline_window, timeline_window]
+    assert trader_monitor_refreshes == [trader_monitor_window, trader_monitor_window]
     assert notifications[0][0][0] == "Agent risk blocked"
     assert logs[0][1] == "WARN"

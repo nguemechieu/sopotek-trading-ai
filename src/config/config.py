@@ -33,7 +33,7 @@ class BrokerConfig(BaseModel):
 
     exchange: Optional[str] = Field(
         default=None,
-        description="Exchange or broker name (binance, coinbase, stellar, alpaca, oanda, schwab, ibkr, amp, tradovate)"
+        description="Exchange or broker name (binance, coinbase, solana, stellar, alpaca, oanda, schwab, ibkr, amp, tradovate)"
     )
 
     customer_region: Optional[str] = Field(

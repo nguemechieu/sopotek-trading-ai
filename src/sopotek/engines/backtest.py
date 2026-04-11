@@ -89,13 +89,19 @@ class EventDrivenBacktestEngine:
                 self.runtime.broker.update_market_price(candle.symbol, candle.close, timestamp=candle.end)
             await self.runtime.bus.publish(EventType.CANDLE, candle, priority=40, source="backtest_engine")
             await self.runtime.bus.publish(
+                EventType.MARKET_DATA_TOPIC,
+                {"symbol": candle.symbol, "price": candle.close, "timestamp": candle.end},
+                priority=19,
+                source="backtest_engine",
+            )
+            await self.runtime.bus.publish(
                 EventType.MARKET_TICK,
                 {"symbol": candle.symbol, "price": candle.close, "timestamp": candle.end},
                 priority=20,
                 source="backtest_engine",
             )
             await self._drain_bus()
-            processed_events += 2
+            processed_events += 3
 
         await self.runtime.bus.publish(
             EventType.BACKTEST_COMPLETED,

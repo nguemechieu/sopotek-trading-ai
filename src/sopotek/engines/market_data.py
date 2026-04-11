@@ -66,6 +66,7 @@ class LiveFeedManager:
             payload = dict(tick or {})
             payload["symbol"] = payload.get("symbol", symbol)
             await self.bus.publish(EventType.MARKET_DATA_EVENT, payload, priority=19, source="live_feed")
+            await self.bus.publish(EventType.MARKET_DATA_TOPIC, payload, priority=19, source="live_feed")
             await self.bus.publish(EventType.MARKET_TICK, payload, priority=20, source="live_feed")
             await self.bus.publish(EventType.PRICE_UPDATE, payload, priority=21, source="live_feed")
 
@@ -169,6 +170,7 @@ class MarketDataEngine:
         payload = dict(tick or {})
         payload["symbol"] = payload.get("symbol", symbol)
         await self.bus.publish(EventType.MARKET_DATA_EVENT, payload, priority=19, source="market_data_engine")
+        await self.bus.publish(EventType.MARKET_DATA_TOPIC, payload, priority=19, source="market_data_engine")
         await self.bus.publish(EventType.MARKET_TICK, payload, priority=20, source="market_data_engine")
         await self.bus.publish(EventType.PRICE_UPDATE, payload, priority=21, source="market_data_engine")
 
@@ -204,6 +206,12 @@ class MarketDataEngine:
             await self.bus.publish(EventType.CANDLE, candle, priority=40, source="market_data_engine")
             await self.bus.publish(
                 EventType.MARKET_DATA_EVENT,
+                {"symbol": candle.symbol, "price": candle.close, "timestamp": candle.end},
+                priority=19,
+                source="market_data_engine",
+            )
+            await self.bus.publish(
+                EventType.MARKET_DATA_TOPIC,
                 {"symbol": candle.symbol, "price": candle.close, "timestamp": candle.end},
                 priority=19,
                 source="market_data_engine",

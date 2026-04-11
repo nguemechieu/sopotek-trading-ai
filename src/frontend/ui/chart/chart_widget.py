@@ -184,28 +184,28 @@ class ChartWidget(QWidget):
             """
         )
         info_layout = QHBoxLayout(self.info_bar)
-        info_layout.setContentsMargins(12, 8, 12, 8)
-        info_layout.setSpacing(10)
+        info_layout.setContentsMargins(10, 5, 10, 5)
+        info_layout.setSpacing(8)
 
         left_info = QVBoxLayout()
         left_info.setContentsMargins(0, 0, 0, 0)
-        left_info.setSpacing(1)
+        left_info.setSpacing(0)
 
         self.instrument_label = QLabel()
-        self.instrument_label.setStyleSheet("color: #f6f8fb; font-weight: 800; font-size: 16px;")
+        self.instrument_label.setStyleSheet("color: #f6f8fb; font-weight: 800; font-size: 15px;")
         left_info.addWidget(self.instrument_label)
 
         self.market_stats_label = QLabel()
-        self.market_stats_label.setStyleSheet("color: #32d296; font-weight: 800; font-size: 15px;")
+        self.market_stats_label.setStyleSheet("color: #32d296; font-weight: 800; font-size: 14px;")
         left_info.addWidget(self.market_stats_label)
         info_layout.addLayout(left_info, 1)
 
         self.market_meta_label = QLabel()
         self.market_meta_label.setStyleSheet("color: #728198; font-size: 11px;")
-        self.market_meta_label.setWordWrap(True)
+        self.market_meta_label.setWordWrap(False)
         self.market_micro_label = QLabel()
         self.market_micro_label.setStyleSheet("color: #9aa4b2; font-size: 11px;")
-        self.market_micro_label.setWordWrap(True)
+        self.market_micro_label.setWordWrap(False)
         self.background_context_label = QLabel()
         self.background_context_label.setStyleSheet("color: #e7c56f; font-size: 11px; font-weight: 700;")
         self.background_context_label.setWordWrap(True)
@@ -214,7 +214,7 @@ class ChartWidget(QWidget):
         self.ohlcv_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         header_details = QVBoxLayout()
         header_details.setContentsMargins(0, 0, 0, 0)
-        header_details.setSpacing(2)
+        header_details.setSpacing(1)
         header_details.addWidget(self.market_meta_label)
         header_details.addWidget(self.market_micro_label)
         info_layout.addLayout(header_details, 2)
@@ -233,16 +233,16 @@ class ChartWidget(QWidget):
             """
         )
         controls_layout = QHBoxLayout(self.controls_container)
-        controls_layout.setContentsMargins(8, 6, 8, 6)
-        controls_layout.setSpacing(6)
+        controls_layout.setContentsMargins(6, 3, 6, 3)
+        controls_layout.setSpacing(4)
 
-        self.timeframe_title = QLabel("Timeframe")
+        self.timeframe_title = QLabel("TF")
         self.timeframe_title.setStyleSheet("color: #8fa4bf; font-size: 11px; font-weight: 700; padding-right: 4px;")
         controls_layout.addWidget(self.timeframe_title)
 
         self.timeframe_picker = QComboBox()
-        self.timeframe_picker.setMinimumWidth(88)
-        self.timeframe_picker.setMaximumWidth(108)
+        self.timeframe_picker.setMinimumWidth(74)
+        self.timeframe_picker.setMaximumWidth(94)
         self.timeframe_picker.setStyleSheet(
             """
             QComboBox {
@@ -250,7 +250,7 @@ class ChartWidget(QWidget):
                 color: #f6f8fb;
                 border: 1px solid #2b3b54;
                 border-radius: 12px;
-                padding: 6px 12px;
+                padding: 4px 10px;
                 font-weight: 700;
             }
             QComboBox::drop-down {
@@ -271,7 +271,7 @@ class ChartWidget(QWidget):
         self.overlay_toggle_button.setCheckable(True)
         self.overlay_toggle_button.setChecked(True)
         self.overlay_toggle_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.overlay_toggle_button.setMinimumHeight(30)
+        self.overlay_toggle_button.setMinimumHeight(26)
         self.overlay_toggle_button.setStyleSheet(self._chart_nav_button_style(accent=True))
         self.overlay_toggle_button.clicked.connect(lambda checked=False: self._set_chart_overlays_visible(checked))
         controls_layout.addWidget(self.overlay_toggle_button)
@@ -287,15 +287,13 @@ class ChartWidget(QWidget):
         ):
             button = QPushButton(label)
             button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            button.setMinimumHeight(30)
+            button.setMinimumHeight(26)
             button.setStyleSheet(self._chart_nav_button_style(accent=(label == "Fit")))
             button.clicked.connect(lambda _checked=False, action=callback: action())
             controls_layout.addWidget(button)
             self.chart_nav_buttons.append(button)
             if label == "Fit":
                 self.fit_chart_button = button
-
-        info_layout.addWidget(self.controls_container, 0)
 
         layout.addWidget(self.info_bar)
 
@@ -322,6 +320,8 @@ class ChartWidget(QWidget):
             }
             """
         )
+        self.market_tabs.setCornerWidget(self.controls_container, QtCore.Qt.Corner.TopRightCorner)
+        self.market_tabs.currentChanged.connect(lambda _index: self._sync_chart_controls_visibility())
         layout.addWidget(self.market_tabs, 1)
 
         self.candlestick_page = QWidget()
@@ -456,6 +456,8 @@ class ChartWidget(QWidget):
         metrics_layout.setHorizontalSpacing(10)
         metrics_layout.setVerticalSpacing(10)
         self.market_info_cards = {}
+        self.market_info_card_frames = {}
+        self.market_info_card_titles = {}
         for index, key in enumerate(
             ["Last", "Mid", "Spread", "Best Bid", "Best Ask", "Range", "Visible Vol", "Depth Bias"]
         ):
@@ -473,6 +475,8 @@ class ChartWidget(QWidget):
             card_layout.addWidget(value)
             metrics_layout.addWidget(card, index // 4, index % 4)
             self.market_info_cards[key] = value
+            self.market_info_card_frames[key] = card
+            self.market_info_card_titles[key] = title
         info_tab_layout.addWidget(metrics_widget)
 
         self.market_info_details = QTextBrowser()
@@ -481,6 +485,7 @@ class ChartWidget(QWidget):
         )
         info_tab_layout.addWidget(self.market_info_details, 1)
         self.market_tabs.addTab(self.market_info_page, "Market Info")
+        self._sync_chart_controls_visibility()
 
         self._style_plot(self.price_plot, right_label="Price", show_bottom=False)
         self._style_plot(self.volume_plot, left_label="Volume", bottom_label="Date / Time (UTC)", show_bottom=True)
@@ -653,6 +658,7 @@ class ChartWidget(QWidget):
         shell_background = self._rgba_css(self.chart_background, 252, "#11161f")
         border = self._rgba_css(self.grid_color, 88, "#8290a0")
         soft_border = self._rgba_css(self.grid_color, 56, "#8290a0")
+        accent_glow = self._rgba_css(self.axis_color, 18, "#9aa4b2")
         title_color = self._normalized_color(self.axis_color, "#f6f8fb")
         meta_color = self._rgba_css(self.axis_color, 184, "#9aa4b2")
         micro_color = self._rgba_css(self.axis_color, 154, "#9aa4b2")
@@ -677,12 +683,62 @@ class ChartWidget(QWidget):
                 background-color: {shell_background};
                 border: 1px solid {soft_border};
                 border-radius: 16px;
+                padding: 0px;
             }}
             """
         )
         self.timeframe_title.setStyleSheet(
             f"color: {meta_color}; font-size: 11px; font-weight: 700; padding-right: 4px;"
         )
+        self.background_context_label.setStyleSheet(
+            f"color: {self.coinbase_accent}; background-color: {accent_glow}; "
+            "border-radius: 9px; padding: 4px 8px; font-size: 11px; font-weight: 800;"
+        )
+        self.ohlcv_label.setStyleSheet(
+            f"color: {title_color}; font-weight: 700; font-size: 11px; background-color: {accent_glow}; "
+            "border-radius: 9px; padding: 4px 8px;"
+        )
+
+    def _market_panel_card_style(self, alpha: int = 248) -> str:
+        background = self._rgba_css(self.chart_background, alpha, "#171d29")
+        border = self._rgba_css(self.grid_color, 82, "#273142")
+        return (
+            "QFrame { "
+            f"background-color: {background}; border: 1px solid {border}; border-radius: 14px; "
+            "}"
+        )
+
+    def _update_market_context_theme(self):
+        panel_background = self._rgba_css(self.chart_background, 246, "#171d29")
+        detail_background = self._rgba_css(self.chart_background, 250, "#171d29")
+        border = self._rgba_css(self.grid_color, 84, "#273142")
+        title_color = self._rgba_css(self.axis_color, 168, "#8e9bab")
+        value_color = self._normalized_color(self.axis_color, "#f6f8fb")
+        detail_color = self._rgba_css(self.axis_color, 228, "#dde5ef")
+
+        self.depth_summary_label.setStyleSheet(
+            f"color: {title_color}; font-size: 12px; font-weight: 600;"
+        )
+        self.market_info_summary.setStyleSheet(
+            "QLabel { "
+            f"color: {value_color}; background-color: {panel_background}; border: 1px solid {border}; "
+            "border-radius: 14px; padding: 14px; font-size: 12px; font-weight: 700; "
+            "}"
+        )
+        self.market_info_details.setStyleSheet(
+            "QTextBrowser { "
+            f"background-color: {detail_background}; color: {detail_color}; border: 1px solid {border}; "
+            "border-radius: 14px; padding: 14px; "
+            "}"
+        )
+        for key, value_label in self.market_info_cards.items():
+            frame = self.market_info_card_frames.get(key)
+            if frame is not None:
+                frame.setStyleSheet(self._market_panel_card_style(alpha=250))
+            title = self.market_info_card_titles.get(key)
+            if title is not None:
+                title.setStyleSheet(f"color: {title_color}; font-size: 12px; font-weight: 700;")
+            value_label.setStyleSheet(f"color: {value_color}; font-size: 16px; font-weight: 800;")
 
     def _timeframe_picker_style(self) -> str:
         field_background = self._rgba_css(self.chart_background, 255, "#11161f")
@@ -692,7 +748,7 @@ class ChartWidget(QWidget):
         return (
             "QComboBox {"
             f"background-color: {field_background}; color: {text_color}; border: 1px solid {border}; "
-            "border-radius: 14px; padding: 7px 12px; font-weight: 700; min-width: 68px;"
+            "border-radius: 12px; padding: 5px 10px; font-weight: 700; min-width: 60px;"
             "}"
             "QComboBox:hover {"
             f"border-color: {accent};"
@@ -710,6 +766,15 @@ class ChartWidget(QWidget):
         self.overlay_toggle_button.setStyleSheet(self._chart_nav_button_style(accent=True))
         for button in list(getattr(self, "chart_nav_buttons", [])):
             button.setStyleSheet(self._chart_nav_button_style(accent=(button is self.fit_chart_button)))
+
+    def _sync_chart_controls_visibility(self):
+        controls = getattr(self, "controls_container", None)
+        tabs = getattr(self, "market_tabs", None)
+        candlestick_page = getattr(self, "candlestick_page", None)
+        if controls is None or tabs is None or candlestick_page is None:
+            return
+        show_controls = (not bool(getattr(self, "compact_view_mode", False))) and tabs.currentWidget() is candlestick_page
+        controls.setVisible(show_controls)
 
     def _update_chart_surface_theme(self):
         shell_background = self._rgba_css(self.chart_background, 252, "#11161f")
@@ -773,6 +838,9 @@ class ChartWidget(QWidget):
                 color: {active_text};
                 border-color: {selected_tab};
             }}
+            QTabBar::tab:!selected {{
+                margin-top: 4px;
+            }}
             """
         )
 
@@ -788,6 +856,7 @@ class ChartWidget(QWidget):
         self._update_chart_controls_theme()
         self._update_chart_surface_theme()
         self._update_market_tab_theme()
+        self._update_market_context_theme()
         self._style_plot(self.price_plot, right_label="Price", show_bottom=not self.show_volume_panel)
         self._style_plot(self.volume_plot, left_label="Volume", bottom_label="Date / Time (UTC)", show_bottom=self.show_volume_panel)
         self._style_plot(self.depth_plot, right_label="Price", bottom_label="Depth")
@@ -1762,12 +1831,13 @@ class ChartWidget(QWidget):
 
         stats = self._last_candle_stats or {}
         if quote:
-            description = f"{broker_name}  |  {base} quoted in {quote}"
+            description = f"{broker_name} DESK  |  {base} quoted in {quote}"
         else:
-            description = f"{broker_name}  |  {self._timeframe_description()}"
+            description = f"{broker_name} DESK  |  {self._timeframe_description()}"
 
         bid = self._format_numeric_value(self._last_bid)
         ask = self._format_numeric_value(self._last_ask)
+        mid = ((bid + ask) / 2.0) if bid is not None and ask is not None else None
         spread = None
         if bid is not None and ask is not None and ask >= bid:
             spread = ask - bid
@@ -1784,19 +1854,19 @@ class ChartWidget(QWidget):
                 f"color: {change_color}; font-weight: 800; font-size: 15px;"
             )
             self.market_meta_label.setText(
-                f"{description}  |  Avg {self._format_metric(stats.get('average_close', 0.0))}  |  "
-                f"Range {self._format_metric(stats.get('min_price', 0.0), 4)} - {self._format_metric(stats.get('max_price', 0.0), 4)}"
+                f"{description}  |  Avg close {self._format_metric(stats.get('average_close', 0.0))}  |  "
+                f"Visible range {self._format_metric(stats.get('min_price', 0.0), 4)} - {self._format_metric(stats.get('max_price', 0.0), 4)}"
             )
             self.market_micro_label.setText(
                 f"Bid {self._format_metric(bid, 8)}  |  Ask {self._format_metric(ask, 8)}  |  "
-                f"Spread {self._format_metric(spread, 8)}  |  Visible Vol {cumulative_volume}"
+                f"Mid {self._format_metric(mid, 8)}  |  Spread {self._format_metric(spread, 8)}  |  Visible Vol {cumulative_volume}"
             )
         else:
             self.market_stats_label.setText(self._timeframe_description())
             self.market_stats_label.setStyleSheet("color: #8e9bab; font-weight: 700; font-size: 14px;")
             self.market_meta_label.setText(description)
             self.market_micro_label.setText(
-                f"Bid {self._format_metric(bid, 8)}  |  Ask {self._format_metric(ask, 8)}  |  Spread {self._format_metric(spread, 8)}"
+                f"Bid {self._format_metric(bid, 8)}  |  Ask {self._format_metric(ask, 8)}  |  Mid {self._format_metric(mid, 8)}  |  Spread {self._format_metric(spread, 8)}"
             )
 
     def _update_watermark_html(self):
@@ -1919,15 +1989,19 @@ class ChartWidget(QWidget):
             value_label.setText(card_values.get(key, "-"))
 
         base, quote = self._symbol_parts()
-        headline = f"{self.symbol.upper()} on {self._active_broker_name().upper()} | {self.timeframe.upper()} context"
+        headline = f"Desk view: {self.symbol.upper()} | {self._active_broker_name().upper()} | {self.timeframe.upper()}"
         if stats and stats.get("variation_pct") is not None:
             headline += f" | Visible move {float(stats.get('variation_pct') or 0.0):+.2f}%"
+        if spread is not None:
+            headline += f" | Spread {self._format_metric(spread, 8)}"
+        if depth_bias is not None:
+            headline += f" | Depth bias {depth_bias:+.2f}%"
         self.market_info_summary.setText(headline)
 
         detail_lines = [
             f"<h3>{self.symbol.upper()}</h3>",
             (
-                f"<p><b>Market structure:</b> {base} / {quote if quote else 'quote unavailable'} | "
+                f"<p><b>Desk context:</b> {base} / {quote if quote else 'quote unavailable'} | "
                 f"<b>Broker:</b> {self._active_broker_name().upper()} | "
                 f"<b>Timeframe:</b> {self.timeframe.upper()}</p>"
             ),
@@ -2614,6 +2688,8 @@ class ChartWidget(QWidget):
             self.market_tabs.tabBar().setVisible(not self.compact_view_mode)
         except Exception:
             pass
+
+        self._sync_chart_controls_visibility()
 
         self.splitter.setHandleWidth(6 if self.compact_view_mode else 10)
         self.price_plot.setMinimumHeight(280 if self.compact_view_mode else 460)

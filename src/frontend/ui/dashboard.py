@@ -38,6 +38,7 @@ CRYPTO_EXCHANGE_MAP = {
     "us": [
         "binanceus",
         "coinbase",
+        "solana",
         "stellar",
         "kraken",
         "kucoin",
@@ -49,6 +50,7 @@ CRYPTO_EXCHANGE_MAP = {
     "global": [
         "binance",
         "coinbase",
+        "solana",
         "stellar",
         "kraken",
         "kucoin",
@@ -88,6 +90,21 @@ EXCHANGE_MAP = {
 CUSTOMER_REGION_OPTIONS = [
     ("US", "us"),
     ("Outside US", "global"),
+]
+
+IBKR_CONNECTION_MODE_OPTIONS = [
+    ("Web API", "webapi"),
+    ("TWS / IB Gateway", "tws"),
+]
+
+IBKR_WEBAPI_ENVIRONMENT_OPTIONS = [
+    ("Client Portal Gateway", "gateway"),
+    ("Hosted Web API", "hosted"),
+]
+
+SCHWAB_ENVIRONMENT_OPTIONS = [
+    ("Sandbox", "sandbox"),
+    ("Production", "production"),
 ]
 
 BROKER_COPY = {
@@ -132,6 +149,30 @@ EXCHANGE_CREDENTIAL_SCHEMAS = {
         "secret_placeholder": "Stellar private key",
         "required_fields": ("api",),
     },
+    "solana": {
+        "api_label": "Wallet or OKX API Key",
+        "api_placeholder": "Solana wallet address or OKX Trade API key",
+        "secret_label": "Private Key or OKX Secret",
+        "secret_placeholder": "Solana private key or OKX API secret",
+        "password_label": "Passphrase / Jupiter Key",
+        "password_placeholder": "OKX passphrase or legacy Jupiter API key",
+        "password_echo": QLineEdit.Password,
+        "account_label": "Project ID or RPC URL",
+        "account_placeholder": "Optional OKX project id or custom Solana RPC URL",
+        "show_password": True,
+        "show_account": True,
+        "required_fields": (),
+        "field_targets": {
+            "api": "api_key",
+            "secret": "secret",
+            "password": "password",
+            "account": "account_id",
+        },
+        "field_fallbacks": {
+            "password": ("passphrase", "options.okx_passphrase", "options.jupiter_api_key"),
+            "account": ("options.okx_project_id", "options.rpc_url"),
+        },
+    },
     "coinbase": {
         "api_label": "Key Name or ID",
         "api_placeholder": "organizations/.../apiKeys/... or key id",
@@ -151,26 +192,26 @@ EXCHANGE_CREDENTIAL_SCHEMAS = {
         },
     },
     "schwab": {
-        "api_label": "Client ID",
-        "api_placeholder": "Schwab client id",
+        "api_label": "App Key / Client ID",
+        "api_placeholder": "Schwab app key / client id",
         "secret_label": "Client Secret",
-        "secret_placeholder": "Schwab client secret",
-        "password_label": "Refresh Token",
-        "password_placeholder": "Schwab refresh token",
-        "password_echo": QLineEdit.Password,
-        "account_label": "Account Hash",
-        "account_placeholder": "Optional Schwab account hash or account number",
+        "secret_placeholder": "Optional Schwab client secret",
+        "password_label": "Redirect URI",
+        "password_placeholder": "http://127.0.0.1:8182/callback",
+        "password_echo": QLineEdit.Normal,
+        "account_label": "Account Hash / Profile",
+        "account_placeholder": "Optional Schwab account hash or profile label",
         "show_password": True,
         "show_account": True,
-        "required_fields": ("api", "secret", "password"),
+        "required_fields": ("api", "password"),
         "field_targets": {
             "api": "api_key",
             "secret": "secret",
-            "password": "options.refresh_token",
+            "password": "password",
             "account": "options.account_hash",
         },
         "field_fallbacks": {
-            "password": ("password",),
+            "password": ("options.redirect_uri",),
             "account": ("account_id",),
         },
     },
@@ -227,19 +268,22 @@ EXCHANGE_CREDENTIAL_SCHEMAS = {
         },
     },
     "ibkr": {
-        "api_label": "Session Token",
-        "api_placeholder": "Optional IBKR session token or client id",
-        "secret_label": "Session Secret",
-        "secret_placeholder": "Optional gateway secret",
-        "account_label": "Account ID",
+        "api_label": "Base URL",
+        "api_placeholder": "https://127.0.0.1:5000/v1/api",
+        "secret_label": "Session Token",
+        "secret_placeholder": "Optional IBKR Web API session token",
+        "password_label": "WebSocket URL",
+        "password_placeholder": "Optional websocket override",
+        "password_echo": QLineEdit.Normal,
+        "account_label": "Account ID / Profile",
         "account_placeholder": "Optional IBKR account id override",
-        "show_password": False,
+        "show_password": True,
         "show_account": True,
         "required_fields": (),
         "field_targets": {
-            "api": "api_key",
-            "secret": "secret",
-            "password": "password",
+            "api": "options.base_url",
+            "secret": "api_key",
+            "password": "options.websocket_url",
             "account": "account_id",
         },
     },
@@ -256,6 +300,9 @@ class Dashboard(QWidget):
         self.controller = controller
         self._field_blocks = {}
         self._current_layout_mode = None
+        self._ibkr_last_connection_mode = None
+        self._ibkr_mode_field_memory = {"webapi": {}, "tws": {}}
+        self._platform_sync_status_tone = "idle"
         self.settings = getattr(controller, "settings", None) or QSettings("Sopotek", "TradingPlatform")
 
         self.setWindowTitle("Sopotek AI Trading Platform")
@@ -264,6 +311,7 @@ class Dashboard(QWidget):
         self._apply_styles()
         self._build_ui()
         self._connect_signals()
+        self.apply_platform_sync_profile(self._platform_sync_profile())
         if hasattr(self.controller, "language_changed"):
             self.controller.language_changed.connect(lambda _code: self.apply_language())
 
@@ -273,6 +321,7 @@ class Dashboard(QWidget):
         self._update_optional_fields()
         self._update_broker_hint()
         self._update_session_preview()
+        self.refresh_active_sessions()
         self.apply_language()
         self._sync_shell_layout()
 
@@ -531,6 +580,273 @@ class Dashboard(QWidget):
             return "us"
         return str(self.customer_region_box.currentData() or "us").strip().lower()
 
+    def _normalize_ibkr_connection_mode(self, value):
+        normalized = str(value or "webapi").strip().lower() or "webapi"
+        return normalized if normalized in {"webapi", "tws"} else "webapi"
+
+    def _selected_ibkr_connection_mode(self):
+        if not hasattr(self, "ibkr_connection_mode_box") or self.ibkr_connection_mode_box is None:
+            return "webapi"
+        return self._normalize_ibkr_connection_mode(self.ibkr_connection_mode_box.currentData())
+
+    def _selected_ibkr_environment(self):
+        if not hasattr(self, "ibkr_environment_box") or self.ibkr_environment_box is None:
+            return "gateway"
+        return str(self.ibkr_environment_box.currentData() or "gateway").strip().lower() or "gateway"
+
+    def _selected_schwab_environment(self):
+        if not hasattr(self, "schwab_environment_box") or self.schwab_environment_box is None:
+            return "sandbox"
+        return str(self.schwab_environment_box.currentData() or "sandbox").strip().lower() or "sandbox"
+
+    def _platform_sync_profile(self):
+        controller = getattr(self, "controller", None)
+        if controller is not None and hasattr(controller, "platform_sync_profile"):
+            try:
+                payload = dict(controller.platform_sync_profile() or {})
+                if payload:
+                    return payload
+            except Exception:
+                pass
+        return {
+            "base_url": "http://127.0.0.1:8000",
+            "email": "",
+            "password": "",
+            "sync_enabled": False,
+            "remember_me": True,
+            "last_sync_status": "idle",
+            "last_sync_message": "Ready to sync this desktop with Sopotek server.",
+        }
+
+    def apply_platform_sync_profile(self, profile):
+        payload = dict(profile or {})
+        if hasattr(self, "server_url_input"):
+            self.server_url_input.setText(
+                str(payload.get("base_url") or "http://127.0.0.1:8000").strip() or "http://127.0.0.1:8000"
+            )
+        if hasattr(self, "server_email_input"):
+            self.server_email_input.setText(str(payload.get("email") or "").strip())
+        if hasattr(self, "server_password_input"):
+            self.server_password_input.setText(str(payload.get("password") or "").strip())
+        if hasattr(self, "sync_workspace_checkbox"):
+            self.sync_workspace_checkbox.setChecked(bool(payload.get("sync_enabled")))
+
+        message = str(payload.get("last_sync_message") or "Ready to sync this desktop with Sopotek server.").strip()
+        tone = str(payload.get("last_sync_status") or "idle").strip().lower() or "idle"
+        self.set_platform_sync_status(message, tone=tone)
+
+    def set_platform_sync_status(self, message, *, tone="info"):
+        text = str(message or "Ready to sync this desktop with Sopotek server.").strip()
+        normalized_tone = str(tone or "info").strip().lower() or "info"
+        palette = {
+            "busy": "#8ec5ff",
+            "success": "#6ee7b7",
+            "error": "#fca5a5",
+            "idle": "#94a3b8",
+            "info": "#94a3b8",
+        }
+        self._platform_sync_status_tone = normalized_tone
+        if hasattr(self, "platform_sync_status_label"):
+            self.platform_sync_status_label.setText(text)
+            self.platform_sync_status_label.setStyleSheet(f"color: {palette.get(normalized_tone, '#94a3b8')};")
+
+    def _current_platform_sync_profile(self):
+        merged = dict(self._platform_sync_profile() or {})
+        merged.update(
+            {
+                "base_url": str(getattr(self, "server_url_input", None).text() if hasattr(self, "server_url_input") else "").strip(),
+                "email": str(getattr(self, "server_email_input", None).text() if hasattr(self, "server_email_input") else "").strip().lower(),
+                "password": str(getattr(self, "server_password_input", None).text() if hasattr(self, "server_password_input") else "").strip(),
+                "sync_enabled": bool(
+                    getattr(self, "sync_workspace_checkbox", None).isChecked()
+                    if hasattr(self, "sync_workspace_checkbox")
+                    else False
+                ),
+            }
+        )
+        return merged
+
+    def _persist_platform_sync_profile(self):
+        profile = self._current_platform_sync_profile()
+        controller = getattr(self, "controller", None)
+        if controller is not None and hasattr(controller, "save_platform_sync_profile"):
+            try:
+                profile = dict(controller.save_platform_sync_profile(profile) or profile)
+            except Exception:
+                pass
+        return profile
+
+    def _selected_profile_name(self):
+        current_text = str(self.saved_account_box.currentText() or "").strip()
+        if not current_text or self.saved_account_box.currentData() == "__recent__":
+            return ""
+        return current_text
+
+    def _workspace_settings_payload(self):
+        resolved = self._resolved_broker_inputs()
+        broker_options = dict(resolved.get("options") or {})
+        solana_values = self._solana_field_values()
+        exchange = str(self.exchange_box.currentText() or "paper").strip().lower() or "paper"
+        broker_type = str(self.exchange_type_box.currentText() or "paper").strip().lower() or "paper"
+        mode = str(self.mode_box.currentText() or "paper").strip().lower() or "paper"
+        if broker_type == "paper" or exchange == "paper":
+            broker_type = "paper"
+            exchange = "paper"
+            mode = "paper"
+
+        return {
+            "language": str(
+                self._language_box_current_code()
+                or getattr(self.controller, "language_code", "en")
+                or "en"
+            ).strip()
+            or "en",
+            "broker_type": broker_type,
+            "exchange": exchange,
+            "customer_region": self._selected_customer_region(),
+            "mode": mode,
+            "market_type": str(self.market_type_box.currentData() or "auto").strip().lower() or "auto",
+            "ibkr_connection_mode": self._selected_ibkr_connection_mode(),
+            "ibkr_environment": self._selected_ibkr_environment(),
+            "ibkr_base_url": str(broker_options.get("base_url") or "").strip(),
+            "ibkr_websocket_url": str(broker_options.get("websocket_url") or "").strip(),
+            "ibkr_host": str(broker_options.get("host") or "").strip(),
+            "ibkr_port": str(broker_options.get("port") or "").strip(),
+            "ibkr_client_id": str(broker_options.get("client_id") or "").strip(),
+            "schwab_environment": self._selected_schwab_environment(),
+            "api_key": str(resolved.get("api_key") or "").strip(),
+            "secret": str(resolved.get("secret") or "").strip(),
+            "password": str(resolved.get("password") or "").strip(),
+            "account_id": str(resolved.get("account_id") or "").strip(),
+            "risk_percent": int(self.risk_input.value()),
+            "remember_profile": bool(self.remember_checkbox.isChecked()),
+            "profile_name": self._selected_profile_name(),
+            "desktop_sync_enabled": bool(
+                self.sync_workspace_checkbox.isChecked() if hasattr(self, "sync_workspace_checkbox") else False
+            ),
+            "solana": {
+                "wallet_address": str(solana_values.get("wallet_address") or "").strip(),
+                "private_key": str(solana_values.get("private_key") or "").strip(),
+                "rpc_url": str(solana_values.get("rpc_url") or "").strip(),
+                "jupiter_api_key": str(solana_values.get("jupiter_api_key") or "").strip(),
+                "okx_api_key": str(solana_values.get("okx_api_key") or "").strip(),
+                "okx_secret": str(solana_values.get("okx_secret_key") or "").strip(),
+                "okx_passphrase": str(solana_values.get("okx_passphrase") or "").strip(),
+                "okx_project_id": str(solana_values.get("okx_project_id") or "").strip(),
+            },
+        }
+
+    def apply_workspace_settings(self, payload):
+        settings = dict(payload or {})
+        language_code = str(settings.get("language") or "en").strip() or "en"
+        language_index = self.language_box.findData(language_code)
+        if language_index >= 0:
+            self.language_box.setCurrentIndex(language_index)
+
+        broker_type = str(settings.get("broker_type") or "paper").strip().lower() or "paper"
+        if broker_type not in BROKER_TYPE_OPTIONS:
+            broker_type = "paper"
+        self.exchange_type_box.setCurrentText(broker_type)
+
+        customer_region = str(settings.get("customer_region") or "us").strip().lower() or "us"
+        customer_region_index = self.customer_region_box.findData(customer_region)
+        self.customer_region_box.setCurrentIndex(customer_region_index if customer_region_index >= 0 else 0)
+
+        self._update_exchange_list(broker_type)
+        exchange = str(settings.get("exchange") or "paper").strip().lower() or "paper"
+        if self.exchange_box.findText(exchange) >= 0:
+            self.exchange_box.setCurrentText(exchange)
+
+        ibkr_mode_index = self.ibkr_connection_mode_box.findData(
+            self._normalize_ibkr_connection_mode(settings.get("ibkr_connection_mode"))
+        )
+        self.ibkr_connection_mode_box.setCurrentIndex(ibkr_mode_index if ibkr_mode_index >= 0 else 0)
+        ibkr_environment_index = self.ibkr_environment_box.findData(
+            str(settings.get("ibkr_environment") or "gateway").strip().lower() or "gateway"
+        )
+        self.ibkr_environment_box.setCurrentIndex(ibkr_environment_index if ibkr_environment_index >= 0 else 0)
+        schwab_environment_index = self.schwab_environment_box.findData(
+            str(settings.get("schwab_environment") or "sandbox").strip().lower() or "sandbox"
+        )
+        self.schwab_environment_box.setCurrentIndex(schwab_environment_index if schwab_environment_index >= 0 else 0)
+
+        broker = {
+            "type": broker_type,
+            "exchange": exchange,
+            "customer_region": customer_region,
+            "mode": str(settings.get("mode") or "paper").strip().lower() or "paper",
+            "api_key": str(settings.get("api_key") or "").strip(),
+            "secret": str(settings.get("secret") or "").strip(),
+            "password": str(settings.get("password") or "").strip(),
+            "account_id": str(settings.get("account_id") or "").strip(),
+            "options": {
+                "market_type": str(settings.get("market_type") or "auto").strip().lower() or "auto",
+                "customer_region": customer_region,
+            },
+        }
+        if exchange == "ibkr":
+            broker["options"].update(
+                {
+                    "connection_mode": str(settings.get("ibkr_connection_mode") or "webapi").strip().lower() or "webapi",
+                    "environment": str(settings.get("ibkr_environment") or "gateway").strip().lower() or "gateway",
+                    "base_url": str(settings.get("ibkr_base_url") or "").strip(),
+                    "websocket_url": str(settings.get("ibkr_websocket_url") or "").strip(),
+                    "host": str(settings.get("ibkr_host") or "").strip(),
+                    "port": str(settings.get("ibkr_port") or "").strip(),
+                    "client_id": str(settings.get("ibkr_client_id") or "").strip(),
+                }
+            )
+        elif exchange == "schwab":
+            broker["options"].update(
+                {
+                    "environment": str(settings.get("schwab_environment") or "sandbox").strip().lower() or "sandbox",
+                    "redirect_uri": str(settings.get("password") or "").strip(),
+                    "account_hash": str(settings.get("account_id") or "").strip(),
+                }
+            )
+        elif exchange == "solana":
+            solana = dict(settings.get("solana") or {})
+            broker["options"].update(
+                {
+                    "wallet_address": str(solana.get("wallet_address") or "").strip(),
+                    "private_key": str(solana.get("private_key") or "").strip(),
+                    "rpc_url": str(solana.get("rpc_url") or "").strip(),
+                    "jupiter_api_key": str(solana.get("jupiter_api_key") or "").strip(),
+                    "okx_api_key": str(solana.get("okx_api_key") or "").strip(),
+                    "okx_secret_key": str(solana.get("okx_secret") or "").strip(),
+                    "okx_passphrase": str(solana.get("okx_passphrase") or "").strip(),
+                    "okx_project_id": str(solana.get("okx_project_id") or "").strip(),
+                }
+            )
+
+        self._update_optional_fields()
+        self._populate_credential_fields(broker)
+        self._refresh_market_type_options()
+        self.mode_box.setCurrentText(str(settings.get("mode") or "paper").strip().lower() or "paper")
+        market_type_index = self.market_type_box.findData(
+            str(settings.get("market_type") or "auto").strip().lower() or "auto"
+        )
+        self.market_type_box.setCurrentIndex(market_type_index if market_type_index >= 0 else 0)
+        self.risk_input.setValue(int(settings.get("risk_percent") or 2))
+        self.remember_checkbox.setChecked(bool(settings.get("remember_profile", True)))
+
+        self._update_optional_fields()
+        self._update_broker_hint()
+        self._update_session_preview()
+
+    def _request_workspace_pull(self):
+        controller = getattr(self, "controller", None)
+        profile = self._persist_platform_sync_profile()
+        if controller is not None and hasattr(controller, "request_platform_workspace_pull"):
+            controller.request_platform_workspace_pull(profile)
+
+    def _request_workspace_push(self, *, interactive=True):
+        controller = getattr(self, "controller", None)
+        profile = self._persist_platform_sync_profile()
+        payload = self._workspace_settings_payload()
+        if controller is not None and hasattr(controller, "request_platform_workspace_push"):
+            controller.request_platform_workspace_push(payload, profile, interactive=interactive)
+
     def _crypto_exchange_options_for_region(self):
         """Return available crypto exchange options based on selected region."""
         return list(CRYPTO_EXCHANGE_MAP.get(self._selected_customer_region(), CRYPTO_EXCHANGE_MAP["us"]))
@@ -574,6 +890,57 @@ class Dashboard(QWidget):
             schema["field_targets"] = merged_targets
             schema["field_fallbacks"] = merged_fallbacks
 
+        if exchange == "ibkr":
+            connection_mode = self._selected_ibkr_connection_mode()
+            if connection_mode == "tws":
+                schema.update(
+                    {
+                        "api_label": "Host",
+                        "api_placeholder": "127.0.0.1",
+                        "secret_label": "Port",
+                        "secret_placeholder": "7497 for paper, 7496 for live",
+                        "secret_echo": QLineEdit.Normal,
+                        "password_label": "Client ID",
+                        "password_placeholder": "1",
+                        "password_echo": QLineEdit.Normal,
+                        "account_label": "Account ID / Profile",
+                        "account_placeholder": "Optional TWS account id or profile",
+                        "show_password": True,
+                        "show_account": True,
+                        "required_fields": ("api", "secret", "password"),
+                        "field_targets": {
+                            "api": "options.host",
+                            "secret": "options.port",
+                            "password": "options.client_id",
+                            "account": "account_id",
+                        },
+                    }
+                )
+            else:
+                schema.update(
+                    {
+                        "api_label": "Base URL",
+                        "api_placeholder": "https://127.0.0.1:5000/v1/api",
+                        "secret_label": "Session Token",
+                        "secret_placeholder": "Optional IBKR Web API bearer/session token",
+                        "secret_echo": QLineEdit.Password,
+                        "password_label": "WebSocket URL",
+                        "password_placeholder": "Optional ws(s) override",
+                        "password_echo": QLineEdit.Normal,
+                        "account_label": "Account ID / Profile",
+                        "account_placeholder": "Optional IBKR account id or profile",
+                        "show_password": True,
+                        "show_account": True,
+                        "required_fields": ("api",),
+                        "field_targets": {
+                            "api": "options.base_url",
+                            "secret": "api_key",
+                            "password": "options.websocket_url",
+                            "account": "account_id",
+                        },
+                    }
+                )
+
         if exchange in {"okx", "kucoin"}:
             schema["show_password"] = True
 
@@ -614,6 +981,77 @@ class Dashboard(QWidget):
                 current[part] = next_value
             current = next_value
         current[parts[-1]] = value
+
+    @staticmethod
+    def _looks_like_url(value):
+        text = str(value or "").strip().lower()
+        return text.startswith("http://") or text.startswith("https://")
+
+    @staticmethod
+    def _looks_like_solana_wallet(value):
+        try:
+            from broker.solana_broker import SolanaBroker
+        except Exception:
+            return False
+        return SolanaBroker._looks_like_base58_key(str(value or "").strip(), expected_lengths=(32,))
+
+    @staticmethod
+    def _looks_like_solana_private_key(value):
+        try:
+            from broker.solana_broker import SolanaBroker
+        except Exception:
+            return False
+        try:
+            probe = SolanaBroker.__new__(SolanaBroker)
+            probe._normalize_private_key_bytes(str(value or "").strip())
+        except Exception:
+            return False
+        return True
+
+    def _solana_field_values(self):
+        """Return the dedicated Solana dashboard values."""
+        is_paper_exchange = self.exchange_type_box.currentText() == "paper" or self.exchange_box.currentText() == "paper"
+        if is_paper_exchange:
+            return {
+                "wallet_address": "",
+                "private_key": "",
+                "rpc_url": "",
+                "jupiter_api_key": "",
+                "okx_api_key": "",
+                "okx_secret_key": "",
+                "okx_passphrase": "",
+                "okx_project_id": "",
+            }
+        return {
+            "wallet_address": self.solana_wallet_address_input.text().strip(),
+            "private_key": self.solana_private_key_input.text().strip(),
+            "rpc_url": self.solana_rpc_url_input.text().strip(),
+            "jupiter_api_key": self.solana_jupiter_api_key_input.text().strip(),
+            "okx_api_key": self.solana_okx_api_key_input.text().strip(),
+            "okx_secret_key": self.solana_okx_secret_input.text().strip(),
+            "okx_passphrase": self.solana_okx_passphrase_input.text().strip(),
+            "okx_project_id": self.solana_okx_project_id_input.text().strip(),
+        }
+
+    def _solana_okx_credentials_complete(self):
+        values = self._solana_field_values()
+        return bool(
+            values["okx_api_key"]
+            and values["okx_secret_key"]
+            and values["okx_passphrase"]
+        )
+
+    def _solana_has_any_route_credentials(self):
+        values = self._solana_field_values()
+        return bool(self._solana_okx_credentials_complete() or values["jupiter_api_key"])
+
+    def _solana_live_execution_ready(self):
+        values = self._solana_field_values()
+        return bool(
+            values["wallet_address"]
+            and values["private_key"]
+            and self._solana_has_any_route_credentials()
+        )
 
     def _dashboard_field_values(self, schema=None):
         """Return the current credential values keyed by raw dashboard field names."""
@@ -671,6 +1109,63 @@ class Dashboard(QWidget):
     def _populate_credential_fields(self, broker, schema=None):
         """Populate the dashboard credential inputs from a saved broker payload."""
         schema = schema or self._credential_field_schema()
+        exchange = self.exchange_box.currentText()
+        if exchange == "solana":
+            options = dict((broker or {}).get("options") or {})
+            raw_api = str((broker or {}).get("api_key") or "").strip()
+            raw_secret = str((broker or {}).get("secret") or "").strip()
+            raw_password = str(
+                (broker or {}).get("password")
+                or (broker or {}).get("passphrase")
+                or ""
+            ).strip()
+            raw_account = str((broker or {}).get("account_id") or "").strip()
+
+            wallet_address = str(options.get("wallet_address") or "").strip()
+            private_key = str(options.get("private_key") or "").strip()
+            rpc_url = str(options.get("rpc_url") or "").strip()
+            jupiter_api_key = str(options.get("jupiter_api_key") or "").strip()
+            okx_api_key = str(options.get("okx_api_key") or "").strip()
+            okx_secret_key = str(options.get("okx_secret_key") or "").strip()
+            okx_passphrase = str(options.get("okx_passphrase") or "").strip()
+            okx_project_id = str(options.get("okx_project_id") or "").strip()
+
+            if not wallet_address and self._looks_like_solana_wallet(raw_api):
+                wallet_address = raw_api
+            if not private_key and self._looks_like_solana_private_key(raw_secret):
+                private_key = raw_secret
+
+            if not okx_api_key and raw_api and raw_api != wallet_address:
+                okx_api_key = raw_api
+            if not okx_secret_key and raw_secret and raw_secret != private_key:
+                okx_secret_key = raw_secret
+
+            if raw_password:
+                if okx_api_key or okx_secret_key or okx_passphrase:
+                    okx_passphrase = okx_passphrase or raw_password
+                else:
+                    jupiter_api_key = jupiter_api_key or raw_password
+
+            if raw_account:
+                if self._looks_like_url(raw_account):
+                    rpc_url = rpc_url or raw_account
+                else:
+                    okx_project_id = okx_project_id or raw_account
+
+            self.solana_wallet_address_input.setText(wallet_address)
+            self.solana_private_key_input.setText(private_key)
+            self.solana_rpc_url_input.setText(rpc_url)
+            self.solana_jupiter_api_key_input.setText(jupiter_api_key)
+            self.solana_okx_api_key_input.setText(okx_api_key)
+            self.solana_okx_secret_input.setText(okx_secret_key)
+            self.solana_okx_passphrase_input.setText(okx_passphrase)
+            self.solana_okx_project_id_input.setText(okx_project_id)
+            self.api_input.clear()
+            self.secret_input.clear()
+            self.password_input.clear()
+            self.account_id_input.clear()
+            return
+
         self.api_input.setText(self._schema_field_value_from_broker(schema, broker, "api"))
         self.secret_input.setText(self._schema_field_value_from_broker(schema, broker, "secret"))
         self.password_input.setText(self._schema_field_value_from_broker(schema, broker, "password"))
@@ -702,9 +1197,62 @@ class Dashboard(QWidget):
             account_block.label_widget.setText(schema["account_label"])
         self.account_id_input.setPlaceholderText(schema["account_placeholder"])
 
+        self._apply_solana_field_schema()
+
+    def _apply_solana_field_schema(self):
+        """Apply Solana-specific labels and placeholders."""
+        if not hasattr(self, "solana_credentials_panel"):
+            return
+        self.solana_credentials_title.setText("Solana Routing")
+        self.solana_wallet_title.setText("Wallet Signing")
+        self.solana_okx_title.setText("OKX Trade API")
+        self._field_blocks["solana_wallet_address"].label_widget.setText("Wallet Address")
+        self._field_blocks["solana_private_key"].label_widget.setText("Private Key")
+        self._field_blocks["solana_rpc_url"].label_widget.setText("RPC URL")
+        self._field_blocks["solana_jupiter_api_key"].label_widget.setText("Legacy Jupiter API Key")
+        self._field_blocks["solana_okx_api_key"].label_widget.setText("OKX API Key")
+        self._field_blocks["solana_okx_secret"].label_widget.setText("OKX Secret")
+        self._field_blocks["solana_okx_passphrase"].label_widget.setText("OKX Passphrase")
+        self._field_blocks["solana_okx_project_id"].label_widget.setText("OKX Project ID")
+        self.solana_wallet_address_input.setPlaceholderText("Solana wallet address for balances and live signing")
+        self.solana_private_key_input.setPlaceholderText("Private key for live swaps")
+        self.solana_rpc_url_input.setPlaceholderText("Optional custom Solana RPC URL")
+        self.solana_jupiter_api_key_input.setPlaceholderText("Optional legacy Jupiter API key fallback")
+        self.solana_okx_api_key_input.setPlaceholderText("OKX API key for Solana quotes and routing")
+        self.solana_okx_secret_input.setPlaceholderText("OKX secret key")
+        self.solana_okx_passphrase_input.setPlaceholderText("OKX passphrase")
+        self.solana_okx_project_id_input.setPlaceholderText("Optional OKX project id")
+
+    def _resolved_solana_inputs(self):
+        """Return normalized Solana broker credential values from dedicated UI inputs."""
+        values = self._solana_field_values()
+        resolved = {
+            "api_key": values["okx_api_key"] or None,
+            "secret": values["okx_secret_key"] or None,
+            "password": values["okx_passphrase"] or None,
+            "account_id": values["okx_project_id"] or None,
+            "options": {},
+        }
+        for key in ("wallet_address", "private_key", "rpc_url", "jupiter_api_key"):
+            text = str(values.get(key) or "").strip()
+            if text:
+                resolved["options"][key] = text
+        if resolved["api_key"]:
+            resolved["options"]["okx_api_key"] = resolved["api_key"]
+        if resolved["secret"]:
+            resolved["options"]["okx_secret_key"] = resolved["secret"]
+        if resolved["password"]:
+            resolved["options"]["okx_passphrase"] = resolved["password"]
+        if resolved["account_id"]:
+            resolved["options"]["okx_project_id"] = resolved["account_id"]
+        return resolved
+
     def _resolved_broker_inputs(self):
         """Return normalized broker credential values from UI inputs."""
         exchange = self.exchange_box.currentText()
+        if exchange == "solana":
+            return self._resolved_solana_inputs()
+
         schema = self._credential_field_schema()
         field_values = self._dashboard_field_values(schema)
 
@@ -727,6 +1275,20 @@ class Dashboard(QWidget):
                 continue
             for path in self._schema_target_paths((schema.get("field_targets") or {}).get(field_name)):
                 self._set_mapping_value(resolved, path, value)
+
+        if exchange == "ibkr":
+            resolved.setdefault("options", {})
+            resolved["options"]["connection_mode"] = self._selected_ibkr_connection_mode()
+            resolved["options"]["environment"] = self._selected_ibkr_environment()
+            if resolved["options"]["connection_mode"] == "tws":
+                resolved["options"]["paper"] = self.mode_box.currentText() != "live"
+            else:
+                resolved["options"]["paper"] = False
+        elif exchange == "schwab":
+            resolved.setdefault("options", {})
+            resolved["options"]["environment"] = self._selected_schwab_environment()
+            if field_values.get("password"):
+                resolved["options"]["redirect_uri"] = field_values["password"]
 
         return resolved
 
@@ -993,6 +1555,32 @@ class Dashboard(QWidget):
         strategy_row.addStretch(1)
         panel_layout.addLayout(strategy_row)
 
+        ibkr_row = QHBoxLayout()
+        ibkr_row.setSpacing(10)
+        self.ibkr_connection_mode_box = QComboBox()
+        for label, value in IBKR_CONNECTION_MODE_OPTIONS:
+            self.ibkr_connection_mode_box.addItem(label, value)
+        ibkr_row.addWidget(self._wrap_field("IBKR Connection", self.ibkr_connection_mode_box, block_name="ibkr_connection_mode"), 1)
+
+        self.ibkr_environment_box = QComboBox()
+        for label, value in IBKR_WEBAPI_ENVIRONMENT_OPTIONS:
+            self.ibkr_environment_box.addItem(label, value)
+        ibkr_row.addWidget(self._wrap_field("IBKR Environment", self.ibkr_environment_box, block_name="ibkr_environment"), 1)
+        ibkr_row.addStretch(1)
+        panel_layout.addLayout(ibkr_row)
+
+        schwab_row = QHBoxLayout()
+        schwab_row.setSpacing(10)
+        self.schwab_environment_box = QComboBox()
+        for label, value in SCHWAB_ENVIRONMENT_OPTIONS:
+            self.schwab_environment_box.addItem(label, value)
+        schwab_row.addWidget(
+            self._wrap_field("Schwab Environment", self.schwab_environment_box, block_name="schwab_environment"),
+            1,
+        )
+        schwab_row.addStretch(1)
+        panel_layout.addLayout(schwab_row)
+
         self.credentials_label = QLabel("Credentials")
         self.credentials_label.setObjectName("sectionLabel")
         panel_layout.addWidget(self.credentials_label)
@@ -1019,6 +1607,105 @@ class Dashboard(QWidget):
         credential_row.addWidget(self._wrap_field("Account ID", self.account_id_input, block_name="account_id"), 1)
         panel_layout.addLayout(credential_row)
 
+        self.solana_credentials_panel = QFrame()
+        self.solana_credentials_panel.setObjectName("glassCard")
+        solana_layout = QVBoxLayout(self.solana_credentials_panel)
+        solana_layout.setContentsMargins(18, 18, 18, 18)
+        solana_layout.setSpacing(12)
+
+        self.solana_credentials_title = QLabel("Solana Routing")
+        self.solana_credentials_title.setObjectName("sectionLabel")
+        solana_layout.addWidget(self.solana_credentials_title)
+
+        self.solana_wallet_title = QLabel("Wallet Signing")
+        self.solana_wallet_title.setObjectName("fieldLabel")
+        solana_layout.addWidget(self.solana_wallet_title)
+
+        solana_wallet_row = QHBoxLayout()
+        solana_wallet_row.setSpacing(10)
+        self.solana_wallet_address_input = QLineEdit()
+        self.solana_wallet_address_input.setPlaceholderText("Solana wallet address for balances and live signing")
+        solana_wallet_row.addWidget(
+            self._wrap_field("Wallet Address", self.solana_wallet_address_input, block_name="solana_wallet_address"),
+            1,
+        )
+        self.solana_private_key_input = QLineEdit()
+        self.solana_private_key_input.setEchoMode(QLineEdit.Password)
+        self.solana_private_key_input.setPlaceholderText("Private key for live swaps")
+        solana_wallet_row.addWidget(
+            self._wrap_field("Private Key", self.solana_private_key_input, block_name="solana_private_key"),
+            1,
+        )
+        solana_layout.addLayout(solana_wallet_row)
+
+        solana_wallet_options_row = QHBoxLayout()
+        solana_wallet_options_row.setSpacing(10)
+        self.solana_rpc_url_input = QLineEdit()
+        self.solana_rpc_url_input.setPlaceholderText("Optional custom Solana RPC URL")
+        solana_wallet_options_row.addWidget(
+            self._wrap_field("RPC URL", self.solana_rpc_url_input, block_name="solana_rpc_url"),
+            1,
+        )
+        self.solana_jupiter_api_key_input = QLineEdit()
+        self.solana_jupiter_api_key_input.setEchoMode(QLineEdit.Password)
+        self.solana_jupiter_api_key_input.setPlaceholderText("Optional legacy Jupiter API key fallback")
+        solana_wallet_options_row.addWidget(
+            self._wrap_field(
+                "Legacy Jupiter API Key",
+                self.solana_jupiter_api_key_input,
+                block_name="solana_jupiter_api_key",
+            ),
+            1,
+        )
+        solana_layout.addLayout(solana_wallet_options_row)
+
+        self.solana_okx_title = QLabel("OKX Trade API")
+        self.solana_okx_title.setObjectName("fieldLabel")
+        solana_layout.addWidget(self.solana_okx_title)
+
+        solana_okx_row = QHBoxLayout()
+        solana_okx_row.setSpacing(10)
+        self.solana_okx_api_key_input = QLineEdit()
+        self.solana_okx_api_key_input.setPlaceholderText("OKX API key for Solana quotes and routing")
+        solana_okx_row.addWidget(
+            self._wrap_field("OKX API Key", self.solana_okx_api_key_input, block_name="solana_okx_api_key"),
+            1,
+        )
+        self.solana_okx_secret_input = QLineEdit()
+        self.solana_okx_secret_input.setEchoMode(QLineEdit.Password)
+        self.solana_okx_secret_input.setPlaceholderText("OKX secret key")
+        solana_okx_row.addWidget(
+            self._wrap_field("OKX Secret", self.solana_okx_secret_input, block_name="solana_okx_secret"),
+            1,
+        )
+        solana_layout.addLayout(solana_okx_row)
+
+        solana_okx_options_row = QHBoxLayout()
+        solana_okx_options_row.setSpacing(10)
+        self.solana_okx_passphrase_input = QLineEdit()
+        self.solana_okx_passphrase_input.setEchoMode(QLineEdit.Password)
+        self.solana_okx_passphrase_input.setPlaceholderText("OKX passphrase")
+        solana_okx_options_row.addWidget(
+            self._wrap_field(
+                "OKX Passphrase",
+                self.solana_okx_passphrase_input,
+                block_name="solana_okx_passphrase",
+            ),
+            1,
+        )
+        self.solana_okx_project_id_input = QLineEdit()
+        self.solana_okx_project_id_input.setPlaceholderText("Optional OKX project id")
+        solana_okx_options_row.addWidget(
+            self._wrap_field(
+                "OKX Project ID",
+                self.solana_okx_project_id_input,
+                block_name="solana_okx_project_id",
+            ),
+            1,
+        )
+        solana_layout.addLayout(solana_okx_options_row)
+        panel_layout.addWidget(self.solana_credentials_panel)
+
         self.risk_label = QLabel("Risk and Persistence")
         self.risk_label.setObjectName("sectionLabel")
         panel_layout.addWidget(self.risk_label)
@@ -1039,6 +1726,58 @@ class Dashboard(QWidget):
         remember_layout.addWidget(self.remember_checkbox)
         risk_row.addWidget(remember_wrap, 1)
         panel_layout.addLayout(risk_row)
+
+        self.platform_sync_label = QLabel("Sopotek Server Sync")
+        self.platform_sync_label.setObjectName("sectionLabel")
+        panel_layout.addWidget(self.platform_sync_label)
+
+        self.platform_sync_card = QFrame()
+        self.platform_sync_card.setObjectName("glassCard")
+        platform_sync_layout = QVBoxLayout(self.platform_sync_card)
+        platform_sync_layout.setContentsMargins(18, 18, 18, 18)
+        platform_sync_layout.setSpacing(10)
+
+        platform_sync_row = QHBoxLayout()
+        platform_sync_row.setSpacing(10)
+        self.server_url_input = QLineEdit()
+        self.server_url_input.setPlaceholderText("http://127.0.0.1:8000")
+        platform_sync_row.addWidget(self._wrap_field("Server URL", self.server_url_input), 1)
+        self.server_email_input = QLineEdit()
+        self.server_email_input.setPlaceholderText("Your Sopotek account email")
+        platform_sync_row.addWidget(self._wrap_field("Account Email", self.server_email_input), 1)
+        platform_sync_layout.addLayout(platform_sync_row)
+
+        platform_sync_credentials_row = QHBoxLayout()
+        platform_sync_credentials_row.setSpacing(10)
+        self.server_password_input = QLineEdit()
+        self.server_password_input.setEchoMode(QLineEdit.Password)
+        self.server_password_input.setPlaceholderText("Sopotek account password")
+        platform_sync_credentials_row.addWidget(self._wrap_field("Account Password", self.server_password_input), 1)
+        self.sync_workspace_checkbox = QCheckBox("Sync this workspace with Sopotek server on connect")
+        sync_checkbox_wrap = QWidget()
+        sync_checkbox_layout = QVBoxLayout(sync_checkbox_wrap)
+        sync_checkbox_layout.setContentsMargins(0, 18, 0, 0)
+        sync_checkbox_layout.addWidget(self.sync_workspace_checkbox)
+        platform_sync_credentials_row.addWidget(sync_checkbox_wrap, 1)
+        platform_sync_layout.addLayout(platform_sync_credentials_row)
+
+        platform_sync_actions_row = QHBoxLayout()
+        platform_sync_actions_row.setSpacing(8)
+        self.sync_now_button = QPushButton("Sync Now")
+        self.sync_now_button.setObjectName("secondaryButton")
+        platform_sync_actions_row.addWidget(self.sync_now_button)
+        self.load_from_server_button = QPushButton("Load From Server")
+        self.load_from_server_button.setObjectName("secondaryButton")
+        platform_sync_actions_row.addWidget(self.load_from_server_button)
+        platform_sync_actions_row.addStretch(1)
+        platform_sync_layout.addLayout(platform_sync_actions_row)
+
+        self.platform_sync_status_label = QLabel("Ready to sync this desktop with Sopotek server.")
+        self.platform_sync_status_label.setObjectName("hintLabel")
+        self.platform_sync_status_label.setWordWrap(True)
+        platform_sync_layout.addWidget(self.platform_sync_status_label)
+
+        panel_layout.addWidget(self.platform_sync_card)
 
         summary_card = QFrame()
         summary_card.setObjectName("summaryCard")
@@ -1093,6 +1832,42 @@ class Dashboard(QWidget):
         self.connect_button.setObjectName("connectButton")
         self.connect_button.setMinimumHeight(56)
         panel_layout.addWidget(self.connect_button)
+
+        self.active_sessions_label = QLabel("Active Sessions")
+        self.active_sessions_label.setObjectName("sectionLabel")
+        panel_layout.addWidget(self.active_sessions_label)
+
+        active_sessions_row = QHBoxLayout()
+        active_sessions_row.setSpacing(8)
+        self.active_session_box = QComboBox()
+        self.active_session_box.addItem("No active sessions", "")
+        active_sessions_row.addWidget(self._wrap_field("Session Registry", self.active_session_box), 1)
+
+        self.activate_session_button = QPushButton("Activate")
+        self.activate_session_button.setObjectName("secondaryButton")
+        active_sessions_row.addWidget(self.activate_session_button, 0, Qt.AlignBottom)
+
+        self.start_session_button = QPushButton("Start")
+        self.start_session_button.setObjectName("secondaryButton")
+        active_sessions_row.addWidget(self.start_session_button, 0, Qt.AlignBottom)
+
+        self.stop_session_button = QPushButton("Stop")
+        self.stop_session_button.setObjectName("secondaryButton")
+        active_sessions_row.addWidget(self.stop_session_button, 0, Qt.AlignBottom)
+
+        self.destroy_session_button = QPushButton("Remove")
+        self.destroy_session_button.setObjectName("secondaryButton")
+        active_sessions_row.addWidget(self.destroy_session_button, 0, Qt.AlignBottom)
+
+        self.refresh_sessions_button = QPushButton("Refresh")
+        self.refresh_sessions_button.setObjectName("secondaryButton")
+        active_sessions_row.addWidget(self.refresh_sessions_button, 0, Qt.AlignBottom)
+        panel_layout.addLayout(active_sessions_row)
+
+        self.active_sessions_summary = QLabel("No sessions connected yet.")
+        self.active_sessions_summary.setObjectName("hintLabel")
+        self.active_sessions_summary.setWordWrap(True)
+        panel_layout.addWidget(self.active_sessions_summary)
 
         self.footer_label = QLabel(
             "Start in paper mode when testing a new broker path. "
@@ -1204,20 +1979,48 @@ class Dashboard(QWidget):
         self.exchange_box.currentTextChanged.connect(self._update_session_preview)
         self.mode_box.currentTextChanged.connect(self._update_broker_hint)
         self.mode_box.currentTextChanged.connect(self._update_session_preview)
+        self.mode_box.currentTextChanged.connect(self._sync_ibkr_default_fields)
+        self.ibkr_connection_mode_box.currentIndexChanged.connect(self._update_optional_fields)
+        self.ibkr_connection_mode_box.currentIndexChanged.connect(self._update_broker_hint)
+        self.ibkr_connection_mode_box.currentIndexChanged.connect(self._update_session_preview)
+        self.ibkr_connection_mode_box.currentIndexChanged.connect(self._sync_ibkr_default_fields)
+        self.ibkr_environment_box.currentIndexChanged.connect(self._update_broker_hint)
+        self.ibkr_environment_box.currentIndexChanged.connect(self._update_session_preview)
+        self.schwab_environment_box.currentIndexChanged.connect(self._update_broker_hint)
+        self.schwab_environment_box.currentIndexChanged.connect(self._update_session_preview)
         self.market_type_box.currentIndexChanged.connect(self._update_session_preview)
         self.risk_input.valueChanged.connect(self._update_session_preview)
         self.api_input.textChanged.connect(self._update_session_preview)
         self.secret_input.textChanged.connect(self._update_session_preview)
         self.password_input.textChanged.connect(self._update_session_preview)
         self.account_id_input.textChanged.connect(self._update_session_preview)
+        self.solana_wallet_address_input.textChanged.connect(self._update_session_preview)
+        self.solana_private_key_input.textChanged.connect(self._update_session_preview)
+        self.solana_rpc_url_input.textChanged.connect(self._update_session_preview)
+        self.solana_jupiter_api_key_input.textChanged.connect(self._update_session_preview)
+        self.solana_okx_api_key_input.textChanged.connect(self._update_session_preview)
+        self.solana_okx_secret_input.textChanged.connect(self._update_session_preview)
+        self.solana_okx_passphrase_input.textChanged.connect(self._update_session_preview)
+        self.solana_okx_project_id_input.textChanged.connect(self._update_session_preview)
         self.remember_checkbox.toggled.connect(self._update_session_preview)
         self.live_guard_checkbox.toggled.connect(self._update_session_preview)
+        self.server_url_input.editingFinished.connect(self._persist_platform_sync_profile)
+        self.server_email_input.editingFinished.connect(self._persist_platform_sync_profile)
+        self.server_password_input.editingFinished.connect(self._persist_platform_sync_profile)
+        self.sync_workspace_checkbox.toggled.connect(lambda _checked: self._persist_platform_sync_profile())
         self.saved_account_box.currentTextChanged.connect(self._load_selected_account)
         self.refresh_accounts_button.clicked.connect(self._load_accounts_index)
+        self.refresh_sessions_button.clicked.connect(self.refresh_active_sessions)
+        self.activate_session_button.clicked.connect(self._activate_selected_session)
+        self.start_session_button.clicked.connect(self._start_selected_session)
+        self.stop_session_button.clicked.connect(self._stop_selected_session)
+        self.destroy_session_button.clicked.connect(self._destroy_selected_session)
         self.language_box.currentIndexChanged.connect(self._on_language_changed)
         self.paper_preset_button.clicked.connect(lambda: self._apply_preset("paper"))
         self.crypto_preset_button.clicked.connect(lambda: self._apply_preset("crypto"))
         self.fx_preset_button.clicked.connect(lambda: self._apply_preset("forex"))
+        self.sync_now_button.clicked.connect(lambda: self._request_workspace_push(interactive=True))
+        self.load_from_server_button.clicked.connect(self._request_workspace_pull)
         self.connect_button.clicked.connect(self._on_connect)
         self.manage_license_button.clicked.connect(
             lambda: getattr(self.controller, "show_license_dialog", lambda *_: None)(self)
@@ -1284,11 +2087,23 @@ class Dashboard(QWidget):
             "secret": "dashboard.secret",
             "password": "dashboard.passphrase",
             "account_id": "dashboard.account_id",
+            "ibkr_connection_mode": None,
+            "ibkr_environment": None,
+            "schwab_environment": None,
         }
         for block_name, key in field_labels.items():
             block = self._field_blocks.get(block_name)
             if block is not None:
-                block.label_widget.setText(self._tr(key) if key else "Customer Region")
+                if block_name == "customer_region":
+                    block.label_widget.setText("Customer Region")
+                elif block_name == "ibkr_connection_mode":
+                    block.label_widget.setText("IBKR Connection")
+                elif block_name == "ibkr_environment":
+                    block.label_widget.setText("IBKR Environment")
+                elif block_name == "schwab_environment":
+                    block.label_widget.setText("Schwab Environment")
+                else:
+                    block.label_widget.setText(self._tr(key) if key else block.label_widget.text())
 
         self.password_input.setPlaceholderText("Exchange passphrase when required")
         self._apply_credential_field_schema()
@@ -1379,6 +2194,19 @@ class Dashboard(QWidget):
         self.customer_region_box.setCurrentIndex(region_index if region_index >= 0 else 0)
         self._update_exchange_list(broker.get("type", "crypto"))
         self.exchange_box.setCurrentText(broker.get("exchange", ""))
+        ibkr_options = dict(broker.get("options", {}) or {})
+        ibkr_mode_index = self.ibkr_connection_mode_box.findData(
+            self._normalize_ibkr_connection_mode(ibkr_options.get("connection_mode"))
+        )
+        self.ibkr_connection_mode_box.setCurrentIndex(ibkr_mode_index if ibkr_mode_index >= 0 else 0)
+        ibkr_environment_index = self.ibkr_environment_box.findData(
+            str(ibkr_options.get("environment") or "gateway").strip().lower() or "gateway"
+        )
+        self.ibkr_environment_box.setCurrentIndex(ibkr_environment_index if ibkr_environment_index >= 0 else 0)
+        schwab_environment_index = self.schwab_environment_box.findData(
+            str(ibkr_options.get("environment") or "sandbox").strip().lower() or "sandbox"
+        )
+        self.schwab_environment_box.setCurrentIndex(schwab_environment_index if schwab_environment_index >= 0 else 0)
         self._update_optional_fields()
         self._populate_credential_fields(broker)
         self._refresh_market_type_options()
@@ -1485,19 +2313,82 @@ class Dashboard(QWidget):
         self.market_type_box.setCurrentIndex(index if index >= 0 else 0)
         self.market_type_box.blockSignals(False)
 
+    def _sync_ibkr_default_fields(self):
+        exchange = self.exchange_box.currentText()
+        if exchange != "ibkr":
+            self._ibkr_last_connection_mode = None
+            return
+
+        connection_mode = self._selected_ibkr_connection_mode()
+        previous_mode = self._ibkr_last_connection_mode
+        if previous_mode and previous_mode != connection_mode:
+            self._remember_ibkr_mode_fields(previous_mode)
+            self._apply_ibkr_mode_fields(connection_mode)
+        else:
+            defaults = self._ibkr_mode_defaults(connection_mode)
+            if connection_mode == "tws":
+                if not self.api_input.text().strip():
+                    self.api_input.setText(defaults["api"])
+                if not self.secret_input.text().strip() or self.secret_input.text().strip() in {"7496", "7497"}:
+                    self.secret_input.setText(defaults["secret"])
+                if not self.password_input.text().strip():
+                    self.password_input.setText(defaults["password"])
+            elif not self.api_input.text().strip():
+                self.api_input.setText(defaults["api"])
+
+        self._ibkr_last_connection_mode = connection_mode
+
+    def _ibkr_mode_defaults(self, connection_mode):
+        normalized = self._normalize_ibkr_connection_mode(connection_mode)
+        if normalized == "tws":
+            return {
+                "api": "127.0.0.1",
+                "secret": "7496" if self.mode_box.currentText() == "live" else "7497",
+                "password": "1",
+            }
+        return {
+            "api": "https://127.0.0.1:5000/v1/api",
+            "secret": "",
+            "password": "",
+        }
+
+    def _remember_ibkr_mode_fields(self, connection_mode):
+        normalized = self._normalize_ibkr_connection_mode(connection_mode)
+        self._ibkr_mode_field_memory[normalized] = {
+            "api": self.api_input.text().strip(),
+            "secret": self.secret_input.text().strip(),
+            "password": self.password_input.text().strip(),
+        }
+
+    def _apply_ibkr_mode_fields(self, connection_mode):
+        normalized = self._normalize_ibkr_connection_mode(connection_mode)
+        values = dict(self._ibkr_mode_field_memory.get(normalized) or {})
+        defaults = self._ibkr_mode_defaults(normalized)
+        self.api_input.setText(str(values.get("api") or defaults["api"]))
+        self.secret_input.setText(str(values.get("secret") or defaults["secret"]))
+        self.password_input.setText(str(values.get("password") or defaults["password"]))
+
     def _update_optional_fields(self):
         """Show/hide broker-specific form fields based on selected exchange type."""
         broker_type = self.exchange_type_box.currentText()
         exchange = self.exchange_box.currentText()
         schema = self._credential_field_schema()
         is_paper = broker_type == "paper" or exchange == "paper"
+        is_solana = exchange == "solana" and not is_paper
         self._refresh_market_type_options()
+        self._sync_ibkr_default_fields()
 
-        self._field_blocks["api"].setVisible(not is_paper)
-        self._field_blocks["secret"].setVisible(not is_paper)
-        self._field_blocks["account_id"].setVisible((not is_paper) and bool(schema.get("show_account")))
-        self._field_blocks["password"].setVisible((not is_paper) and bool(schema.get("show_password")))
+        self._field_blocks["api"].setVisible((not is_paper) and not is_solana)
+        self._field_blocks["secret"].setVisible((not is_paper) and not is_solana)
+        self._field_blocks["account_id"].setVisible((not is_paper) and (not is_solana) and bool(schema.get("show_account")))
+        self._field_blocks["password"].setVisible((not is_paper) and (not is_solana) and bool(schema.get("show_password")))
+        self.solana_credentials_panel.setVisible(is_solana)
         self._field_blocks["customer_region"].setVisible(broker_type == "crypto" and not is_paper)
+        self._field_blocks["ibkr_connection_mode"].setVisible(exchange == "ibkr" and not is_paper)
+        self._field_blocks["ibkr_environment"].setVisible(
+            exchange == "ibkr" and not is_paper and self._selected_ibkr_connection_mode() == "webapi"
+        )
+        self._field_blocks["schwab_environment"].setVisible(exchange == "schwab" and not is_paper)
 
         if is_paper:
             self.mode_box.blockSignals(True)
@@ -1530,6 +2421,8 @@ class Dashboard(QWidget):
         if exchange and exchange != "paper":
             copy += f" Trading venue preference: {str(market_type or 'auto').upper()}."
         if broker_type == "crypto" and exchange and exchange != "paper":
+            if mode == "paper":
+                copy += " Paper mode uses Sopotek's local paper broker with live public market data from the selected exchange."
             if exchange == "binanceus":
                 copy += " Binance US is reserved for US customers."
             elif exchange == "binance":
@@ -1539,19 +2432,29 @@ class Dashboard(QWidget):
                     " For Coinbase Advanced Trade, paste the API key name in the first field "
                     "and the privateKey value in the second field."
                 )
+                if str(market_type or "").strip().lower() == "derivative":
+                    copy += " Derivative venue now defaults to Coinbase futures routing."
             copy += f" Customer region: {customer_region.upper()}."
         if exchange == "stellar":
             copy += (
                 " Use your Stellar public key in the first field. "
                 "The private key is optional for read-only market data, but required for order execution."
             )
+        elif exchange == "solana":
+            copy += (
+                " Solana now uses a dedicated routing panel. "
+                "Keep wallet signing details separate from OKX Trade API credentials, and use the legacy Jupiter field only when you need the older fallback route. "
+                "Live Solana execution still requires a wallet address and matching private key for local signing."
+            )
         elif exchange == "oanda" or broker_type == "forex":
             copy += " Enter Oanda account ID in the first field and API key in the second field."
         elif exchange == "schwab":
             copy += (
-                " Enter the Schwab client ID, client secret, and refresh token. "
-                "The last field can pin a specific account hash when you do not want auto-resolution."
+                " Schwab uses an OAuth browser sign-in rather than exchange-style API keys. "
+                "Enter the App Key / Client ID, your registered redirect URI, and optionally the client secret if your Schwab app requires it. "
+                "The final field can pin a specific account hash after account discovery."
             )
+            copy += f" Environment: {self._selected_schwab_environment().upper()}."
         elif exchange == "amp":
             copy += (
                 " Enter the AMP username and password first. "
@@ -1563,10 +2466,18 @@ class Dashboard(QWidget):
                 "Company ID and security code are only needed on environments that require them."
             )
         elif exchange == "ibkr":
-            copy += (
-                " IBKR can auto-resolve the account through Client Portal Gateway or TWS. "
-                "Use the account field only when you want to force a specific account id."
-            )
+            connection_mode = self._selected_ibkr_connection_mode()
+            if connection_mode == "tws":
+                copy += (
+                    " TWS mode uses the dedicated socket-based IBKR family. "
+                    "Host, port, and client ID map to Trader Workstation or IB Gateway directly."
+                )
+            else:
+                copy += (
+                    " Web API mode uses the Client Portal / Gateway family. "
+                    "Base URL points to the gateway or hosted Web API, while the token field is only needed when your session bootstrap requires it."
+                )
+            copy += " Use the account field only when you want to force a specific account id or profile."
         self.broker_hint.setText(copy)
 
     def _set_check_state(self, row, text, is_ready):
@@ -1586,17 +2497,23 @@ class Dashboard(QWidget):
         market_type = str(self.market_type_box.currentData() or "auto").upper()
         strategy = "Auto per-symbol assignment"
         risk_value = self.risk_input.value()
+        ibkr_transport = self._selected_ibkr_connection_mode() if exchange == "ibkr" else None
 
         is_paper = broker_type == "paper" or exchange == "paper" or mode == "paper"
         needs_credentials = exchange != "paper" and broker_type != "paper"
 
         resolved = self._resolved_broker_inputs()
         required_fields = tuple(schema.get("required_fields") or ())
-        credentials_ready = not needs_credentials or all(
-            self._schema_field_has_value(schema, resolved, field_name)
-            for field_name in required_fields
-        )
-        has_optional_account = bool(self._dashboard_field_values(schema).get("account"))
+        if exchange == "solana":
+            solana_values = self._solana_field_values()
+            credentials_ready = True if is_paper else self._solana_live_execution_ready()
+            has_optional_account = bool(solana_values["rpc_url"] or solana_values["okx_project_id"])
+        else:
+            credentials_ready = not needs_credentials or all(
+                self._schema_field_has_value(schema, resolved, field_name)
+                for field_name in required_fields
+            )
+            has_optional_account = bool(self._dashboard_field_values(schema).get("account"))
 
         readiness = 20
         readiness += 20 if exchange else 0
@@ -1657,7 +2574,10 @@ class Dashboard(QWidget):
             self.summary_body.setText(
                 "This setup is optimized for a safer rehearsal. You can validate the broker shape, charts, and automatic strategy routing before taking live risk."
             )
-            self.connect_button.setText("Open Paper Terminal")
+            if exchange == "schwab":
+                self.connect_button.setText("Sign In With Schwab")
+            else:
+                self.connect_button.setText("Open Paper Terminal")
             self.live_guard_checkbox.setVisible(False)
             self.live_guard_checkbox.setChecked(False)
         else:
@@ -1665,7 +2585,9 @@ class Dashboard(QWidget):
             self.summary_body.setText(
                 "This session is configured for live execution. Review credentials, account details, and risk posture before entering the terminal. Strategy assignment will happen automatically per symbol after launch."
             )
-            if hasattr(self.controller, "license_allows") and not self.controller.license_allows("live_trading"):
+            if exchange == "schwab":
+                self.connect_button.setText("Sign In With Schwab")
+            elif hasattr(self.controller, "license_allows") and not self.controller.license_allows("live_trading"):
                 self.connect_button.setText("Activate License For Live Trading")
             else:
                 self.connect_button.setText("Launch Live Trading Terminal")
@@ -1676,7 +2598,8 @@ class Dashboard(QWidget):
 
         profile_state = self.saved_account_box.currentText()
         profile_copy = profile_state if profile_state and profile_state != "Recent profiles" else "Profile not saved yet"
-        self.summary_meta.setText(f"Risk {risk_value}%  |  Strategy Auto per symbol  |  {profile_copy}")
+        transport_copy = f"  |  IBKR {ibkr_transport.upper()}" if ibkr_transport else ""
+        self.summary_meta.setText(f"Risk {risk_value}%  |  Strategy Auto per symbol{transport_copy}  |  {profile_copy}")
 
     def _confirm_live_launch(self, exchange, account_id):
         """Request explicit user confirmation before allowing live trading launch."""
@@ -1773,6 +2696,37 @@ class Dashboard(QWidget):
                     coinbase_error,
                 )
                 return
+        if exchange == "solana":
+            solana_values = self._solana_field_values()
+            okx_labels = {
+                "OKX API Key": solana_values["okx_api_key"],
+                "OKX Secret": solana_values["okx_secret_key"],
+                "OKX Passphrase": solana_values["okx_passphrase"],
+            }
+            if any(okx_labels.values()) and not self._solana_okx_credentials_complete():
+                missing_okx = [label for label, value in okx_labels.items() if not str(value or "").strip()]
+                QMessageBox.warning(
+                    self,
+                    "Incomplete OKX Trade API Credentials",
+                    "Complete the OKX API key, secret, and passphrase fields together.\n\n"
+                    f"Missing: {', '.join(missing_okx)}",
+                )
+                return
+            if self.mode_box.currentText() == "live":
+                if not solana_values["wallet_address"] or not solana_values["private_key"]:
+                    QMessageBox.warning(
+                        self,
+                        "Missing Solana Signer",
+                        "Live Solana sessions require both a wallet address and matching private key in the Solana routing panel.",
+                    )
+                    return
+                if not (self._solana_okx_credentials_complete() or solana_values["jupiter_api_key"]):
+                    QMessageBox.warning(
+                        self,
+                        "Missing Solana Route Credentials",
+                        "Provide either the full OKX Trade API credential set or a legacy Jupiter API key before launching live Solana trading.",
+                    )
+                    return
         if broker_type == "crypto" and exchange == "binance" and customer_region == "us":
             QMessageBox.warning(
                 self,
@@ -1823,6 +2777,21 @@ class Dashboard(QWidget):
                 ).strip().lower(),
             }
         )
+        if exchange == "coinbase" and str(broker_options.get("market_type") or "").strip().lower() == "derivative":
+            broker_options.setdefault("defaultSubType", "future")
+        if exchange == "schwab":
+            selected_profile = str(self.saved_account_box.currentText() or "").strip()
+            if not selected_profile or selected_profile == self._tr("dashboard.recent_profiles"):
+                selected_profile = f"schwab_{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(account_id or api_key or 'profile'))[:24]}"
+            broker_options["profile_name"] = selected_profile
+        if exchange == "ibkr":
+            broker_options["connection_mode"] = self._selected_ibkr_connection_mode()
+            broker_options["environment"] = self._selected_ibkr_environment()
+            broker_options["paper"] = (
+                self.mode_box.currentText() != "live"
+                if broker_options["connection_mode"] == "tws"
+                else False
+            )
         broker_config = BrokerConfig(
             type=broker_type,
             exchange=exchange,
@@ -1845,24 +2814,126 @@ class Dashboard(QWidget):
         if self.remember_checkbox.isChecked():
             profile_seed = "paper"
             for candidate in (
+                broker_options.get("host"),
+                broker_options.get("base_url"),
                 broker_options.get("username"),
-                api_key,
+                broker_options.get("wallet_address"),
+                broker_options.get("okx_api_key"),
                 account_id,
+                api_key,
                 broker_options.get("account_hash"),
             ):
                 candidate_text = str(candidate or "").strip()
                 if candidate_text:
-                    profile_seed = candidate_text
+                    profile_seed = re.sub(r"[^A-Za-z0-9_.-]+", "_", candidate_text)
                     break
             profile_name = f"{exchange}_{profile_seed[:6]}"
+            broker_options["profile_name"] = profile_name
             payload = config.model_dump() if hasattr(config, "model_dump") else config.dict()
             CredentialManager.save_account(profile_name, payload)
             self.settings.setValue(self.LAST_PROFILE_SETTING, profile_name)
             self._load_accounts_index()
             self.saved_account_box.setCurrentText(profile_name)
 
+        sync_profile = self._persist_platform_sync_profile()
+        if bool(sync_profile.get("sync_enabled")):
+            self._request_workspace_push(interactive=False)
+
+        self.create_session(exchange, config)
+
+    def create_session(self, exchange_name, config):
+        _ = exchange_name
         self.show_loading()
         self.login_requested.emit(config)
+
+    def refresh_active_sessions(self):
+        controller = getattr(self, "controller", None)
+        if controller is None or not hasattr(controller, "list_trading_sessions"):
+            return
+
+        try:
+            sessions = list(controller.list_trading_sessions() or [])
+        except Exception:
+            sessions = []
+
+        self.active_session_box.blockSignals(True)
+        self.active_session_box.clear()
+        if not sessions:
+            self.active_session_box.addItem("No active sessions", "")
+            self.active_sessions_summary.setText("No sessions connected yet.")
+            self.activate_session_button.setEnabled(False)
+            self.start_session_button.setEnabled(False)
+            self.stop_session_button.setEnabled(False)
+            self.destroy_session_button.setEnabled(False)
+            self.active_session_box.blockSignals(False)
+            return
+
+        aggregate = {}
+        if hasattr(controller, "aggregate_session_portfolio"):
+            try:
+                aggregate = dict(controller.aggregate_session_portfolio() or {})
+            except Exception:
+                aggregate = {}
+
+        active_session_id = ""
+        summary_lines = []
+        for session in sessions:
+            session_id = str(session.get("session_id") or "").strip()
+            label = str(session.get("label") or session_id or "Session").strip()
+            status = str(session.get("status") or "unknown").upper()
+            self.active_session_box.addItem(f"{label} [{status}]", session_id)
+            summary_lines.append(
+                f"{label}: {status}, equity {float(session.get('equity') or 0.0):,.2f}, "
+                f"positions {int(session.get('positions_count') or 0)}, orders {int(session.get('open_orders_count') or 0)}."
+            )
+            if session.get("active"):
+                active_session_id = session_id
+
+        if active_session_id:
+            index = self.active_session_box.findData(active_session_id)
+            if index >= 0:
+                self.active_session_box.setCurrentIndex(index)
+        aggregate_summary = (
+            f"{int(aggregate.get('session_count') or len(sessions))} sessions"
+            f" | running {int(aggregate.get('running_sessions') or 0)}"
+            f" | equity {float(aggregate.get('total_equity') or 0.0):,.2f}"
+            f" | exposure {float(aggregate.get('total_gross_exposure') or 0.0):,.2f}"
+            f" | unrealized PnL {float(aggregate.get('total_unrealized_pnl') or 0.0):,.2f}"
+        )
+        details = " ".join(summary_lines[:3])
+        self.active_sessions_summary.setText(f"{aggregate_summary}. {details}".strip())
+        self.activate_session_button.setEnabled(True)
+        self.start_session_button.setEnabled(True)
+        self.stop_session_button.setEnabled(True)
+        self.destroy_session_button.setEnabled(True)
+        self.active_session_box.blockSignals(False)
+
+    def _selected_session_id(self):
+        return str(self.active_session_box.currentData() or "").strip()
+
+    def _activate_selected_session(self):
+        session_id = self._selected_session_id()
+        controller = getattr(self, "controller", None)
+        if session_id and controller is not None and hasattr(controller, "request_session_activation"):
+            controller.request_session_activation(session_id)
+
+    def _start_selected_session(self):
+        session_id = self._selected_session_id()
+        controller = getattr(self, "controller", None)
+        if session_id and controller is not None and hasattr(controller, "request_session_start"):
+            controller.request_session_start(session_id)
+
+    def _stop_selected_session(self):
+        session_id = self._selected_session_id()
+        controller = getattr(self, "controller", None)
+        if session_id and controller is not None and hasattr(controller, "request_session_stop"):
+            controller.request_session_stop(session_id)
+
+    def _destroy_selected_session(self):
+        session_id = self._selected_session_id()
+        controller = getattr(self, "controller", None)
+        if session_id and controller is not None and hasattr(controller, "request_session_destroy"):
+            controller.request_session_destroy(session_id)
 
     def show_loading(self):
         """Show loading status while connecting to the trading terminal."""

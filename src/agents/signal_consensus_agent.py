@@ -89,9 +89,13 @@ class SignalConsensusAgent(BaseAgent):
 
         winner_count = int(winner["count"])
         winner_weight = float(winner["weighted_score"])
+        runner_up_count = int(runner_up["count"]) if runner_up is not None else 0
+        runner_up_weight = float(runner_up["weighted_score"]) if runner_up is not None else 0.0
+        total_votes = sum(int(values["count"]) for values in vote_table.values())
+        effective_minimum_votes = min(self.minimum_votes, max(1, total_votes))
 
         status = "split"
-        if winner_count < self.minimum_votes:
+        if winner_count < effective_minimum_votes:
             status = "split"
         elif len(ranked_votes) == 1:
             status = "unanimous"
@@ -107,7 +111,16 @@ class SignalConsensusAgent(BaseAgent):
             "side": winner_side if status != "split" else "",
             "vote_count": winner_count,
             "total_candidates": len(candidates),
-            "minimum_votes": self.minimum_votes,
+            "minimum_votes": effective_minimum_votes,
+            "configured_minimum_votes": self.minimum_votes,
+            "effective_minimum_votes": effective_minimum_votes,
+            "available_votes": total_votes,
+            "winner_weighted_score": winner_weight,
+            "runner_up_vote_count": runner_up_count,
+            "runner_up_weighted_score": runner_up_weight,
+            "vote_margin": winner_count - runner_up_count,
+            "weighted_margin": winner_weight - runner_up_weight,
+            "vote_share": (winner_count / total_votes) if total_votes > 0 else 0.0,
             "votes": {
                 side: {
                     "count": int(values["count"]),
@@ -119,7 +132,7 @@ class SignalConsensusAgent(BaseAgent):
         }
         working["signal_consensus"] = consensus
 
-        if status != "split" and winner_count >= self.minimum_votes:
+        if status != "split" and winner_count >= effective_minimum_votes:
             working["signal_candidates"] = [
                 candidate
                 for candidate in candidates
@@ -132,7 +145,10 @@ class SignalConsensusAgent(BaseAgent):
                 "side": consensus["side"] or "mixed",
                 "vote_count": consensus["vote_count"],
                 "total_candidates": consensus["total_candidates"],
-                "minimum_votes": self.minimum_votes,
+                "minimum_votes": effective_minimum_votes,
+                "configured_minimum_votes": self.minimum_votes,
+                "available_votes": total_votes,
+                "weighted_margin": consensus["weighted_margin"],
             },
             symbol=symbol,
             decision_id=decision_id,

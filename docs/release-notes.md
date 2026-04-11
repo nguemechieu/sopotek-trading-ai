@@ -37,3 +37,16 @@ This first published version is focused on shipping a coherent operator workstat
 - realistic chart, order, and trade supervision workflows
 - a usable Telegram remote console
 - contributor-facing and operator-facing documentation that can support onboarding
+
+## Runtime Extensions On April 1, 2026
+
+The current runtime branch also adds a new adaptive AI supervision layer on top of the original `1.0.0` desktop release:
+
+- a profile-aware `TraderAgent` that aggregates multi-agent signals and adapts decisions to investor goals and risk tolerance
+- `MarketHoursEngine` support for crypto, forex, stock, and futures session gating, including NYSE holiday checks and forex liquidity windows
+- `ProfitProtectionEngine` support for trailing stops, break-even logic, partial profit taking, time-based exits, volatility exits, and ML-guided exit decisions
+- a production-oriented ML pipeline for feature engineering, dataset building, model training, inference, and retraining hooks
+- regime detection, order-book intelligence, and reasoning output for more explainable signal generation
+- normalized email and push alert delivery plus a file-backed mobile dashboard export
+- `TradeJournalAIEngine` for automated post-trade analysis explaining why a trade lost, what worked, and what to improve next
+- a file-backed feature store and SQL-backed quant persistence layer for research, retraining, and auditability

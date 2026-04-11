@@ -35,6 +35,15 @@ class MarketAnalystAgent(BaseAgent):
         bucket = self.history[candle.symbol]
         bucket.append(candle)
         snapshot = self.regime_engine.classify_candles(list(bucket))
+        if len(bucket) == 1 and snapshot.regime == "neutral":
+            opening_price = float(candle.open or 0.0)
+            closing_price = float(candle.close or 0.0)
+            if closing_price > opening_price:
+                snapshot.regime = "bullish"
+                snapshot.preferred_strategy = "trend_following"
+            elif closing_price < opening_price:
+                snapshot.regime = "bearish"
+                snapshot.preferred_strategy = "mean_reversion"
         regime = snapshot.regime
         preferred_strategy = snapshot.preferred_strategy or (
             "trend_following" if regime == "bullish" else "mean_reversion" if regime == "neutral" else "ml_agent"
@@ -55,4 +64,5 @@ class MarketAnalystAgent(BaseAgent):
         )
         self.latest_insights[candle.symbol] = insight
         await self.bus.publish(EventType.REGIME, snapshot, priority=48, source=self.name)
+        await self.bus.publish(EventType.REGIME_UPDATES, snapshot, priority=48, source=self.name)
         await self.bus.publish(EventType.ANALYST_INSIGHT, insight, priority=50, source=self.name)

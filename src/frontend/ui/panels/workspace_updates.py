@@ -248,8 +248,12 @@ def update_risk_heatmap(terminal):
 
     positions = risk_heatmap_positions_snapshot(terminal)
     if not positions:
+        signature = (id(terminal.risk_map), "empty")
+        if signature == getattr(terminal, "_risk_heatmap_signature", None):
+            return
         terminal.risk_map.setImage(np.zeros((1, 1), dtype=float), autoLevels=False, levels=(0.0, 1.0))
         terminal._set_risk_heatmap_status("No open positions, so there is no live portfolio risk to map.", "muted")
+        terminal._risk_heatmap_signature = signature
         return
 
     risks = []
@@ -277,8 +281,12 @@ def update_risk_heatmap(terminal):
             risks.append(risk_value)
 
     if not risks:
+        signature = (id(terminal.risk_map), "unusable")
+        if signature == getattr(terminal, "_risk_heatmap_signature", None):
+            return
         terminal.risk_map.setImage(np.zeros((1, 1), dtype=float), autoLevels=False, levels=(0.0, 1.0))
         terminal._set_risk_heatmap_status("Positions exist, but no usable risk values were found for them.", "warning")
+        terminal._risk_heatmap_signature = signature
         return
 
     data = np.array(risks, dtype=float).reshape(1, len(risks))
@@ -289,8 +297,12 @@ def update_risk_heatmap(terminal):
     else:
         normalized = data / max_value
 
+    signature = (id(terminal.risk_map), tuple(float(value) for value in risks))
+    if signature == getattr(terminal, "_risk_heatmap_signature", None):
+        return
     terminal.risk_map.setImage(normalized, autoLevels=False, levels=(0.0, 1.0))
     terminal._set_risk_heatmap_status(
         f"Live risk snapshot across {len(risks)} position(s). Highest relative exposure: {max_value:,.2f}.",
         "positive",
     )
+    terminal._risk_heatmap_signature = signature

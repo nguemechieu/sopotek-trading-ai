@@ -1,3 +1,5 @@
+import pandas as pd
+
 from strategy.strategy import Strategy
 from strategy.strategy_registry import StrategyRegistry
 
@@ -47,8 +49,13 @@ def test_strategy_registry_includes_expanded_strategy_library():
         "Volatility Breakout",
         "MACD Trend",
         "Range Fade",
+        "Donchian Trend",
+        "Bollinger Squeeze",
+        "ATR Compression Breakout",
+        "RSI Failure Swing",
+        "Volume Spike Reversal",
     }.issubset(available)
-    assert len(available) >= 4200
+    assert len(available) >= 6100
     assert "Trend Following | Scalp Conservative" in available
     assert "Trend Following | Scalp Conservative FX Core" in available
     assert "Trend Following | Scalp Conservative Equities Macro" in available
@@ -136,3 +143,159 @@ def test_ema_cross_strategy_generates_buy_signal_on_bullish_cross():
     assert signal is not None
     assert signal["side"] == "buy"
     assert "EMA fast crossed above EMA slow" in signal["reason"]
+
+
+def test_bollinger_squeeze_strategy_generates_buy_signal_after_compression_breakout():
+    strategy = Strategy(strategy_name="Bollinger Squeeze")
+    feature_frame = pd.DataFrame(
+        [
+            {
+                "close": 100.0,
+                "rsi": 49.0,
+                "ema_fast": 100.1,
+                "ema_slow": 100.0,
+                "upper_band": 101.5,
+                "lower_band": 98.7,
+                "breakout_high": 100.8,
+                "breakout_low": 98.9,
+                "volume_ratio": 0.98,
+                "momentum": 0.0,
+                "pullback_gap": 0.0,
+                "atr_pct": 0.012,
+                "trend_strength": 0.001,
+                "band_position": 0.52,
+                "macd_line": 0.02,
+                "macd_signal": 0.01,
+                "regime": "range",
+            },
+            {
+                "close": 102.6,
+                "rsi": 61.0,
+                "ema_fast": 101.8,
+                "ema_slow": 100.9,
+                "upper_band": 103.2,
+                "lower_band": 99.8,
+                "breakout_high": 101.0,
+                "breakout_low": 98.9,
+                "volume_ratio": 1.22,
+                "momentum": 0.021,
+                "pullback_gap": 0.3,
+                "atr_pct": 0.018,
+                "trend_strength": 0.009,
+                "band_position": 0.92,
+                "macd_line": 0.35,
+                "macd_signal": 0.18,
+                "regime": "trending_up",
+            },
+        ]
+    )
+
+    signal = strategy.generate_signal_from_features(feature_frame)
+
+    assert signal is not None
+    assert signal["side"] == "buy"
+    assert "Bollinger squeeze expansion resolved upward" in signal["reason"]
+
+
+def test_atr_compression_breakout_generates_sell_signal_on_volatility_release():
+    strategy = Strategy(strategy_name="ATR Compression Breakout")
+    feature_frame = pd.DataFrame(
+        [
+            {
+                "close": 100.0,
+                "rsi": 50.0,
+                "ema_fast": 99.7,
+                "ema_slow": 100.0,
+                "upper_band": 101.2,
+                "lower_band": 98.8,
+                "breakout_high": 101.0,
+                "breakout_low": 99.1,
+                "volume_ratio": 0.94,
+                "momentum": -0.002,
+                "pullback_gap": -0.1,
+                "atr_pct": 0.014,
+                "trend_strength": 0.002,
+                "band_position": 0.48,
+                "macd_line": -0.02,
+                "macd_signal": -0.01,
+                "regime": "range",
+            },
+            {
+                "close": 97.8,
+                "rsi": 39.0,
+                "ema_fast": 98.8,
+                "ema_slow": 99.6,
+                "upper_band": 100.9,
+                "lower_band": 97.4,
+                "breakout_high": 100.8,
+                "breakout_low": 98.9,
+                "volume_ratio": 1.18,
+                "momentum": -0.028,
+                "pullback_gap": -0.5,
+                "atr_pct": 0.018,
+                "trend_strength": 0.008,
+                "band_position": 0.11,
+                "macd_line": -0.24,
+                "macd_signal": -0.13,
+                "regime": "trending_down",
+            },
+        ]
+    )
+
+    signal = strategy.generate_signal_from_features(feature_frame)
+
+    assert signal is not None
+    assert signal["side"] == "sell"
+    assert "ATR compression released into bearish breakout expansion" in signal["reason"]
+
+
+def test_volume_spike_reversal_strategy_generates_sell_signal_on_exhaustion():
+    strategy = Strategy(strategy_name="Volume Spike Reversal")
+    feature_frame = pd.DataFrame(
+        [
+            {
+                "close": 100.0,
+                "rsi": 59.0,
+                "ema_fast": 99.9,
+                "ema_slow": 99.8,
+                "upper_band": 101.0,
+                "lower_band": 99.0,
+                "breakout_high": 100.8,
+                "breakout_low": 99.2,
+                "volume_ratio": 1.02,
+                "momentum": 0.003,
+                "pullback_gap": 0.1,
+                "atr_pct": 0.011,
+                "trend_strength": 0.004,
+                "band_position": 0.75,
+                "macd_line": 0.04,
+                "macd_signal": 0.03,
+                "regime": "range",
+            },
+            {
+                "close": 99.1,
+                "rsi": 66.0,
+                "ema_fast": 99.4,
+                "ema_slow": 99.2,
+                "upper_band": 100.7,
+                "lower_band": 98.9,
+                "breakout_high": 100.8,
+                "breakout_low": 99.0,
+                "volume_ratio": 1.48,
+                "momentum": -0.014,
+                "pullback_gap": -0.2,
+                "atr_pct": 0.012,
+                "trend_strength": 0.006,
+                "band_position": 0.95,
+                "macd_line": 0.02,
+                "macd_signal": 0.04,
+                "regime": "range",
+            },
+        ]
+    )
+
+    signal = strategy.generate_signal_from_features(feature_frame)
+
+    assert signal is not None
+    assert signal["side"] == "sell"
+    assert "Volume spike reversal from upper band exhaustion" in signal["reason"]

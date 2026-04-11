@@ -12,6 +12,7 @@ class OrderRouter:
         self.broker = broker
         self._brokers = self._normalize_brokers(broker)
         self._executors = {name: SmartExecution(instance) for name, instance in self._brokers.items()}
+        self._default_executor_key = next(iter(self._executors), None)
 
     def _normalize_brokers(self, broker) -> dict[str, object]:
         if isinstance(broker, Mapping):
@@ -29,6 +30,14 @@ class OrderRouter:
         normalized_name = str(name or getattr(broker, "exchange_name", broker.__class__.__name__)).strip().lower()
         self._brokers[normalized_name] = broker
         self._executors[normalized_name] = SmartExecution(broker)
+        if self._default_executor_key is None:
+            self._default_executor_key = normalized_name
+
+    @property
+    def smart_execution(self) -> SmartExecution | None:
+        if self._default_executor_key is None:
+            return None
+        return self._executors.get(self._default_executor_key)
 
     def _select_broker(self, order_payload: Mapping[str, object]):
         broker_name = str(order_payload.get("broker") or "").strip().lower()

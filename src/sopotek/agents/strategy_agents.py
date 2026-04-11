@@ -56,6 +56,10 @@ class SignalAgent(BaseAgent, ABC):
             return
         if not isinstance(signal, Signal):
             signal = Signal(**dict(signal))
+        metadata = dict(signal.metadata or {})
+        metadata.setdefault("timeframe", candle.timeframe)
+        metadata.setdefault("history_length", len(bucket))
+        signal.metadata = metadata
         await self.bus.publish(EventType.SIGNAL, signal, priority=60, source=self.name)
         await self.bus.publish(EventType.SIGNAL_EVENT, signal, priority=61, source=self.name)
 

@@ -45,6 +45,21 @@ class BaseBroker(ABC):
     async def disconnect(self):
         await self.close()
 
+    async def login(self):
+        return await self.connect()
+
+    async def logout(self):
+        await self.close()
+
+    def is_authenticated(self):
+        connected = getattr(self, "_connected", None)
+        if isinstance(connected, bool):
+            return connected
+        return False
+
+    async def refresh_session(self):
+        return {"authenticated": bool(self.is_authenticated())}
+
     def attach_event_bus(self, event_bus):
         self.event_bus = event_bus
         return self
@@ -118,6 +133,9 @@ class BaseBroker(ABC):
             snapshots.append(await self.fetch_ticker(symbol))
         return snapshots
 
+    async def get_quotes(self, symbols):
+        return await self.fetch_tickers(symbols)
+
     async def fetch_orderbook(self, symbol, limit=50):
         raise NotImplementedError("fetch_orderbook is not implemented for this broker")
 
@@ -126,6 +144,14 @@ class BaseBroker(ABC):
 
     async def fetch_ohlcv(self, symbol, timeframe="1h", limit=100):
         raise NotImplementedError("fetch_ohlcv is not implemented for this broker")
+
+    async def get_historical_bars(self, symbol, timeframe, start=None, end=None, limit=None):
+        kwargs = {"timeframe": timeframe, "limit": limit}
+        if start is not None:
+            kwargs["start_time"] = start
+        if end is not None:
+            kwargs["end_time"] = end
+        return await self.fetch_ohlcv(symbol, **kwargs)
 
     async def fetch_trades(self, symbol, limit=None):
         raise NotImplementedError("fetch_trades is not implemented for this broker")
@@ -171,6 +197,15 @@ class BaseBroker(ABC):
 
     def stop_market_data_stream(self):
         self._streaming_market_data = False
+
+    async def subscribe_market_data(self, symbols):
+        await self.stream_market_data(symbols)
+        return True
+
+    async def unsubscribe_market_data(self, symbols=None):
+        _ = symbols
+        self.stop_market_data_stream()
+        return True
 
     # ===============================
     # TRADING
@@ -226,6 +261,15 @@ class BaseBroker(ABC):
     async def cancel_all_orders(self, symbol=None):
         raise NotImplementedError("cancel_all_orders is not implemented for this broker")
 
+    async def get_order(self, account_id, order_id):
+        _ = account_id
+        return await self.fetch_order(order_id)
+
+    async def list_orders(self, account_id=None, filters=None):
+        _ = account_id
+        filters = dict(filters or {})
+        return await self.fetch_orders(symbol=filters.get("symbol"), limit=filters.get("limit"))
+
     # ===============================
     # ACCOUNT
     # ===============================
@@ -239,6 +283,18 @@ class BaseBroker(ABC):
         if isinstance(account, Mapping):
             await self._emit_account_event(dict(account))
         return account
+
+    async def get_accounts(self):
+        account = await self.get_account_info()
+        if isinstance(account, Mapping):
+            return [dict(account)]
+        if isinstance(account, Sequence):
+            return list(account)
+        return []
+
+    async def get_account_balances(self, account_id=None):
+        _ = account_id
+        return await self.fetch_balance()
 
     async def fetch_positions(self, symbols=None):
         raise NotImplementedError("fetch_positions is not implemented for this broker")

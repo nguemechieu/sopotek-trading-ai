@@ -300,6 +300,36 @@ def test_notify_trade_includes_rejection_reason():
     assert reply_markup == service._menu_markup("portfolio")
 
 
+def test_notify_trade_close_includes_strategy_entry_close_and_pnl():
+    controller = DummyController()
+    service = RecordingTelegramService(controller)
+
+    asyncio.run(
+        service.notify_trade_close(
+            {
+                "symbol": "BTC/USDT",
+                "side": "sell",
+                "status": "closed",
+                "strategy_name": "EMA Cross",
+                "entry_price": 100.0,
+                "exit_price": 104.5,
+                "size": 0.5,
+                "pnl": 2.25,
+                "order_id": "close-42",
+                "timestamp": "2026-04-07T14:12:00+00:00",
+            }
+        )
+    )
+
+    text, _include_keyboard, reply_markup = service.messages[-1]
+    assert "<b>Trade Closed</b>" in text
+    assert "Strategy: <code>EMA Cross</code>" in text
+    assert "Entry price: <code>100</code>" in text
+    assert "Close price: <code>104.5</code>" in text
+    assert "PnL: <code>+2.25</code>" in text
+    assert reply_markup == service._menu_markup("portfolio")
+
+
 def test_health_command_returns_rich_health_response():
     controller = DummyController()
     service = RecordingTelegramService(controller)

@@ -8,6 +8,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agents.signal_agent import SignalAgent
+from agents.signal_fanout import merge_signal_agent_results
 from core.sopotek_trading import SopotekTrading
 from engines.risk_engine import RiskEngine
 from event_bus.event_bus import EventBus
@@ -383,6 +384,152 @@ def test_signal_consensus_agent_filters_candidates_to_majority_side():
     assert latest["payload"]["strategy_name"] in {"EMA Cross", "Mean Reversion"}
     assert latest["payload"]["consensus_side"] == "sell"
     assert latest["payload"]["consensus_status"] == "majority"
+
+
+def test_signal_consensus_scales_vote_threshold_to_available_candidates():
+    controller = _controller()
+    controller.max_signal_agents = 3
+    controller.minimum_signal_votes = 2
+    controller.assigned_strategies_for_symbol = lambda symbol: [
+        {"strategy_name": "Trend Following", "weight": 0.90, "score": 10.0, "rank": 1},
+    ]
+    trading = SopotekTrading(controller=controller)
+    trading.risk_engine = RiskEngine(account_equity=10000, max_position_size_pct=0.10)
+    trading.portfolio_allocator = None
+    trading.portfolio_risk_engine = None
+    dataset = FakeDataset(_sample_frame())
+    captured = {}
+
+    async def fake_get_symbol_dataset(**kwargs):
+        return dataset
+
+    async def fake_execute(**kwargs):
+        captured.update(kwargs)
+        return {"status": "filled", "reason": "submitted", "side": kwargs.get("side")}
+
+    def fake_generate_signal(**kwargs):
+        return {
+            "symbol": "BTC/USDT",
+            "side": "buy",
+            "amount": 0.25,
+            "confidence": 0.88,
+            "reason": "single valid alpha",
+            "strategy_name": kwargs["strategy_name"],
+        }
+
+    trading.data_hub.get_symbol_dataset = fake_get_symbol_dataset
+    trading.execution_manager.execute = fake_execute
+    trading.signal_engine.generate_signal = fake_generate_signal
+
+    result = asyncio.run(trading.process_symbol("BTC/USDT", timeframe="15m", limit=50))
+
+    assert result["status"] == "filled"
+    assert captured["symbol"] == "BTC/USDT"
+    assert captured["side"] == "buy"
+    assert captured["consensus_status"] == "unanimous"
+    consensus = trading.agent_memory.latest("SignalConsensusAgent")
+    assert consensus is not None
+    assert consensus["stage"] == "unanimous"
+    assert consensus["payload"]["vote_count"] == 1
+    assert consensus["payload"]["minimum_votes"] == 1
+    assert consensus["payload"]["configured_minimum_votes"] == 2
+    latest = trading.agent_memory.latest("SignalAggregationAgent")
+    assert latest is not None
+    assert latest["stage"] == "selected"
+
+
+def test_split_signal_consensus_holds_and_skips_execution():
+    controller = _controller()
+    controller.max_signal_agents = 2
+    controller.minimum_signal_votes = 2
+    controller.assigned_strategies_for_symbol = lambda symbol: [
+        {"strategy_name": "Trend Following", "weight": 0.60, "score": 8.0, "rank": 1},
+        {"strategy_name": "EMA Cross", "weight": 0.40, "score": 7.0, "rank": 2},
+    ]
+    trading = SopotekTrading(controller=controller)
+    trading.risk_engine = RiskEngine(account_equity=10000, max_position_size_pct=0.10)
+    trading.portfolio_allocator = None
+    trading.portfolio_risk_engine = None
+    dataset = FakeDataset(_sample_frame())
+
+    async def fake_get_symbol_dataset(**kwargs):
+        return dataset
+
+    async def fake_execute(**kwargs):
+        raise AssertionError("execution should not run when consensus is split")
+
+    def fake_generate_signal(**kwargs):
+        strategy_name = kwargs["strategy_name"]
+        if strategy_name == "Trend Following":
+            return {
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "amount": 0.25,
+                "confidence": 0.84,
+                "reason": "buy vote",
+                "strategy_name": strategy_name,
+            }
+        if strategy_name == "EMA Cross":
+            return {
+                "symbol": "BTC/USDT",
+                "side": "sell",
+                "amount": 0.25,
+                "confidence": 0.82,
+                "reason": "sell vote",
+                "strategy_name": strategy_name,
+            }
+        return None
+
+    trading.data_hub.get_symbol_dataset = fake_get_symbol_dataset
+    trading.execution_manager.execute = fake_execute
+    trading.signal_engine.generate_signal = fake_generate_signal
+
+    result = asyncio.run(trading.process_symbol("BTC/USDT", timeframe="15m", limit=50))
+
+    assert result is None
+    consensus = trading.agent_memory.latest("SignalConsensusAgent")
+    assert consensus is not None
+    assert consensus["stage"] == "split"
+    latest = trading.agent_memory.latest("SignalAggregationAgent")
+    assert latest is not None
+    assert latest["stage"] == "hold"
+    assert "disagreed" in str(latest["payload"]["reason"]).lower()
+    snapshot = trading.pipeline_status_snapshot()["BTC/USDT"]
+    assert snapshot["stage"] == "signal_engine"
+    assert snapshot["status"] == "hold"
+
+
+def test_merge_signal_agent_results_deduplicates_same_candidate_fingerprint():
+    weaker = {
+        "agent_name": "SignalAgent",
+        "signal": {
+            "strategy_name": "EMA Cross",
+            "timeframe": "15m",
+            "side": "buy",
+            "confidence": 0.61,
+            "strategy_assignment_weight": 0.50,
+            "adaptive_score": 0.31,
+        },
+    }
+    stronger = {
+        "agent_name": "SignalAgent",
+        "signal": {
+            "strategy_name": "EMA Cross",
+            "timeframe": "15m",
+            "side": "buy",
+            "confidence": 0.74,
+            "strategy_assignment_weight": 0.50,
+            "adaptive_score": 0.42,
+        },
+    }
+
+    merged = merge_signal_agent_results(
+        {"signal_candidates": [weaker]},
+        [{"signal_candidates": [stronger], "assigned_strategies": []}],
+    )
+
+    assert len(merged["signal_candidates"]) == 1
+    assert merged["signal_candidates"][0]["signal"]["confidence"] == 0.74
 
 
 def test_signal_agents_run_in_parallel_during_market_processing():

@@ -37,7 +37,7 @@ def supported_market_venues_for_profile(broker_type=None, exchange=None):
     if normalized_exchange in SPOT_ONLY_EXCHANGES:
         return ["auto", "spot"]
 
-    if normalized_exchange == "stellar":
+    if normalized_exchange in {"stellar", "solana"}:
         return ["auto", "spot"]
 
     if normalized_type == "forex" or normalized_exchange == "oanda":

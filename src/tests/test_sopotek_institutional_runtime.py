@@ -288,4 +288,6 @@ def test_paper_runner_executes_multi_symbol_event_driven_stack_and_persists_feed
     assert len(performance_rows) > 0
     assert run_one.retraining_report is not None
     assert run_one.runtime.ml_pipeline.is_fitted is True
+    assert run_one.runtime.trader_agent is not None
+    assert any(run_one.runtime.trader_agent.recent_decisions.values())
     assert run_one.result.final_snapshot.equity == pytest.approx(run_two.result.final_snapshot.equity)

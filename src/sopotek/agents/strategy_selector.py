@@ -16,6 +16,10 @@ class StrategySelectorAgent(BaseAgent):
             "bearish": ["mean_reversion", "defensive", "ml_agent"],
             "neutral": ["mean_reversion", "ml_agent"],
         }
+        self.strategy_aliases = {
+            "trend_following": ["trend"],
+            "ml_agent": ["ml"],
+        }
 
     def attach(self, event_bus: AsyncEventBus) -> None:
         self.bus = event_bus
@@ -28,8 +32,9 @@ class StrategySelectorAgent(BaseAgent):
         if not isinstance(insight, AnalystInsight):
             insight = AnalystInsight(**dict(insight))
         strategies = self.strategy_map.get(insight.regime, [])
-        if insight.preferred_strategy and insight.preferred_strategy not in strategies:
-            strategies = [insight.preferred_strategy] + strategies
+        if insight.preferred_strategy:
+            aliases = self.strategy_aliases.get(insight.preferred_strategy, [])
+            strategies = [insight.preferred_strategy, *aliases]
         if not strategies:
             return
         await self.bus.publish(

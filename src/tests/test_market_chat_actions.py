@@ -753,20 +753,22 @@ def test_submit_trade_with_preflight_resolves_coinbase_derivative_contract_symbo
         return {"status": "submitted", "id": "coinbase-derivative-001", **kwargs}
 
     markets = {
-        "BTC/USD": {
-            "symbol": "BTC/USD",
-            "base": "BTC",
+        "SLP/USD": {
+            "symbol": "SLP/USD",
+            "base": "SLP",
             "quote": "USD",
             "spot": True,
             "active": True,
         },
-        "BTC/USD:USD": {
-            "symbol": "BTC/USD:USD",
-            "base": "BTC",
+        "SLP-20DEC30-CDE": {
+            "symbol": "SLP-20DEC30-CDE",
+            "base": "SLP",
             "quote": "USD",
             "settle": "USD",
             "contract": True,
             "future": True,
+            "native_symbol": "SLP-20DEC30-CDE",
+            "underlying_symbol": "SLP/USD",
             "active": True,
         },
     }
@@ -775,7 +777,7 @@ def test_submit_trade_with_preflight_resolves_coinbase_derivative_contract_symbo
         exchange_name="coinbase",
         market_preference="derivative",
         resolved_market_preference="derivative",
-        symbols=["BTC/USD:USD"],
+        symbols=["SLP-20DEC30-CDE"],
         exchange=SimpleNamespace(markets=markets),
         create_order=fake_create_order,
         supported_market_venues=lambda: ["auto", "spot", "derivative"],
@@ -783,16 +785,16 @@ def test_submit_trade_with_preflight_resolves_coinbase_derivative_contract_symbo
 
     order = asyncio.run(
         controller.submit_trade_with_preflight(
-            symbol="BTC/USD",
+            symbol="SLP/USD",
             side="buy",
             amount=1.0,
             source="manual",
         )
     )
 
-    assert submitted["symbol"] == "BTC/USD:USD"
-    assert order["symbol"] == "BTC/USD:USD"
-    assert order["requested_symbol"] == "BTC/USD"
+    assert submitted["symbol"] == "SLP-20DEC30-CDE"
+    assert order["symbol"] == "SLP-20DEC30-CDE"
+    assert order["requested_symbol"] == "SLP/USD"
 
 
 @pytest.mark.parametrize(
@@ -1593,6 +1595,93 @@ def test_handle_trade_execution_logs_rejection_reason_to_console():
     )
 
 
+def test_handle_trade_execution_dispatches_trade_close_notifications_with_entry_context():
+    controller = _make_controller()
+    emitted = []
+    scheduled = []
+    telegram_close_notifications = []
+    email_close_notifications = []
+    sms_close_notifications = []
+    general_trade_notifications = []
+    controller.trade_signal = SimpleNamespace(emit=lambda trade: emitted.append(dict(trade)))
+    controller.terminal = None
+    controller.performance_engine = None
+    controller._performance_recorded_orders = set()
+    controller.active_session_id = ""
+    controller.trade_close_notifications_enabled = True
+    controller.trade_close_notify_telegram = True
+    controller.trade_close_notify_email = True
+    controller.trade_close_notify_sms = True
+    controller._trade_close_entry_cache = {}
+
+    async def _record(container, trade):
+        container.append(dict(trade))
+        return True
+
+    class _TelegramService:
+        async def notify_trade(self, trade):
+            general_trade_notifications.append(dict(trade))
+            return True
+
+        async def notify_trade_close(self, trade):
+            return await _record(telegram_close_notifications, trade)
+
+    class _EmailService:
+        async def send_trade_close(self, trade):
+            return await _record(email_close_notifications, trade)
+
+    class _SmsService:
+        async def send_trade_close(self, trade):
+            return await _record(sms_close_notifications, trade)
+
+    def fake_create_task(coro, name):
+        scheduled.append(name)
+        return asyncio.run(coro)
+
+    controller.telegram_service = _TelegramService()
+    controller.email_trade_notification_service = _EmailService()
+    controller.sms_trade_notification_service = _SmsService()
+    controller._create_task = fake_create_task
+
+    controller.handle_trade_execution(
+        {
+            "symbol": "BTC/USDT",
+            "status": "filled",
+            "side": "buy",
+            "price": 100.0,
+            "size": 0.5,
+            "strategy_name": "EMA Cross",
+        }
+    )
+    controller.handle_trade_execution(
+        {
+            "symbol": "BTC/USDT",
+            "status": "closed",
+            "side": "sell",
+            "price": 105.0,
+            "size": 0.5,
+            "pnl": 2.5,
+            "strategy_name": "EMA Cross",
+            "order_id": "close-1",
+        }
+    )
+
+    assert emitted[-1]["status"] == "closed"
+    assert "telegram_trade_notify" in scheduled
+    assert scheduled[-3:] == [
+        "telegram_trade_close_notify",
+        "email_trade_close_notify",
+        "sms_trade_close_notify",
+    ]
+    assert general_trade_notifications[0]["status"] == "filled"
+    assert telegram_close_notifications[-1]["entry_price"] == 100.0
+    assert telegram_close_notifications[-1]["exit_price"] == 105.0
+    assert telegram_close_notifications[-1]["strategy_name"] == "EMA Cross"
+    assert email_close_notifications[-1]["pnl"] == 2.5
+    assert sms_close_notifications[-1]["order_id"] == "close-1"
+    assert controller._trade_close_entry_cache == {}
+
+
 def test_handle_market_chat_action_surfaces_chatgpt_size_note():
     controller = _make_controller()
 
@@ -1766,6 +1855,68 @@ def test_close_market_chat_position_treats_selected_position_amount_as_units():
     assert captured["amount"] == 1250.0
     assert captured["position_side"] == "long"
     assert captured["position_id"] == "usd_huf:long"
+
+
+def test_close_market_chat_position_falls_back_for_legacy_brokers():
+    controller = _make_controller()
+    captured = {}
+
+    async def legacy_close_position(symbol, amount=None):
+        captured["symbol"] = symbol
+        captured["amount"] = amount
+        return {"status": "submitted", "id": "legacy-close-001"}
+
+    controller.broker = SimpleNamespace(exchange_name="paper", close_position=legacy_close_position)
+    position = {
+        "symbol": "EUR/USD",
+        "position_id": "EUR/USD:long",
+        "position_side": "long",
+        "amount": 1000.0,
+        "side": "long",
+    }
+    controller._market_chat_positions_snapshot = lambda: [position]
+
+    result = asyncio.run(
+        controller.close_market_chat_position(
+            "EUR/USD",
+            amount=1000.0,
+            position=position,
+        )
+    )
+
+    assert result["status"] == "submitted"
+    assert captured["symbol"] == "EUR/USD"
+    assert captured["amount"] == 1000.0
+
+
+def test_close_market_chat_position_does_not_retry_internal_type_errors():
+    controller = _make_controller()
+    calls = {"count": 0}
+
+    async def fake_close_position(symbol, amount=None, order_type="market", position=None, position_side=None, position_id=None):
+        calls["count"] += 1
+        raise TypeError("unsupported operand type(s) for +: 'int' and 'str'")
+
+    controller.broker = SimpleNamespace(exchange_name="coinbase", close_position=fake_close_position)
+    position = {
+        "symbol": "BTC/USDT",
+        "position_id": "BTC/USDT:long",
+        "position_side": "long",
+        "amount": 2.0,
+        "side": "long",
+    }
+    controller._market_chat_positions_snapshot = lambda: [position]
+
+    with pytest.raises(TypeError, match="unsupported operand type"):
+        asyncio.run(
+            controller.close_market_chat_position(
+                "BTC/USDT",
+                amount=2.0,
+                position=position,
+            )
+        )
+
+    assert calls["count"] == 1
 
 
 def test_handle_market_chat_action_can_summarize_recent_bug_logs():

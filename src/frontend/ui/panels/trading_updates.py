@@ -151,6 +151,25 @@ def normalize_position_entry(terminal, raw):
     }
 
 
+def _positions_table_signature(table, normalized_positions):
+    return (
+        id(table),
+        tuple(
+            (
+                pos["symbol"],
+                pos["side"],
+                pos.get("position_id") or pos.get("position_key") or "",
+                f"{pos['amount']:.6f}",
+                f"{pos['entry_price']:.6f}",
+                f"{pos['mark_price']:.6f}",
+                f"{pos['value']:.2f}",
+                f"{pos['pnl']:.2f}",
+            )
+            for pos in normalized_positions
+        ),
+    )
+
+
 def populate_positions_table(terminal, positions):
     table = getattr(terminal, "positions_table", None)
     if table is None:
@@ -175,9 +194,15 @@ def populate_positions_table(terminal, positions):
             item.get("position_id") or item.get("position_key") or "",
         )
     )
-    table.setRowCount(len(normalized_positions))
+    signature = _positions_table_signature(table, normalized_positions)
     if close_all_btn is not None:
         close_all_btn.setEnabled(bool(getattr(terminal.controller, "broker", None)) and bool(normalized_positions))
+    if signature == getattr(terminal, "_positions_table_signature", None):
+        apply_positions_filter(terminal)
+        return
+
+    terminal._positions_table_signature = signature
+    table.setRowCount(len(normalized_positions))
 
     for row, pos in enumerate(normalized_positions):
         values = [
@@ -255,6 +280,28 @@ def normalize_open_order_entry(terminal, order):
     }
 
 
+def _open_orders_table_signature(table, normalized_orders):
+    return (
+        id(table),
+        tuple(
+            (
+                order["symbol"],
+                order["side"],
+                order["type"],
+                "-" if order["price"] is None else f"{order['price']:.6f}",
+                "-" if order["mark"] is None else f"{order['mark']:.6f}",
+                f"{order['amount']:.6f}",
+                f"{order['filled']:.6f}",
+                f"{order['remaining']:.6f}",
+                order["status"],
+                "-" if order["pnl"] is None else f"{float(order['pnl']):.2f}",
+                order["order_id"],
+            )
+            for order in normalized_orders
+        ),
+    )
+
+
 def populate_open_orders_table(terminal, orders):
     table = getattr(terminal, "open_orders_table", None)
     if table is None:
@@ -269,6 +316,12 @@ def populate_open_orders_table(terminal, orders):
             normalized_orders.append(normalized)
 
     normalized_orders.sort(key=lambda item: (item["symbol"], item["status"], item["order_id"]))
+    signature = _open_orders_table_signature(table, normalized_orders)
+    if signature == getattr(terminal, "_open_orders_table_signature", None):
+        apply_open_orders_filter(terminal)
+        return
+
+    terminal._open_orders_table_signature = signature
     table.setRowCount(len(normalized_orders))
 
     for row, order in enumerate(normalized_orders):

@@ -1,9 +1,11 @@
 import asyncio
 from datetime import datetime, timezone
-import json
+import json as json_module
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -32,14 +34,57 @@ class FakeResponse:
         return self.payload
 
 
+class FakeStreamingContent:
+    def __init__(self, lines):
+        self._lines = [line if isinstance(line, bytes) else str(line).encode("utf-8") for line in list(lines)]
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._lines:
+            raise StopAsyncIteration
+        return self._lines.pop(0)
+
+
+class FakeStreamingResponse(FakeResponse):
+    def __init__(self, lines, *, status=200, message="OK"):
+        super().__init__({})
+        self.content = FakeStreamingContent(lines)
+        self.status = status
+        self.message = message
+
+    async def text(self):
+        return ""
+
+
 class FakeOandaSession:
     def __init__(self, *args, **kwargs):
         self.closed = False
         self.last_order_payload = None
         self.last_close_payload = None
         self.last_candle_params = None
+        self.last_stream_params = None
 
     def request(self, method, url, headers=None, params=None, json=None):
+        if "/pricing/stream" in url:
+            self.last_stream_params = dict(params or {})
+            return FakeStreamingResponse(
+                [
+                    json_module.dumps({"type": "HEARTBEAT", "time": "2026-03-10T10:00:00Z"}),
+                    json_module.dumps(
+                        {
+                            "type": "PRICE",
+                            "instrument": "EUR_USD",
+                            "time": "2026-03-10T10:00:01Z",
+                            "tradeable": True,
+                            "status": "tradeable",
+                            "bids": [{"price": "1.1000", "liquidity": 100000}],
+                            "asks": [{"price": "1.1002", "liquidity": 100000}],
+                        }
+                    ),
+                ]
+            )
         if url.endswith("/pricing"):
             return FakeResponse(
                 {
@@ -246,19 +291,84 @@ def test_oanda_broker_normalizes_common_methods(monkeypatch):
 
     async def scenario():
         broker = OandaBroker(SimpleNamespace(api_key="token", account_id="acct-1", mode="practice"))
-        assert (await broker.fetch_ticker("EUR/USD"))["ask"] == 1.1002
+        ticker = await broker.fetch_ticker("EUR/USD")
+        assert ticker["symbol"] == "EUR/USD"
+        assert ticker["instrument"] == "EUR_USD"
+        assert ticker["ask"] == 1.1002
         assert (await broker.fetch_orderbook("EUR/USD"))["bids"][0][0] == 1.1
         assert len(await broker.fetch_ohlcv("EUR/USD", timeframe="1h", limit=2)) == 2
         assert broker.session.last_candle_params["price"] == "B"
         assert (await broker.fetch_balance())["equity"] == 1100.0
-        assert await broker.fetch_symbols() == ["EUR_USD", "GBP_USD"]
+        assert await broker.fetch_symbols() == ["EUR/USD", "GBP/USD"]
         positions = await broker.fetch_positions()
         assert len(positions) == 2
-        assert positions[0]["symbol"] == "EUR_USD"
+        assert positions[0]["symbol"] == "EUR/USD"
+        assert positions[0]["instrument"] == "EUR_USD"
         assert {item["position_side"] for item in positions} == {"long", "short"}
         assert len(await broker.fetch_open_orders("EUR/USD")) == 1
         assert len(await broker.fetch_closed_orders("EUR/USD")) == 0
         await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_oanda_broker_stream_ticks_uses_pricing_stream(monkeypatch):
+    import broker.oanda_broker as oanda_module
+
+    monkeypatch.setattr(oanda_module.aiohttp, "ClientSession", FakeOandaSession)
+
+    async def scenario():
+        broker = OandaBroker(SimpleNamespace(api_key="token", account_id="acct-1", mode="practice"))
+        stream = broker.stream_ticks("EUR/USD")
+        tick = await anext(stream)
+        await stream.aclose()
+        return broker, tick
+
+    broker, tick = asyncio.run(scenario())
+
+    assert tick["symbol"] == "EUR/USD"
+    assert tick["instrument"] == "EUR_USD"
+    assert tick["bid"] == 1.1
+    assert tick["ask"] == 1.1002
+    assert tick["price"] == pytest.approx(1.1001)
+    assert broker.stream_base_url == "https://stream-fxpractice.oanda.com"
+
+
+def test_oanda_broker_rebuilds_session_after_closing_transport(monkeypatch):
+    import broker.oanda_broker as oanda_module
+
+    created_sessions = []
+
+    class FlakyPricingSession(FakeOandaSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.fail_pricing_once = not created_sessions
+
+        def request(self, method, url, headers=None, params=None, json=None):
+            if url.endswith("/pricing") and self.fail_pricing_once:
+                self.fail_pricing_once = False
+                raise RuntimeError("Cannot write to closing transport")
+            return super().request(method, url, headers=headers, params=params, json=json)
+
+    def session_factory(*args, **kwargs):
+        session = FlakyPricingSession(*args, **kwargs)
+        created_sessions.append(session)
+        return session
+
+    monkeypatch.setattr(oanda_module.aiohttp, "ClientSession", session_factory)
+
+    async def scenario():
+        broker = OandaBroker(SimpleNamespace(api_key="token", account_id="acct-1", mode="practice"))
+        ticker = await broker.fetch_ticker("EUR/USD")
+
+        assert ticker["ask"] == 1.1002
+        assert len(created_sessions) == 2
+        assert created_sessions[0].closed is True
+        assert created_sessions[1].closed is False
+
+        await broker.close()
+
+        assert created_sessions[1].closed is True
 
     asyncio.run(scenario())
 
@@ -598,6 +708,93 @@ def test_paper_broker_bootstraps_public_market_data(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_paper_broker_uses_selected_exchange_identity_when_configured(monkeypatch):
+    class FakeMarketDataBroker:
+        def __init__(self, config):
+            self.config = config
+
+        async def connect(self):
+            return True
+
+        async def close(self):
+            return True
+
+    class DummyController:
+        def __init__(self):
+            self.logger = None
+            self.paper_balance = 1000.0
+            self.initial_balance = 1000.0
+            self.mode = "paper"
+            self.symbols = ["BTC/USDT"]
+            self.ticker_buffer = TickerBuffer()
+            self.ticker_stream = SimpleNamespace(get=lambda symbol: None, update=lambda symbol, ticker: None)
+            self.config = SimpleNamespace(
+                broker=SimpleNamespace(exchange="coinbase", params={})
+            )
+
+    monkeypatch.setattr(paper_module, "CCXTBroker", FakeMarketDataBroker)
+
+    async def scenario():
+        controller = DummyController()
+        broker = PaperBroker(controller)
+
+        assert broker.exchange_name == "coinbase"
+        assert broker.market_data_exchange == "coinbase"
+
+        await broker.connect()
+        status = await broker.fetch_status()
+
+        assert status["broker"] == "coinbase"
+        assert status["mode"] == "paper"
+        assert status["market_data_exchange"] == "coinbase"
+
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_paper_broker_fetch_symbols_uses_broker_config_not_stale_controller_symbols(monkeypatch):
+    class FakeMarketDataBroker:
+        def __init__(self, config):
+            self.config = config
+
+        async def connect(self):
+            return True
+
+        async def close(self):
+            return True
+
+        async def fetch_symbols(self):
+            return []
+
+    class DummyController:
+        def __init__(self):
+            self.logger = None
+            self.paper_balance = 1000.0
+            self.initial_balance = 1000.0
+            self.mode = "paper"
+            self.symbols = ["GBP/USD", "EUR/USD", "NZD/USD"]
+            self.ticker_buffer = TickerBuffer()
+            self.ticker_stream = SimpleNamespace(get=lambda symbol: None, update=lambda symbol, ticker: None)
+            self.config = SimpleNamespace(
+                broker=SimpleNamespace(exchange="coinbase", params={"symbols": ["BTC/USD", "ETH/USD"]})
+            )
+
+    monkeypatch.setattr(paper_module, "CCXTBroker", FakeMarketDataBroker)
+
+    async def scenario():
+        controller = DummyController()
+        broker = PaperBroker(controller)
+
+        symbols = await broker.fetch_symbols()
+
+        assert symbols == ["BTC/USD", "ETH/USD"]
+        assert "GBP/USD" not in symbols
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
 def test_paper_broker_forwards_backtest_time_range_to_public_market_data(monkeypatch):
     observed = {}
 
@@ -791,7 +988,9 @@ def test_oanda_broker_formats_order_payload(monkeypatch):
 
     async def scenario():
         broker = OandaBroker(SimpleNamespace(api_key="token", account_id="acct-1", mode="practice"))
-        await broker.create_order("EUR/USD", "buy", 1, type="market")
+        created = await broker.create_order("EUR/USD", "buy", 1, type="market")
+        assert created["symbol"] == "EUR/USD"
+        assert created["instrument"] == "EUR_USD"
         payload = broker.session.last_order_payload["order"]
         assert payload["instrument"] == "EUR_USD"
         assert payload["type"] == "MARKET"
@@ -837,7 +1036,8 @@ def test_oanda_broker_cancels_orders(monkeypatch):
         canceled = await broker.cancel_order("1", symbol="EUR/USD")
         assert canceled["id"] == "1"
         assert canceled["status"] == "canceled"
-        assert canceled["symbol"] == "EUR_USD"
+        assert canceled["symbol"] == "EUR/USD"
+        assert canceled["instrument"] == "EUR_USD"
 
         all_canceled = await broker.cancel_all_orders(symbol="EUR/USD")
         assert len(all_canceled) == 1
@@ -907,7 +1107,7 @@ def test_oanda_broker_surfaces_reject_reason(monkeypatch):
             )
 
         async def text(self):
-            return json.dumps(self.payload)
+            return json_module.dumps(self.payload)
 
     class RejectSession(FakeOandaSession):
         def request(self, method, url, headers=None, params=None, json=None):
@@ -1114,6 +1314,57 @@ def test_paper_broker_falls_back_for_xlm_usdt_daily_history(monkeypatch):
         assert candles[0][4] == 0.125
         assert ticker["last"] == 0.125
         assert broker.market_data_exchange == "binance"
+
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_paper_broker_uses_solana_adapter_for_native_market_data(monkeypatch):
+    class FakeSolanaBroker:
+        def __init__(self, config):
+            self.config = config
+            self.exchange_name = "solana"
+
+        async def connect(self):
+            return True
+
+        async def close(self):
+            return True
+
+        async def fetch_ticker(self, symbol):
+            return {"symbol": symbol, "last": 142.5, "bid": 142.0, "ask": 143.0}
+
+    class DummyController:
+        def __init__(self):
+            self.logger = None
+            self.paper_balance = 1000.0
+            self.initial_balance = 1000.0
+            self.mode = "paper"
+            self.symbols = ["SOL/USDC"]
+            self.ticker_buffer = TickerBuffer()
+            self.ticker_stream = SimpleNamespace(get=lambda symbol: None, update=lambda symbol, ticker: None)
+            self.config = SimpleNamespace(
+                broker=SimpleNamespace(params={"paper_data_exchange": "solana"})
+            )
+
+    monkeypatch.setattr(
+        paper_module,
+        "CCXTBroker",
+        lambda _config: (_ for _ in ()).throw(AssertionError("CCXTBroker should not bootstrap Solana market data")),
+    )
+    monkeypatch.setattr(paper_module, "SolanaBroker", FakeSolanaBroker)
+
+    async def scenario():
+        controller = DummyController()
+        broker = PaperBroker(controller)
+        await broker.connect()
+
+        ticker = await broker.fetch_ticker("SOL/USDC")
+
+        assert ticker["last"] == 142.5
+        assert broker.market_data_exchange == "solana"
+        assert isinstance(broker.market_data_broker, FakeSolanaBroker)
 
         await broker.close()
 

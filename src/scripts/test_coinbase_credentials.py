@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,6 +42,18 @@ def _parse_args():
     parser.add_argument(
         "--symbol",
         help="Optional symbol to test ticker access with, for example BTC/USD.",
+    )
+    parser.add_argument(
+        "--market-type",
+        choices=("auto", "spot", "derivative"),
+        default="auto",
+        help="Venue preference to test. Use derivative for Coinbase futures.",
+    )
+    parser.add_argument(
+        "--derivative-subtype",
+        choices=("future", "swap"),
+        default="future",
+        help="Contract subtype used when --market-type derivative is selected.",
     )
     parser.add_argument(
         "--sandbox",
@@ -87,10 +100,39 @@ def _mask_value(value, keep_start=6, keep_end=4):
     return f"{text[:keep_start]}...{text[-keep_end:]}"
 
 
+def _looks_like_native_contract_symbol(symbol):
+    text = str(symbol or "").strip().upper()
+    if not text or "/" in text or "_" in text:
+        return False
+    if "PERP" in text:
+        return True
+    return bool(
+        re.fullmatch(r"[A-Z0-9]+-\d{2}[A-Z]{3}\d{2}-[A-Z0-9]+", text)
+        or re.fullmatch(r"[A-Z0-9]+-[A-Z0-9]+-\d{8}", text)
+    )
+
+
+def _normalize_symbol(symbol):
+    text = str(symbol or "").strip().upper()
+    if _looks_like_native_contract_symbol(text):
+        return text
+    return text.replace("_", "/").replace("-", "/")
+
+
 def _pick_symbol(symbols, requested_symbol=None):
     if requested_symbol:
+        requested = _normalize_symbol(requested_symbol)
+        normalized = {_normalize_symbol(item): item for item in (symbols or [])}
+        exact = normalized.get(requested)
+        if exact:
+            return exact
+        if ":" not in requested:
+            for symbol in symbols or []:
+                candidate = _normalize_symbol(symbol)
+                if candidate.startswith(f"{requested}:"):
+                    return symbol
         return requested_symbol
-    normalized = {str(item or "").strip().upper(): item for item in (symbols or [])}
+    normalized = {_normalize_symbol(item): item for item in (symbols or [])}
     for candidate in DEFAULT_STATUS_SYMBOLS:
         match = normalized.get(candidate.upper())
         if match:
@@ -104,7 +146,11 @@ def _print_json(title, payload):
     print()
 
 
-async def _run_connection_test(api_key, secret, sandbox=False, symbol=None):
+async def _run_connection_test(api_key, secret, sandbox=False, symbol=None, market_type="auto", derivative_subtype="future"):
+    options = {"market_type": str(market_type or "auto").strip().lower() or "auto"}
+    if options["market_type"] == "derivative":
+        options["defaultSubType"] = str(derivative_subtype or "future").strip().lower() or "future"
+
     config = SimpleNamespace(
         exchange="coinbase",
         api_key=api_key,
@@ -116,7 +162,7 @@ async def _run_connection_test(api_key, secret, sandbox=False, symbol=None):
         mode="paper" if sandbox else "live",
         sandbox=bool(sandbox),
         timeout=30000,
-        options={},
+        options=options,
         params={},
     )
 
@@ -185,6 +231,8 @@ def main():
                 secret=normalized_secret,
                 sandbox=args.sandbox,
                 symbol=args.symbol,
+                market_type=args.market_type,
+                derivative_subtype=args.derivative_subtype,
             )
         )
     except Exception as exc:

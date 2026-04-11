@@ -1,22 +1,18 @@
 services:
-  mysql:
-    image: mysql:8.4
-    container_name: sopotek_trading_mysql
+  postgres:
+    image: postgres:16-alpine
+    container_name: sopotek_trading_postgres
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-sopotek_trading}
-      MYSQL_USER: ${MYSQL_USER:-sopotek}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-sopotek_local}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_local}
-    command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
+      POSTGRES_DB: ${POSTGRES_DB:-sopotek_trading}
+      POSTGRES_USER: ${POSTGRES_USER:-sopotek}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sopotek_local}
     ports:
-      - "${MYSQL_PORT:-3306}:3306"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -26,15 +22,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sopotek-trading-ai:latest
+    image: bigbossmanager/sopotek-trading-ai:latest
     container_name: sopotek_trading_app
     working_dir: /app
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
     environment:
       PYTHONPATH: /app/src
-      SOPOTEK_DATABASE_URL: mysql+pymysql://${MYSQL_USER:-sopotek}:${MYSQL_PASSWORD:-sopotek_local}@mysql:3306/${MYSQL_DATABASE:-sopotek_trading}?charset=utf8mb4
+      SOPOTEK_DATABASE_MODE: remote
+      SOPOTEK_DATABASE_URL: ${SOPOTEK_DATABASE_URL:-postgresql+psycopg://sopotek:sopotek_local@postgres:5432/sopotek_trading}
       QT_X11_NO_MITSHM: "1"
       DISPLAY: ${DISPLAY:-}
     volumes:
@@ -55,11 +52,12 @@ services:
     container_name: sopotek_trading_app_headless
     working_dir: /app
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
     environment:
       PYTHONPATH: /app/src
-      SOPOTEK_DATABASE_URL: mysql+pymysql://${MYSQL_USER:-sopotek}:${MYSQL_PASSWORD:-sopotek_local}@mysql:3306/${MYSQL_DATABASE:-sopotek_trading}?charset=utf8mb4
+      SOPOTEK_DATABASE_MODE: remote
+      SOPOTEK_DATABASE_URL: ${SOPOTEK_DATABASE_URL:-postgresql+psycopg://sopotek:sopotek_local@postgres:5432/sopotek_trading}
       QT_QPA_PLATFORM: offscreen
     volumes:
       - ./credentials.json:/app/credentials.json
@@ -79,11 +77,12 @@ services:
     container_name: sopotek_trading_app_http
     working_dir: /app
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
     environment:
       PYTHONPATH: /app/src
-      SOPOTEK_DATABASE_URL: mysql+pymysql://${MYSQL_USER:-sopotek}:${MYSQL_PASSWORD:-sopotek_local}@mysql:3306/${MYSQL_DATABASE:-sopotek_trading}?charset=utf8mb4
+      SOPOTEK_DATABASE_MODE: remote
+      SOPOTEK_DATABASE_URL: ${SOPOTEK_DATABASE_URL:-postgresql+psycopg://sopotek:sopotek_local@postgres:5432/sopotek_trading}
       SOPOTEK_HTTP_UI: "1"
       SOPOTEK_DISABLE_WEBENGINE: "1"
       DISPLAY: :99
@@ -114,4 +113,4 @@ services:
     command: /app/scripts/docker/start_http_ui.sh
 
 volumes:
-  mysql_data:
+  postgres_data:

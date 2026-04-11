@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 from pathlib import Path
@@ -11,11 +12,13 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+logger = logging.getLogger("storage.database")
 
 DEFAULT_DATABASE_URL = f"sqlite:///{(DATA_DIR / 'sopotek_trading.db').as_posix()}"
 SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SOPOTEK_SQLITE_BUSY_TIMEOUT_MS", "30000"))
 SQLITE_LOCK_RETRY_ATTEMPTS = max(int(os.getenv("SOPOTEK_SQLITE_LOCK_RETRY_ATTEMPTS", "4")), 1)
 SQLITE_LOCK_RETRY_DELAY_SECONDS = max(float(os.getenv("SOPOTEK_SQLITE_LOCK_RETRY_DELAY_SECONDS", "0.25")), 0.0)
+SQLITE_JOURNAL_MODE = str(os.getenv("SOPOTEK_SQLITE_JOURNAL_MODE", "wal") or "wal").strip().lower() or "wal"
 
 
 def _normalize_common_database_url_typos(database_url):
@@ -36,7 +39,10 @@ def _normalize_common_database_url_typos(database_url):
         else:
             normalized_query.append((key, value))
 
-    normalized_scheme = "mysql+pymysql" if parts.scheme == "mysql" else parts.scheme
+    scheme = str(parts.scheme or "").strip().lower()
+    normalized_scheme = parts.scheme
+    if scheme in {"mysql", "mysql+pymsql"}:
+        normalized_scheme = "mysql+pymysql"
     if not query_changed and normalized_scheme == parts.scheme:
         return candidate
 
@@ -65,7 +71,12 @@ def is_sqlite_url(database_url=None):
 def _sqlite_supports_wal(database_url):
     normalized = normalize_database_url(database_url)
     lowered = normalized.lower()
-    return lowered.startswith("sqlite") and ":memory:" not in lowered and "mode=memory" not in lowered
+    return (
+        SQLITE_JOURNAL_MODE == "wal"
+        and lowered.startswith("sqlite")
+        and ":memory:" not in lowered
+        and "mode=memory" not in lowered
+    )
 
 
 def _build_connect_args(database_url):
@@ -78,6 +89,35 @@ def _build_connect_args(database_url):
     return {}
 
 
+def _apply_sqlite_pragmas(dbapi_connection, _connection_record, *, enable_wal=True):
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        if not enable_wal:
+            return
+
+        wal_enabled = False
+        try:
+            result = cursor.execute("PRAGMA journal_mode=WAL")
+            row = None
+            if hasattr(result, "fetchone"):
+                row = result.fetchone()
+            elif hasattr(cursor, "fetchone"):
+                row = cursor.fetchone()
+            journal_mode = str((row[0] if row else "wal") or "").strip().lower()
+            wal_enabled = journal_mode == "wal"
+        except Exception:
+            wal_enabled = False
+
+        if wal_enabled:
+            cursor.execute("PRAGMA synchronous=NORMAL")
+        else:
+            cursor.execute("PRAGMA journal_mode=DELETE")
+    finally:
+        cursor.close()
+
+
 def _configure_sqlite_connection(active_engine, database_url):
     if not is_sqlite_url(database_url):
         return
@@ -85,16 +125,12 @@ def _configure_sqlite_connection(active_engine, database_url):
     enable_wal = _sqlite_supports_wal(database_url)
 
     @event.listens_for(active_engine, "connect")
-    def _apply_sqlite_pragmas(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        try:
-            cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            if enable_wal:
-                cursor.execute("PRAGMA journal_mode=WAL")
-                cursor.execute("PRAGMA synchronous=NORMAL")
-        finally:
-            cursor.close()
+    def _on_sqlite_connect(dbapi_connection, connection_record):
+        _apply_sqlite_pragmas(
+            dbapi_connection,
+            connection_record,
+            enable_wal=enable_wal,
+        )
 
 
 def _is_sqlite_locked_error(error, database_url=None):
@@ -123,16 +159,69 @@ def _run_with_sqlite_lock_retry(operation, *, database_url=None):
     return operation()
 
 
-def _create_engine(database_url):
+def _expected_driver_modules(database_url):
+    normalized = normalize_database_url(database_url).lower()
+    if normalized.startswith("postgresql+psycopg://"):
+        return {"psycopg"}
+    if normalized.startswith("postgresql+psycopg2://"):
+        return {"psycopg2"}
+    if normalized.startswith("postgresql://") or normalized.startswith("postgres://"):
+        return {"psycopg", "psycopg2"}
+    if normalized.startswith("mysql+pymysql://") or normalized.startswith("mysql://"):
+        return {"pymysql"}
+    return set()
+
+
+def _is_missing_database_driver(error, database_url):
+    if not isinstance(error, ModuleNotFoundError):
+        return False
+
+    expected = _expected_driver_modules(database_url)
+    if not expected:
+        return False
+
+    missing_name = str(getattr(error, "name", "") or "").strip()
+    if missing_name and missing_name in expected:
+        return True
+
+    message = str(error or "")
+    return any(f"No module named '{module}'" in message for module in expected)
+
+
+def _instantiate_engine(database_url):
     normalized = normalize_database_url(database_url)
-    active_engine = create_engine(
+    return create_engine(
         normalized,
         echo=False,
         future=True,
         pool_pre_ping=not is_sqlite_url(normalized),
         connect_args=_build_connect_args(normalized),
     )
-    _configure_sqlite_connection(active_engine, normalized)
+
+
+def _create_engine_with_fallback(database_url):
+    normalized = normalize_database_url(database_url)
+    resolved = normalized
+    try:
+        active_engine = _instantiate_engine(normalized)
+    except ModuleNotFoundError as exc:
+        if not _is_missing_database_driver(exc, normalized):
+            raise
+        resolved = DEFAULT_DATABASE_URL
+        logger.warning(
+            "Database driver for %s is unavailable (%s); falling back to local SQLite at %s",
+            normalized,
+            exc,
+            resolved,
+        )
+        active_engine = _instantiate_engine(resolved)
+
+    _configure_sqlite_connection(active_engine, resolved)
+    return resolved, active_engine
+
+
+def _create_engine(database_url):
+    _, active_engine = _create_engine_with_fallback(database_url)
     return active_engine
 
 
@@ -146,8 +235,7 @@ def _create_session_factory(active_engine):
     )
 
 
-DATABASE_URL = normalize_database_url(os.getenv("SOPOTEK_DATABASE_URL", DEFAULT_DATABASE_URL))
-engine = _create_engine(DATABASE_URL)
+DATABASE_URL, engine = _create_engine_with_fallback(os.getenv("SOPOTEK_DATABASE_URL", DEFAULT_DATABASE_URL))
 SessionLocal = _create_session_factory(engine)
 
 Base = declarative_base()
@@ -266,9 +354,9 @@ def configure_database(database_url=None):
         return get_database_url()
 
     previous_engine = engine
-    engine = _create_engine(normalized)
+    resolved_url, engine = _create_engine_with_fallback(normalized)
     SessionLocal = _create_session_factory(engine)
-    DATABASE_URL = normalized
+    DATABASE_URL = resolved_url
     os.environ["SOPOTEK_DATABASE_URL"] = normalized
 
     try:

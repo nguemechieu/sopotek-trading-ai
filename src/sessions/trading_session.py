@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import contextlib
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 import logging
+import re
 from typing import Any
 
+from core.account_identity import resolve_account_label
 from core.sopotek_trading import SopotekTrading
 from event_bus.event_types import EventType
+from market_data.orderbook_buffer import OrderBookBuffer
+from market_data.ticker_buffer import TickerBuffer
 
 
 def _utc_now() -> datetime:
@@ -29,6 +34,43 @@ def _normalized_text(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _looks_like_native_contract_symbol(symbol: Any) -> bool:
+    text = str(symbol or "").strip().upper()
+    if not text or "/" in text or "_" in text:
+        return False
+    if "PERP" in text:
+        return True
+    return bool(
+        re.fullmatch(r"[A-Z0-9]+-\d{2}[A-Z]{3}\d{2}-[A-Z0-9]+", text)
+        or re.fullmatch(r"[A-Z0-9]+-[A-Z0-9]+-\d{8}", text)
+    )
+
+
+def _normalize_symbol_text(symbol: Any) -> str:
+    text = str(symbol or "").strip().upper()
+    if _looks_like_native_contract_symbol(text):
+        return text
+    return text.replace("_", "/").replace("-", "/")
+
+
+def _normalize_symbol_sequence(symbols: Any) -> list[str]:
+    if symbols is None:
+        return []
+    if isinstance(symbols, str):
+        raw_values = [item for item in symbols.split(",")]
+    elif isinstance(symbols, Mapping):
+        raw_values = list(symbols.keys())
+    else:
+        raw_values = list(symbols or [])
+
+    normalized = []
+    for symbol in raw_values:
+        value = _normalize_symbol_text(symbol)
+        if value and value not in normalized:
+            normalized.append(value)
+    return normalized
 
 
 def _normalize_fraction(value: Any, default: float) -> float:
@@ -210,6 +252,18 @@ class SessionControllerProxy:
         self.balance = dict(session.balances)
         self.session_id = session.session_id
         self.session_label = session.label
+        self.autotrade_scope = str(getattr(session, "autotrade_scope", getattr(parent_controller, "autotrade_scope", "all")) or "all").strip().lower() or "all"
+        self.autotrade_watchlist = set(getattr(session, "autotrade_watchlist", set()) or set())
+        self.symbol_strategy_assignments = copy.deepcopy(getattr(session, "symbol_strategy_assignments", {}) or {})
+        self.symbol_strategy_rankings = copy.deepcopy(getattr(session, "symbol_strategy_rankings", {}) or {})
+        self.symbol_strategy_locks = set(getattr(session, "symbol_strategy_locks", set()) or set())
+        self.candle_buffers = getattr(session, "candle_buffers", {})
+        self.orderbook_buffer = getattr(session, "orderbook_buffer", None)
+        self.ticker_buffer = getattr(session, "ticker_buffer", None)
+        self._recent_trades_cache = getattr(session, "recent_trades_cache", {})
+        self._recent_trades_last_request_at = getattr(session, "recent_trades_last_request_at", {})
+        self._live_agent_runtime_feed = getattr(session, "live_agent_runtime_feed", [])
+        self._live_agent_decision_events = getattr(session, "live_agent_decision_events", {})
         self.trading_system = None
         self.portfolio = None
         self.behavior_guard = None
@@ -235,16 +289,138 @@ class SessionControllerProxy:
         normalized = str(exchange or self.exchange or "").strip().lower()
         return normalized or None
 
+    @staticmethod
+    def _normalize_symbol_key(symbol: Any) -> str:
+        return _normalize_symbol_text(symbol)
+
+    def symbol_strategy_assignment_locked(self, symbol: str) -> bool:
+        normalized_symbol = self._normalize_symbol_key(symbol)
+        return normalized_symbol in set(getattr(self, "symbol_strategy_locks", set()) or set())
+
+    def ranked_strategies_for_symbol(self, symbol: str) -> list[dict[str, Any]]:
+        normalized_symbol = self._normalize_symbol_key(symbol)
+        return list((getattr(self, "symbol_strategy_rankings", {}) or {}).get(normalized_symbol, []) or [])
+
+    def raw_assigned_strategies_for_symbol(self, symbol: str) -> list[dict[str, Any]]:
+        normalized_symbol = self._normalize_symbol_key(symbol)
+        return list((getattr(self, "symbol_strategy_assignments", {}) or {}).get(normalized_symbol, []) or [])
+
+    def assigned_strategies_for_symbol(self, symbol: str) -> list[dict[str, Any]]:
+        normalized_symbol = self._normalize_symbol_key(symbol)
+        assigned = list((getattr(self, "symbol_strategy_assignments", {}) or {}).get(normalized_symbol, []) or [])
+        if assigned:
+            if bool(getattr(self, "multi_strategy_enabled", True)) or len(assigned) <= 1:
+                return assigned
+            primary = dict(assigned[0])
+            primary["weight"] = 1.0
+            primary["rank"] = 1
+            return [primary]
+        fallback_name = str(getattr(self, "strategy_name", "Trend Following") or "Trend Following").strip() or "Trend Following"
+        timeframe_value = str(getattr(self, "time_frame", "1h") or "1h").strip() or "1h"
+        return [
+            {
+                "strategy_name": fallback_name,
+                "score": 1.0,
+                "weight": 1.0,
+                "symbol": normalized_symbol,
+                "timeframe": timeframe_value,
+                "rank": 1,
+            }
+        ]
+
+    def strategy_portfolio_profile_for_symbol(self, symbol: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.assigned_strategies_for_symbol(symbol)]
+
+    def _best_ranked_autotrade_symbols(
+        self,
+        available_symbols=None,
+        catalog_symbols=None,
+        broker_type=None,
+        exchange=None,
+        limit=None,
+    ) -> list[str]:
+        available = [
+            self._normalize_symbol_key(symbol)
+            for symbol in list(available_symbols or self._session.symbols or [])
+            if self._normalize_symbol_key(symbol)
+        ]
+        catalog = [
+            self._normalize_symbol_key(symbol)
+            for symbol in list(catalog_symbols or getattr(self._session, "symbol_catalog", []) or available)
+            if self._normalize_symbol_key(symbol)
+        ]
+        candidates = list(catalog or available)
+        if not candidates:
+            return []
+
+        policy_resolver = getattr(self._parent, "_symbol_universe_policy", None)
+        if callable(policy_resolver):
+            policy = policy_resolver(broker_type=broker_type, exchange=exchange)
+        else:
+            policy = {}
+        resolved_limit = int(limit or policy.get("auto_assignment_limit", 0) or 0)
+        if resolved_limit <= 0:
+            resolved_limit = len(candidates)
+
+        scored = []
+        for index, symbol in enumerate(candidates):
+            ranked_rows = self.ranked_strategies_for_symbol(symbol)
+            top_row = ranked_rows[0] if ranked_rows else {}
+            scored.append(
+                {
+                    "symbol": symbol,
+                    "index": index,
+                    "ranked": bool(ranked_rows),
+                    "score": float(top_row.get("score", 0.0) or 0.0),
+                    "sharpe_ratio": float(top_row.get("sharpe_ratio", 0.0) or 0.0),
+                    "total_profit": float(top_row.get("total_profit", 0.0) or 0.0),
+                    "win_rate": float(top_row.get("win_rate", 0.0) or 0.0),
+                }
+            )
+
+        ranked_symbols = []
+        if any(item["ranked"] for item in scored):
+            ranked_symbols = [
+                item["symbol"]
+                for item in sorted(
+                    [item for item in scored if item["ranked"]],
+                    key=lambda item: (
+                        -item["score"],
+                        -item["sharpe_ratio"],
+                        -item["total_profit"],
+                        -item["win_rate"],
+                        item["index"],
+                    ),
+                )
+            ]
+
+        prioritize = getattr(self._parent, "_prioritize_symbols_for_trading", None)
+        fallback_source = list(available or candidates)
+        if callable(prioritize):
+            try:
+                fallback_source = list(
+                    prioritize(
+                        available or candidates,
+                        top_n=len(available or candidates),
+                    )
+                    or fallback_source
+                )
+            except Exception:
+                fallback_source = list(available or candidates)
+
+        resolved = []
+        for source in (ranked_symbols, fallback_source, candidates):
+            for symbol in source:
+                if symbol and symbol not in resolved:
+                    resolved.append(symbol)
+                if len(resolved) >= resolved_limit:
+                    return resolved
+        return resolved[:resolved_limit]
+
     def current_account_label(self) -> str:
         broker = getattr(self, "broker", None)
         broker_config = getattr(getattr(self, "config", None), "broker", None)
-        account_id = getattr(broker, "account_id", None) or getattr(broker_config, "account_id", None) or ""
-        text = str(account_id or "").strip()
-        if not text:
-            return "Not set"
-        if len(text) <= 8:
-            return text
-        return f"{text[:4]}...{text[-4:]}"
+        return resolve_account_label(broker, broker_config)
 
     def is_live_mode(self) -> bool:
         broker_config = getattr(getattr(self, "config", None), "broker", None)
@@ -253,38 +429,110 @@ class SessionControllerProxy:
         return mode == "live" and exchange != "paper"
 
     def get_active_autotrade_symbols(self) -> list[str]:
+        available = [
+            self._normalize_symbol_key(symbol)
+            for symbol in list(self._session.symbols or [])
+            if self._normalize_symbol_key(symbol)
+        ]
+        catalog = [
+            self._normalize_symbol_key(symbol)
+            for symbol in list(getattr(self._session, "symbol_catalog", []) or available)
+            if self._normalize_symbol_key(symbol)
+        ]
+        if not available and not catalog:
+            return []
+
         resolver = getattr(self._parent, "get_active_autotrade_symbols", None)
         if callable(resolver):
             try:
-                return list(
-                    resolver(
-                        available_symbols=self._session.symbols,
-                        catalog_symbols=getattr(self._session, "symbol_catalog", []),
-                        broker_type=self.broker_type,
-                        exchange=self.exchange,
-                    )
-                    or []
+                resolved = resolver(
+                    available_symbols=available,
+                    catalog_symbols=catalog,
+                    broker_type=self.broker_type,
+                    exchange=self.exchange,
                 )
+                if resolved is not None:
+                    return [
+                        self._normalize_symbol_key(symbol)
+                        for symbol in list(resolved or [])
+                        if self._normalize_symbol_key(symbol)
+                    ]
             except TypeError:
-                return list(resolver() or [])
-        return list(self._session.symbols)
+                pass
+
+        scope_normalizer = getattr(self._parent, "_normalize_autotrade_scope", None)
+        if callable(scope_normalizer):
+            scope = str(scope_normalizer(getattr(self, "autotrade_scope", "all")) or "all").lower()
+        else:
+            scope = str(getattr(self, "autotrade_scope", "all") or "all").strip().lower()
+        if scope == "selected":
+            selected_resolver = getattr(self._parent, "_current_autotrade_selected_symbol", None)
+            selected = str(selected_resolver() if callable(selected_resolver) else "").upper().strip()
+            candidate_pool = set(catalog or available)
+            return [selected] if selected and selected in candidate_pool else []
+        if scope == "watchlist":
+            watchlist = set(getattr(self, "autotrade_watchlist", set()) or set())
+            return [symbol for symbol in (catalog or available) if symbol in watchlist]
+        if scope == "ranked":
+            return self._best_ranked_autotrade_symbols(
+                available_symbols=available,
+                catalog_symbols=catalog,
+                broker_type=self.broker_type,
+                exchange=self.exchange,
+            )
+        return available
 
     def is_symbol_enabled_for_autotrade(self, symbol: str) -> bool:
+        normalized = self._normalize_symbol_key(symbol)
+        if not normalized:
+            return False
+        available = {
+            self._normalize_symbol_key(item)
+            for item in list(self._session.symbols or [])
+            if self._normalize_symbol_key(item)
+        }
+        catalog = {
+            self._normalize_symbol_key(item)
+            for item in list(getattr(self._session, "symbol_catalog", []) or available)
+            if self._normalize_symbol_key(item)
+        }
+
         resolver = getattr(self._parent, "is_symbol_enabled_for_autotrade", None)
         if callable(resolver):
             try:
                 return bool(
                     resolver(
-                        symbol,
-                        available_symbols=self._session.symbols,
-                        catalog_symbols=getattr(self._session, "symbol_catalog", []),
+                        normalized,
+                        available_symbols=list(available),
+                        catalog_symbols=list(catalog),
                         broker_type=self.broker_type,
                         exchange=self.exchange,
                     )
                 )
             except TypeError:
-                return bool(resolver(symbol))
-        return str(symbol or "").strip().upper() in set(self._session.symbols)
+                pass
+
+        scope_normalizer = getattr(self._parent, "_normalize_autotrade_scope", None)
+        if callable(scope_normalizer):
+            scope = str(scope_normalizer(getattr(self, "autotrade_scope", "all")) or "all").lower()
+        else:
+            scope = str(getattr(self, "autotrade_scope", "all") or "all").strip().lower()
+        if scope == "selected":
+            selected_resolver = getattr(self._parent, "_current_autotrade_selected_symbol", None)
+            selected = str(selected_resolver() if callable(selected_resolver) else "").upper().strip()
+            candidate_pool = catalog or available
+            return bool(selected) and normalized == selected and normalized in candidate_pool
+        if scope == "watchlist":
+            return normalized in set(getattr(self, "autotrade_watchlist", set()) or set()) and normalized in (catalog or available)
+        if scope == "ranked":
+            ranked_symbols = self._best_ranked_autotrade_symbols(
+                available_symbols=list(available),
+                catalog_symbols=list(catalog),
+                broker_type=self.broker_type,
+                exchange=self.exchange,
+            )
+            return normalized in set(ranked_symbols)
+        return normalized in available
 
     def publish_ai_signal(self, symbol: str, signal: dict[str, Any], candles: list[Any] | None = None) -> None:
         payload = dict(signal or {})
@@ -322,10 +570,10 @@ class SessionControllerProxy:
             self._parent.handle_trade_execution(payload)
 
     def trade_quantity_context(self, symbol: str) -> dict[str, Any]:
-        normalized_symbol = str(symbol or "").strip().upper()
+        normalized_symbol = _normalize_symbol_text(symbol)
         broker = getattr(self, "broker", None)
         exchange_name = str(getattr(broker, "exchange_name", "") or "").strip().lower()
-        compact = normalized_symbol.replace("_", "/").replace("-", "/")
+        compact = _normalize_symbol_text(normalized_symbol)
         parts = compact.split("/", 1) if "/" in compact else []
         supports_lots = False
         forex_quotes = set(getattr(self._parent, "FOREX_SYMBOL_QUOTES", set()) or set())
@@ -408,6 +656,22 @@ class TradingSession:
         self.latest_tickers: dict[str, dict[str, Any]] = {}
         self.last_ai_signal: dict[str, Any] = {}
         self.last_strategy_debug: dict[str, Any] = {}
+        self.autotrade_scope = str(getattr(parent_controller, "autotrade_scope", "all") or "all").strip().lower() or "all"
+        self.autotrade_watchlist = {
+            _normalize_symbol_text(symbol)
+            for symbol in list(getattr(parent_controller, "autotrade_watchlist", set()) or set())
+            if _normalize_symbol_text(symbol)
+        }
+        self.symbol_strategy_assignments = copy.deepcopy(getattr(parent_controller, "symbol_strategy_assignments", {}) or {})
+        self.symbol_strategy_rankings = copy.deepcopy(getattr(parent_controller, "symbol_strategy_rankings", {}) or {})
+        self.symbol_strategy_locks = set(getattr(parent_controller, "symbol_strategy_locks", set()) or set())
+        self.candle_buffers: dict[str, Any] = {}
+        self.orderbook_buffer = OrderBookBuffer()
+        self.ticker_buffer = TickerBuffer(max_length=int(getattr(parent_controller, "limit", 1000) or 1000))
+        self.recent_trades_cache: dict[str, Any] = {}
+        self.recent_trades_last_request_at: dict[str, Any] = {}
+        self.live_agent_runtime_feed: list[dict[str, Any]] = []
+        self.live_agent_decision_events: dict[str, list[dict[str, Any]]] = {}
         self.risk_limits = self._resolve_risk_limits(config)
         self.risk_state = SessionRiskState()
 
@@ -415,6 +679,9 @@ class TradingSession:
         self._snapshot_task: asyncio.Task[Any] | None = None
         self._runtime_task: asyncio.Task[Any] | None = None
         self._peak_equity = 0.0
+        self._runtime_streams_bound = False
+        self._runtime_memory_sink = None
+        self._runtime_bus_subscriptions: list[tuple[str, Any]] = []
 
     def _account_identity_candidates(self, payload: Any) -> list[Mapping[str, Any]]:
         queue = [payload]
@@ -514,6 +781,34 @@ class TradingSession:
         if broker is not None and hasattr(broker, "params"):
             broker.params = broker_params
 
+    def _configured_symbol_hints(self) -> list[str]:
+        broker = self.broker
+        broker_config = getattr(self.config, "broker", None)
+        normalized = []
+        sources = (
+            getattr(self, "symbol_catalog", None),
+            getattr(self, "symbols", None),
+            getattr(broker, "symbols", None) if broker is not None else None,
+            getattr(broker, "params", None) if broker is not None else None,
+            getattr(broker, "options", None) if broker is not None else None,
+            getattr(broker_config, "params", None) if broker_config is not None else None,
+            getattr(broker_config, "options", None) if broker_config is not None else None,
+        )
+        for source in sources:
+            if isinstance(source, Mapping):
+                candidates = (
+                    source.get("symbols"),
+                    source.get("default_symbols"),
+                    source.get("watchlist_symbols"),
+                )
+            else:
+                candidates = (source,)
+            for candidate in candidates:
+                for symbol in _normalize_symbol_sequence(candidate):
+                    if symbol not in normalized:
+                        normalized.append(symbol)
+        return normalized
+
     async def _synchronize_account_identity(self, payload: Any = None) -> None:
         broker = self.broker
         broker_config = getattr(self.config, "broker", None)
@@ -587,6 +882,7 @@ class TradingSession:
             self.balances = await self._fetch_balances_safe()
             await self._synchronize_account_identity(self.balances)
             self.symbols = await self._fetch_symbols_safe()
+            self._prune_symbol_scoped_state()
 
             self.session_controller = SessionControllerProxy(self.parent_controller, self)
             self.trading_system = SopotekTrading(self.session_controller)
@@ -597,6 +893,7 @@ class TradingSession:
             self.session_controller.event_bus = self.event_bus
             if hasattr(self.broker, "controller"):
                 self.broker.controller = self.session_controller
+            self._bind_runtime_monitor_streams()
             if self.event_bus is not None and hasattr(self.event_bus, "subscribe"):
                 self.event_bus.subscribe("*", self._capture_event)
             self.positions = await self._fetch_positions_safe()
@@ -609,6 +906,31 @@ class TradingSession:
             self._ensure_snapshot_task()
             self._notify_state_change()
             return self
+
+    def _prune_symbol_scoped_state(self) -> None:
+        catalog = {
+            _normalize_symbol_text(symbol)
+            for symbol in list(self.symbol_catalog or self.symbols or [])
+            if _normalize_symbol_text(symbol)
+        }
+        if not catalog:
+            return
+        self.autotrade_watchlist = {symbol for symbol in set(self.autotrade_watchlist or set()) if symbol in catalog}
+        self.symbol_strategy_assignments = {
+            _normalize_symbol_text(symbol): copy.deepcopy(rows)
+            for symbol, rows in dict(self.symbol_strategy_assignments or {}).items()
+            if _normalize_symbol_text(symbol) in catalog
+        }
+        self.symbol_strategy_rankings = {
+            _normalize_symbol_text(symbol): copy.deepcopy(rows)
+            for symbol, rows in dict(self.symbol_strategy_rankings or {}).items()
+            if _normalize_symbol_text(symbol) in catalog
+        }
+        self.symbol_strategy_locks = {
+            _normalize_symbol_text(symbol)
+            for symbol in set(self.symbol_strategy_locks or set())
+            if _normalize_symbol_text(symbol) in catalog
+        }
 
     async def start_trading(self) -> "TradingSession":
         await self.initialize()
@@ -684,6 +1006,7 @@ class TradingSession:
             snapshot_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await snapshot_task
+        self._unbind_runtime_monitor_streams()
         if event_bus is not None and hasattr(event_bus, "unsubscribe"):
             event_bus.unsubscribe("*", self._capture_event)
         if trading_system is not None:
@@ -705,6 +1028,277 @@ class TradingSession:
             self.status = "closed"
             self.last_update_at = _utc_now()
             self._notify_state_change()
+
+    @staticmethod
+    def _normalize_runtime_symbol(symbol: Any) -> str:
+        return _normalize_symbol_text(symbol)
+
+    @staticmethod
+    def _normalize_runtime_timestamp(timestamp: Any) -> tuple[float | None, str]:
+        if isinstance(timestamp, datetime):
+            normalized = timestamp.replace(tzinfo=timezone.utc) if timestamp.tzinfo is None else timestamp.astimezone(timezone.utc)
+            return normalized.timestamp(), normalized.strftime("%Y-%m-%d %H:%M:%S UTC")
+        text = str(timestamp or "").strip()
+        if not text:
+            return None, ""
+        try:
+            normalized = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            normalized = normalized.replace(tzinfo=timezone.utc) if normalized.tzinfo is None else normalized.astimezone(timezone.utc)
+            return normalized.timestamp(), normalized.strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            return None, text
+
+    @staticmethod
+    def _coerce_runtime_event_payload(data: Any) -> dict[str, Any]:
+        if isinstance(data, dict):
+            return dict(data)
+        if is_dataclass(data):
+            try:
+                return asdict(data)
+            except Exception:
+                return {}
+        if hasattr(data, "__dict__"):
+            try:
+                return {
+                    str(key): value
+                    for key, value in vars(data).items()
+                    if not str(key).startswith("_")
+                }
+            except Exception:
+                return {}
+        try:
+            return dict(data or {})
+        except Exception:
+            return {}
+
+    def _append_live_agent_decision_event(self, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        symbol = self._normalize_runtime_symbol(payload.get("symbol"))
+        if not symbol:
+            return
+        events = self.live_agent_decision_events.setdefault(symbol, [])
+        events.append(dict(payload, symbol=symbol))
+        if len(events) > 250:
+            del events[:-250]
+
+    def _append_live_agent_runtime_feed(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+
+        row = dict(payload)
+        symbol = self._normalize_runtime_symbol(row.get("symbol"))
+        if symbol:
+            row["symbol"] = symbol
+        row["kind"] = str(row.get("kind") or "runtime").strip().lower() or "runtime"
+        row["message"] = str(row.get("message") or row.get("reason") or "").strip()
+        row["stage"] = str(row.get("stage") or "").strip()
+        row["agent_name"] = str(row.get("agent_name") or "").strip()
+        row["event_type"] = str(row.get("event_type") or "").strip()
+        row["strategy_name"] = str(row.get("strategy_name") or "").strip()
+        row["timeframe"] = str(row.get("timeframe") or "").strip()
+        row["decision_id"] = str(row.get("decision_id") or "").strip()
+        row["profile_id"] = str(row.get("profile_id") or "").strip()
+
+        timestamp_value, timestamp_label = self._normalize_runtime_timestamp(
+            row.get("timestamp") if row.get("timestamp") not in (None, "") else datetime.now(timezone.utc)
+        )
+        row["timestamp"] = timestamp_value
+        row["timestamp_label"] = str(row.get("timestamp_label") or timestamp_label or "").strip()
+        if not row["timestamp_label"] and timestamp_value is not None:
+            row["timestamp_label"] = datetime.fromtimestamp(timestamp_value, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        self.live_agent_runtime_feed.append(row)
+        if len(self.live_agent_runtime_feed) > 500:
+            del self.live_agent_runtime_feed[:-500]
+        return dict(row)
+
+    def _emit_runtime_signal_to_parent(self, payload: dict[str, Any]) -> None:
+        parent = self.parent_controller
+        active_session_id = str(getattr(parent, "active_session_id", "") or "").strip()
+        if active_session_id and active_session_id != self.session_id:
+            return
+        signal = getattr(parent, "agent_runtime_signal", None)
+        if signal is None:
+            return
+        try:
+            signal.emit(dict(payload or {}))
+        except Exception:
+            self.logger.debug("Unable to emit session runtime signal", exc_info=True)
+
+    def _runtime_bus_message(self, event_type: str, data: dict[str, Any]) -> str:
+        payload = dict(data or {})
+        signal_payload = dict(payload.get("signal") or {}) if isinstance(payload.get("signal"), dict) else {}
+        review_payload = dict(payload.get("trade_review") or {}) if isinstance(payload.get("trade_review"), dict) else {}
+        symbol = self._normalize_runtime_symbol(payload.get("symbol"))
+        strategy_name = str(
+            signal_payload.get("strategy_name")
+            or review_payload.get("strategy_name")
+            or payload.get("strategy_name")
+            or ""
+        ).strip()
+        timeframe = str(payload.get("timeframe") or review_payload.get("timeframe") or "").strip()
+        side = str(signal_payload.get("side") or review_payload.get("side") or payload.get("side") or "").strip().upper()
+        reason = str(review_payload.get("reason") or signal_payload.get("reason") or payload.get("reason") or "").strip()
+        if event_type == EventType.SIGNAL:
+            detail = f"{side or 'HOLD'} via {strategy_name or 'strategy'}"
+            if timeframe:
+                detail = f"{detail} ({timeframe})"
+            return f"Signal selected for {symbol}: {detail}."
+        if event_type == EventType.REASONING_DECISION:
+            decision = str(payload.get("decision") or "NEUTRAL").strip().upper() or "NEUTRAL"
+            confidence = payload.get("confidence")
+            try:
+                return f"Reasoning engine marked {symbol} as {decision} at {float(confidence):.2f} confidence."
+            except Exception:
+                return f"Reasoning engine marked {symbol} as {decision}."
+        if event_type == EventType.DECISION_EVENT:
+            action = str(payload.get("action") or "HOLD").strip().upper() or "HOLD"
+            profile_id = str(payload.get("profile_id") or "").strip()
+            selected_strategy = str(payload.get("selected_strategy") or strategy_name or "").strip() or "strategy blend"
+            confidence = payload.get("confidence")
+            profile_text = f" for profile {profile_id}" if profile_id else ""
+            try:
+                return f"TraderAgent chose {action} on {symbol} via {selected_strategy}{profile_text} at {float(confidence):.2f} confidence."
+            except Exception:
+                return f"TraderAgent chose {action} on {symbol} via {selected_strategy}{profile_text}."
+        if event_type == EventType.RISK_APPROVED:
+            return f"Risk approved {side or 'trade'} for {symbol}."
+        if event_type == EventType.EXECUTION_PLAN:
+            execution_strategy = str(payload.get("execution_strategy") or "").strip() or "default routing"
+            return f"Execution plan ready for {symbol}: {execution_strategy}."
+        if event_type == EventType.ORDER_FILLED:
+            status = str((payload.get("execution_result") or {}).get("status") or payload.get("status") or "filled").strip().lower()
+            return f"Execution {status} for {symbol}."
+        if event_type == EventType.RISK_ALERT:
+            return reason or f"Risk blocked the trade for {symbol}."
+        return reason or f"{event_type} for {symbol}."
+
+    def _handle_live_agent_memory_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(event, dict):
+            return {}
+        symbol = self._normalize_runtime_symbol(event.get("symbol"))
+        if not symbol:
+            return {}
+        payload = dict(event.get("payload") or {})
+        timestamp_value, timestamp_label = self._normalize_runtime_timestamp(event.get("timestamp"))
+        row = {
+            "kind": "memory",
+            "decision_id": str(event.get("decision_id") or "").strip(),
+            "symbol": symbol,
+            "agent_name": str(event.get("agent") or "").strip(),
+            "stage": str(event.get("stage") or "").strip(),
+            "strategy_name": str(payload.get("strategy_name") or "").strip(),
+            "timeframe": str(payload.get("timeframe") or "").strip(),
+            "side": str(payload.get("side") or "").strip().lower(),
+            "confidence": payload.get("confidence"),
+            "approved": payload.get("approved"),
+            "reason": str(payload.get("reason") or "").strip(),
+            "timestamp": timestamp_value,
+            "timestamp_label": timestamp_label,
+            "payload": payload,
+            "message": f"{str(event.get('agent') or 'Agent').strip() or 'Agent'} {str(event.get('stage') or 'updated').strip() or 'updated'} for {symbol}.",
+        }
+        if row["reason"]:
+            row["message"] = f"{row['message']} | {row['reason']}"
+        self._append_live_agent_decision_event(row)
+        normalized = self._append_live_agent_runtime_feed(row)
+        self._emit_runtime_signal_to_parent(normalized)
+        return normalized
+
+    async def _handle_trading_agent_bus_event(self, event: Any) -> dict[str, Any]:
+        data = self._coerce_runtime_event_payload(getattr(event, "data", {}) or {})
+        symbol = self._normalize_runtime_symbol(data.get("symbol"))
+        if not symbol:
+            return {}
+        event_type = str(getattr(event, "type", "") or "").strip()
+        signal_payload = dict(data.get("signal") or {}) if isinstance(data.get("signal"), dict) else {}
+        review_payload = dict(data.get("trade_review") or {}) if isinstance(data.get("trade_review"), dict) else {}
+        metadata = dict(data.get("metadata") or {}) if isinstance(data.get("metadata"), dict) else {}
+        applied_constraints = data.get("applied_constraints")
+        if isinstance(applied_constraints, (list, tuple, set)):
+            applied_constraints = [str(item).strip() for item in applied_constraints if str(item).strip()]
+        elif str(applied_constraints or "").strip():
+            applied_constraints = [str(applied_constraints).strip()]
+        else:
+            applied_constraints = []
+        votes = dict(data.get("votes") or {}) if isinstance(data.get("votes"), dict) else {}
+        features = dict(data.get("features") or {}) if isinstance(data.get("features"), dict) else {}
+        selected_strategy = str(
+            data.get("selected_strategy")
+            or signal_payload.get("strategy_name")
+            or review_payload.get("strategy_name")
+            or data.get("strategy_name")
+            or ""
+        ).strip()
+        action = str(data.get("action") or "").strip().upper()
+        side = str(signal_payload.get("side") or review_payload.get("side") or data.get("side") or "").strip().lower()
+        if not side and action in {"BUY", "SELL"}:
+            side = action.lower()
+        row = {
+            "kind": "bus",
+            "event_type": event_type,
+            "agent_name": str(getattr(event, "source", "") or data.get("agent_name") or "").strip(),
+            "symbol": symbol,
+            "decision_id": str(data.get("decision_id") or review_payload.get("decision_id") or "").strip(),
+            "profile_id": str(data.get("profile_id") or metadata.get("profile_id") or "").strip(),
+            "strategy_name": selected_strategy,
+            "timeframe": str(data.get("timeframe") or review_payload.get("timeframe") or metadata.get("timeframe") or "").strip(),
+            "stage": str(data.get("stage") or (action.lower() if action else "")).strip(),
+            "action": action,
+            "side": side,
+            "price": data.get("price"),
+            "quantity": data.get("quantity"),
+            "confidence": data.get("confidence"),
+            "model_probability": data.get("model_probability"),
+            "applied_constraints": applied_constraints,
+            "votes": votes,
+            "features": features,
+            "metadata": metadata,
+            "reason": str(data.get("reasoning") or review_payload.get("reason") or signal_payload.get("reason") or data.get("reason") or "").strip(),
+            "approved": data.get("approved"),
+            "timestamp": data.get("timestamp") or getattr(event, "timestamp", None),
+            "message": self._runtime_bus_message(event_type, data),
+            "payload": data,
+        }
+        self._append_live_agent_decision_event(row)
+        normalized = self._append_live_agent_runtime_feed(row)
+        self._emit_runtime_signal_to_parent(normalized)
+        return normalized
+
+    def _bind_runtime_monitor_streams(self) -> None:
+        if self._runtime_streams_bound:
+            return
+        trading_system = self.trading_system
+        if trading_system is None:
+            return
+        memory = getattr(trading_system, "agent_memory", None)
+        if memory is not None and hasattr(memory, "add_sink"):
+            self._runtime_memory_sink = memory.add_sink(self._handle_live_agent_memory_event)
+        event_bus = getattr(trading_system, "event_bus", None)
+        if event_bus is not None and hasattr(event_bus, "subscribe"):
+            for event_type in (
+                EventType.SIGNAL,
+                EventType.REASONING_DECISION,
+                EventType.DECISION_EVENT,
+                EventType.RISK_APPROVED,
+                EventType.RISK_ALERT,
+                EventType.EXECUTION_PLAN,
+                EventType.ORDER_FILLED,
+            ):
+                handler = event_bus.subscribe(event_type, self._handle_trading_agent_bus_event)
+                self._runtime_bus_subscriptions.append((event_type, handler))
+        self._runtime_streams_bound = True
+
+    def _unbind_runtime_monitor_streams(self) -> None:
+        event_bus = getattr(self, "event_bus", None)
+        if event_bus is not None and hasattr(event_bus, "unsubscribe"):
+            for event_type, handler in list(self._runtime_bus_subscriptions):
+                with contextlib.suppress(Exception):
+                    event_bus.unsubscribe(event_type, handler)
+        self._runtime_bus_subscriptions = []
+        self._runtime_memory_sink = None
+        self._runtime_streams_bound = False
 
     async def refresh_state(self) -> None:
         if self.broker is None:
@@ -884,7 +1478,7 @@ class TradingSession:
     async def _fetch_symbols_safe(self) -> list[str]:
         symbols = None
         if self.broker is None:
-            return list(self.symbols)
+            return list(self._configured_symbol_hints())
         try:
             if hasattr(self.broker, "fetch_symbol"):
                 symbols = await self.broker.fetch_symbol()
@@ -893,7 +1487,9 @@ class TradingSession:
         except Exception as exc:
             self.last_error = str(exc)
             self.logger.debug("Symbol discovery failed for session %s: %s", self.session_id, exc)
-            return list(self.symbols)
+            fallback = self._configured_symbol_hints()
+            self.symbol_catalog = list(fallback)
+            return fallback
         if isinstance(symbols, dict):
             instruments = symbols.get("instruments", [])
             normalized = []
@@ -903,22 +1499,9 @@ class TradingSession:
                     if name:
                         normalized.append(str(name).strip())
             symbols = normalized
-        normalized = list(
-            dict.fromkeys(
-                str(symbol or "").strip().upper()
-                for symbol in list(symbols or [])
-                if str(symbol or "").strip()
-            )
-        )
+        normalized = _normalize_symbol_sequence(symbols)
         if not normalized:
-            fallback_symbols = list(getattr(self.parent_controller, "symbols", []) or [])
-            normalized = list(
-                dict.fromkeys(
-                    str(symbol or "").strip().upper()
-                    for symbol in fallback_symbols
-                    if str(symbol or "").strip()
-                )
-            )
+            normalized = self._configured_symbol_hints()
         self.symbol_catalog = list(normalized)
         return normalized
 

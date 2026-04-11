@@ -133,7 +133,16 @@ class ExecutionEngine:
                 self.order_states[order_id] = OrderState.SUBMITTED
                 await self.bus.publish(
                     EventType.ORDER_SUBMITTED,
-                    {"order_id": order_id, "symbol": order.symbol, "attempt": attempt},
+                    {
+                        "order_id": order_id,
+                        "symbol": order.symbol,
+                        "side": order.side,
+                        "quantity": float(order.quantity),
+                        "remaining_quantity": float(order.quantity),
+                        "strategy_name": order.strategy_name,
+                        "status": "submitted",
+                        "attempt": attempt,
+                    },
                     priority=75,
                     source="execution_engine",
                 )
@@ -158,6 +167,7 @@ class ExecutionEngine:
                     partial=bool((raw or {}).get("partial") or float((raw or {}).get("remaining_quantity") or 0.0) > 0.0),
                     fee=float((raw or {}).get("fee") or 0.0),
                     metadata={"attempt": attempt, "raw": raw or {}, **dict(order.metadata)},
+                    timestamp=review.timestamp,
                 )
                 self.order_states[order_id] = OrderState.FILLED
                 return report
@@ -182,6 +192,7 @@ class ExecutionEngine:
             stop_price=order.stop_price,
             take_profit=order.take_profit,
             metadata={"error": str(last_error) if last_error is not None else "Unknown execution error"},
+            timestamp=review.timestamp,
         )
 
     async def _publish_execution_events(self, report: ExecutionReport) -> None:

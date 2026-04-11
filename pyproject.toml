@@ -24,6 +24,7 @@ dependencies = [
     "stellar-sdk[aiohttp]>=13,<14",
     "SQLAlchemy>=2.0",
     "PyMySQL>=1.1",
+    "psycopg[binary]>=3.2",
     "python-dotenv>=1.0",
     "keyring>=24.0",
     "PyJWT>=2.8",
@@ -86,6 +87,8 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.5",
     "flake8>=7.0",
+    "flake8-bugbear>=24.4",
+    "bandit>=1.7",
     "build>=1.2",
     "twine>=5.1",
 ]
@@ -96,9 +99,50 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.pytest.ini_options]
-testpaths = ["src/tests"]
-addopts = "-ra --strict-markers"
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+extend-exclude = '''
+/(
+    \.deps
+  | \.deps_.*
+  | \.git
+  | \.idea
+  | \.mypy_cache
+  | \.pytest_cache
+  | \.venv
+  | build
+  | dist
+  | htmlcov
+  | output
+  | reports/code-quality
+  | src/assets
+  | src/logs
+  | src/reports
+  | src/sopotek_trading_ai\.egg-info
+  | tmp
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+skip_glob = [
+    ".deps/**",
+    ".deps_legacy/**",
+    ".deps_ui/**",
+    ".venv/**",
+    "build/**",
+    "dist/**",
+    "htmlcov/**",
+    "output/**",
+    "reports/code-quality/**",
+    "src/assets/**",
+    "src/logs/**",
+    "src/reports/**",
+    "src/sopotek_trading_ai.egg-info/**",
+    "tmp/**",
+]
 
 [tool.coverage.run]
 branch = true
@@ -108,12 +152,14 @@ omit = [
     "src/tests/*",
     "src/assets/*",
     "src/logs/*",
+    "src/reports/*",
     "src/sopotek_trading_ai.egg-info/*",
 ]
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+fail_under = 80
 precision = 2
 exclude_lines = [
     "pragma: no cover",

@@ -1,6 +1,7 @@
 import json
 import uuid
 import logging
+import re
 import pandas as pd
 from pathlib import Path
 
@@ -21,6 +22,13 @@ def normalize_symbol(symbol: str):
     """
 
     symbol = symbol.upper()
+
+    if (
+        "PERP" in symbol
+        or re.fullmatch(r"[A-Z0-9]+-\d{2}[A-Z]{3}\d{2}-[A-Z0-9]+", symbol)
+        or re.fullmatch(r"[A-Z0-9]+-[A-Z0-9]+-\d{8}", symbol)
+    ):
+        return symbol
 
     if "-" in symbol:
         symbol = symbol.replace("-", "/")

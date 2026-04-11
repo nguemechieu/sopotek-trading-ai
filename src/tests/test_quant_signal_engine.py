@@ -4,38 +4,44 @@ from strategy.strategy_registry import StrategyRegistry
 
 def _sample_candles():
     base = 1700000000000
-    rows = [
-        (100, 101, 99, 100.0),
-        (100, 101, 99.5, 100.3),
-        (100.2, 101.2, 99.8, 100.6),
-        (100.4, 101.4, 100.0, 100.9),
-        (100.8, 101.6, 100.4, 101.1),
-        (101.2, 105.0, 101.0, 104.8),
-    ]
     candles = []
-    for index, (open_, high, low, close) in enumerate(rows):
-        candles.append([base + index * 3600000, open_, high, low, close, 10 + index])
+    close = 100.0
+    for index in range(96):
+        drift = 0.18 if index < 70 else 0.44
+        seasonal = ((index % 7) - 3) * 0.03
+        close = max(10.0, close + drift + seasonal)
+        open_ = close - (0.20 if index % 3 else -0.08)
+        high = max(open_, close) + 0.40 + (0.02 * (index % 4))
+        low = min(open_, close) - 0.32
+        volume = 12 + index + (6 if index >= 70 else 0)
+        candles.append([base + index * 3600000, open_, high, low, close, volume])
     return candles
 
 
 def test_signal_engine_adds_regime_and_engine_metadata():
     registry = StrategyRegistry()
-    strategy = registry.get("Breakout")
-    strategy.rsi_period = 2
-    strategy.breakout_lookback = 5
-    strategy.ema_fast = 3
-    strategy.ema_slow = 5
-    strategy.atr_period = 2
+    strategy = registry.get("Trend Following")
+    strategy.rsi_period = 10
+    strategy.breakout_lookback = 20
+    strategy.ema_fast = 12
+    strategy.ema_slow = 26
+    strategy.atr_period = 10
+    strategy.min_confidence = 0.0
 
     engine = SignalEngine(registry)
     signal = engine.generate_signal(
         candles=_sample_candles(),
-        strategy_name="Breakout",
+        strategy_name="Trend Following",
         symbol="BTC/USDT",
     )
 
     assert signal is not None
     assert signal["side"] == "buy"
     assert signal["symbol"] == "BTC/USDT"
-    assert signal["regime"] in {"trending_up", "trending_down", "range", "volatile_range", "range_low_edge", "range_high_edge"}
-    assert signal["signal_engine_version"] == "signal-engine-v1"
+    assert signal["regime"] in {"trending", "mean_reverting", "high_volatility", "low_liquidity"}
+    assert signal["signal_engine_version"] == "signal-engine-v2"
+    assert signal["expected_return"] > 0
+    assert signal["risk_estimate"] > 0
+    assert signal["alpha_score"] > 0
+    assert signal["alpha_models"]
+    assert "primary" in signal["regime_snapshot"]

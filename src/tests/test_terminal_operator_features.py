@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -244,6 +245,9 @@ def test_get_or_create_tool_window_replaces_stale_detached_window_reference():
     assert created is not stale_window
     assert fake.detached_tool_windows["notification_center"] is created
     assert created.windowTitle() == "Notification Center"
+    assert created.objectName() == "tool_window_notification_center"
+    assert "QTabWidget::pane" in created.styleSheet()
+    assert "QHeaderView::section" in created.styleSheet()
 
 
 def test_open_notification_center_builds_window_and_renders_records():
@@ -417,7 +421,7 @@ def test_visible_tool_window_keys_normalizes_aliases_and_extended_subwindows():
 
     visible = Terminal._visible_tool_window_keys(fake)
 
-    assert visible == ["logs", "market_chat", "ml_research_lab", "trader_agent_monitor"]
+    assert visible == ["agent_timeline", "logs", "market_chat", "ml_research_lab"]
 
 
 def test_open_tool_window_by_key_supports_aliases_and_extended_subwindows():
@@ -427,7 +431,7 @@ def test_open_tool_window_by_key_supports_aliases_and_extended_subwindows():
         _open_logs=lambda: calls.append("logs"),
         _open_notification_center=lambda: calls.append("notification_center"),
         _open_ml_research_window=lambda: calls.append("ml_research_lab"),
-        _open_trader_agent_monitor=lambda: calls.append("trader_agent_monitor"),
+        _open_agent_timeline=lambda: calls.append("agent_timeline"),
         _show_settings_window=lambda: calls.append("application_settings"),
         _open_risk_settings=lambda: calls.append("risk_settings"),
         _show_backtest_window=lambda: calls.append("backtesting_workspace"),
@@ -463,7 +467,7 @@ def test_open_tool_window_by_key_supports_aliases_and_extended_subwindows():
         "logs",
         "market_chat",
         "notification_center",
-        "trader_agent_monitor",
+        "agent_timeline",
         "risk_settings",
         "application_settings",
         "backtesting_workspace",
@@ -730,7 +734,89 @@ def test_open_agent_timeline_builds_runtime_table_from_controller_feed():
     assert '"confidence": 0.82' in window._agent_timeline_detail_browser.toPlainText()
 
 
-def test_open_trader_agent_monitor_builds_live_decision_view():
+def test_open_agent_timeline_accepts_iso_runtime_timestamps():
+    _app()
+    terminal = _MenuTerminal()
+    now_dt = datetime.now(timezone.utc)
+    terminal.controller = SimpleNamespace(
+        language_code="en",
+        set_language=lambda _code: None,
+        symbols=[],
+        live_agent_runtime_feed=lambda limit=200, symbol=None, kinds=None: [
+            {
+                "timestamp_label": "2026-03-17 10:05:00 UTC",
+                "timestamp": (now_dt - timedelta(seconds=12)).isoformat(),
+                "kind": "memory",
+                "symbol": "EUR/USD",
+                "agent_name": "SignalAgent",
+                "stage": "selected",
+                "strategy_name": "EMA Cross",
+                "timeframe": "4h",
+                "message": "Signal selected for EUR/USD.",
+                "payload": {"confidence": 0.82},
+            },
+            {
+                "timestamp_label": "2026-03-17 10:06:00 UTC",
+                "timestamp": (now_dt - timedelta(seconds=4)).isoformat(),
+                "kind": "bus",
+                "symbol": "EUR/USD",
+                "event_type": "risk_approved",
+                "stage": "",
+                "strategy_name": "EMA Cross",
+                "timeframe": "4h",
+                "message": "Risk approved BUY for EUR/USD.",
+                "payload": {"approved": True},
+            },
+        ],
+        strategy_assignment_state_for_symbol=lambda symbol: {
+            "mode": "single",
+            "active_rows": [{"strategy_name": "Trend Following", "timeframe": "1h"}],
+            "locked": True,
+        },
+        latest_agent_decision_overview_for_symbol=lambda symbol: {
+            "strategy_name": "EMA Cross",
+            "timeframe": "4h",
+            "side": "buy",
+            "approved": True,
+            "final_agent": "RiskAgent",
+            "final_stage": "approved",
+            "reason": "within limits",
+        },
+    )
+    _bind(
+        terminal,
+        "_get_or_create_tool_window",
+        "_is_qt_object_alive",
+        "_selected_agent_timeline_symbol",
+        "_selected_agent_timeline_row",
+        "_agent_timeline_row_status_label",
+        "_agent_timeline_assignment_text",
+        "_agent_timeline_recommendation_text",
+        "_agent_timeline_health_snapshot",
+        "_refresh_agent_timeline_health",
+        "_agent_timeline_anomaly_snapshot",
+        "_agent_timeline_anomaly_fingerprint",
+        "_visible_agent_timeline_anomaly_snapshot",
+        "_refresh_agent_timeline_anomalies",
+        "_refresh_agent_timeline_window",
+        "_refresh_agent_timeline_details",
+        "_replay_selected_agent_timeline_symbol",
+        "_open_selected_agent_timeline_symbol_in_strategy_assigner",
+        "_refresh_selected_agent_timeline_symbol",
+        "_acknowledge_selected_agent_timeline_anomaly",
+        "_open_agent_timeline",
+    )
+
+    window = Terminal._open_agent_timeline(terminal)
+    tree = window._agent_timeline_tree
+
+    assert tree.topLevelItemCount() == 1
+    assert tree.topLevelItem(0).childCount() == 2
+    assert "Approved: 1" in window._agent_timeline_health_counts.text()
+    assert "Changes: 2" in window._agent_timeline_health_recent.text()
+
+
+def test_open_trader_agent_monitor_reuses_agent_runtime_monitor_and_shows_trader_details():
     _app()
     terminal = _MenuTerminal()
     now = time.time()
@@ -758,24 +844,6 @@ def test_open_trader_agent_monitor_builds_live_decision_view():
                 "payload": {"profile_id": "growth", "action": "BUY"},
             },
             {
-                "timestamp_label": "2026-03-17 10:04:00 UTC",
-                "timestamp": now - 20,
-                "kind": "bus",
-                "agent_name": "TraderAgent",
-                "event_type": "DECISION_EVENT",
-                "profile_id": "growth",
-                "symbol": "EUR/USD",
-                "action": "HOLD",
-                "strategy_name": "Trend Following",
-                "confidence": 0.55,
-                "model_probability": 0.61,
-                "reason": "HOLD while the signal stabilizes.",
-                "applied_constraints": ["growth profile"],
-                "votes": {"buy": 0.66, "sell": 0.51},
-                "features": {"rsi": 48.1},
-                "payload": {"profile_id": "growth", "action": "HOLD"},
-            },
-            {
                 "timestamp_label": "2026-03-17 10:02:00 UTC",
                 "timestamp": now - 40,
                 "kind": "bus",
@@ -799,38 +867,152 @@ def test_open_trader_agent_monitor_builds_live_decision_view():
         terminal,
         "_get_or_create_tool_window",
         "_is_qt_object_alive",
-        "_trader_agent_monitor_rows",
-        "_selected_trader_agent_monitor_row",
-        "_populate_trader_agent_monitor_filters",
-        "_refresh_trader_agent_monitor_details",
-        "_refresh_trader_agent_monitor_window",
+        "_selected_agent_timeline_symbol",
+        "_selected_agent_timeline_row",
+        "_agent_timeline_row_status_label",
+        "_populate_agent_timeline_filters",
+        "_agent_timeline_assignment_text",
+        "_agent_timeline_recommendation_text",
+        "_agent_timeline_health_snapshot",
+        "_refresh_agent_timeline_health",
+        "_agent_timeline_anomaly_snapshot",
+        "_agent_timeline_anomaly_fingerprint",
+        "_visible_agent_timeline_anomaly_snapshot",
+        "_refresh_agent_timeline_anomalies",
+        "_refresh_agent_timeline_window",
+        "_refresh_agent_timeline_details",
         "_open_trader_agent_monitor",
         "_open_agent_timeline",
     )
 
     window = Terminal._open_trader_agent_monitor(terminal)
-    tree = window._trader_agent_monitor_tree
+    tree = window._agent_timeline_tree
 
+    assert window.windowTitle() == "Agent Runtime Monitor"
+    assert terminal.detached_tool_windows["agent_timeline"] is window
+    assert "trader_agent_monitor" not in terminal.detached_tool_windows
     assert tree.topLevelItemCount() == 2
-    assert window._trader_agent_monitor_profile_filter.findText("growth") >= 0
-    assert window._trader_agent_monitor_action_filter.findText("BUY") >= 0
-    assert window._trader_agent_monitor_strategy_filter.findText("Trend Following") >= 0
-    assert "BUY: 1" in window._trader_agent_monitor_score_label.text()
-    assert "SKIP: 1" in window._trader_agent_monitor_score_label.text()
-    assert "growth" in window._trader_agent_monitor_profile_label.text()
-
-    eur_group = tree.topLevelItem(0)
-    tree.setCurrentItem(eur_group.child(0))
-    Terminal._refresh_trader_agent_monitor_details(terminal, window)
-    detail_text = window._trader_agent_monitor_detail_browser.toPlainText()
-    assert "Profile: growth" in detail_text
-    assert "Reasoning:" in detail_text
-    assert "growth profile allows the trade" in detail_text
-
-    window._trader_agent_monitor_action_filter.setCurrentText("SKIP")
-    Terminal._refresh_trader_agent_monitor_window(terminal, window)
+    window._agent_timeline_filter.setText("income")
+    Terminal._refresh_agent_timeline_window(terminal, window)
     assert tree.topLevelItemCount() == 1
     assert tree.topLevelItem(0).text(2) == "BTC/USDT"
+
+    window._agent_timeline_filter.clear()
+    Terminal._refresh_agent_timeline_window(terminal, window)
+    btc_group = next(tree.topLevelItem(index) for index in range(tree.topLevelItemCount()) if tree.topLevelItem(index).text(2) == "BTC/USDT")
+    tree.setCurrentItem(btc_group.child(0) or btc_group)
+    Terminal._refresh_agent_timeline_details(terminal, window)
+    detail_text = window._agent_timeline_detail_browser.toPlainText()
+    assert "Agent/Event: TraderAgent" in detail_text
+    assert "Profile: income" in detail_text
+    assert "Action: SKIP" in detail_text
+    assert "Model Probability:" in detail_text
+    assert "income profile requires higher confidence" in detail_text
+    assert "Votes:" in detail_text
+    assert "Features:" in detail_text
+
+
+def test_open_agent_timeline_restores_snapshot_rows_when_live_runtime_feed_is_empty():
+    _app()
+    terminal = _MenuTerminal()
+    terminal.controller = SimpleNamespace(
+        language_code="en",
+        set_language=lambda _code: None,
+        symbols=["EUR/USD"],
+        live_agent_runtime_feed=lambda limit=200, symbol=None, kinds=None: [],
+        decision_timeline_snapshot=lambda symbol=None, limit=12: {
+            "symbol": symbol or "EUR/USD",
+            "summary": "EUR/USD: BUY approved via TraderAgent.",
+            "steps": [
+                {
+                    "timestamp": 100.0,
+                    "timestamp_label": "2026-04-10 10:00:00 UTC",
+                    "agent_name": "SignalAgent",
+                    "stage": "signal",
+                    "status": "signal",
+                    "strategy_name": "EMA Cross",
+                    "timeframe": "1h",
+                    "side": "buy",
+                    "reason": "Momentum breakout aligned with trend.",
+                    "payload": {"confidence": 0.82},
+                },
+                {
+                    "timestamp": 105.0,
+                    "timestamp_label": "2026-04-10 10:00:05 UTC",
+                    "agent_name": "TraderAgent",
+                    "stage": "buy",
+                    "status": "approved",
+                    "strategy_name": "EMA Cross",
+                    "timeframe": "1h",
+                    "side": "buy",
+                    "reason": "BUY because weighted voting favored Trend Following.",
+                    "payload": {
+                        "profile_id": "growth",
+                        "action": "BUY",
+                        "confidence": 0.78,
+                        "model_probability": 0.84,
+                        "votes": {"buy": 1.24, "sell": 0.31},
+                        "features": {"rsi": 31.4},
+                    },
+                },
+            ],
+        },
+        strategy_assignment_state_for_symbol=lambda symbol: {
+            "mode": "single",
+            "active_rows": [{"strategy_name": "EMA Cross", "timeframe": "1h"}],
+            "locked": False,
+        },
+        latest_agent_decision_overview_for_symbol=lambda symbol: {
+            "strategy_name": "EMA Cross",
+            "timeframe": "1h",
+            "side": "buy",
+            "approved": True,
+            "final_agent": "TraderAgent",
+            "final_stage": "buy",
+            "reason": "BUY because weighted voting favored Trend Following.",
+        },
+    )
+    _bind(
+        terminal,
+        "_get_or_create_tool_window",
+        "_is_qt_object_alive",
+        "_agent_timeline_snapshot_rows",
+        "_selected_agent_timeline_symbol",
+        "_selected_agent_timeline_row",
+        "_agent_timeline_row_status_label",
+        "_populate_agent_timeline_filters",
+        "_agent_timeline_assignment_text",
+        "_agent_timeline_recommendation_text",
+        "_agent_timeline_health_snapshot",
+        "_refresh_agent_timeline_health",
+        "_agent_timeline_anomaly_snapshot",
+        "_agent_timeline_anomaly_fingerprint",
+        "_visible_agent_timeline_anomaly_snapshot",
+        "_refresh_agent_timeline_anomalies",
+        "_refresh_agent_timeline_window",
+        "_refresh_agent_timeline_details",
+        "_replay_selected_agent_timeline_symbol",
+        "_open_selected_agent_timeline_symbol_in_strategy_assigner",
+        "_refresh_selected_agent_timeline_symbol",
+        "_acknowledge_selected_agent_timeline_anomaly",
+        "_open_agent_timeline",
+    )
+
+    window = Terminal._open_agent_timeline(terminal)
+    tree = window._agent_timeline_tree
+
+    assert tree.topLevelItemCount() == 1
+    group = tree.topLevelItem(0)
+    assert group.text(2) == "EUR/USD"
+    assert group.childCount() == 2
+    assert "restored decision steps" in window._agent_timeline_summary.text()
+    tree.setCurrentItem(group.child(0))
+    Terminal._refresh_agent_timeline_details(terminal, window)
+    detail_text = window._agent_timeline_detail_browser.toPlainText()
+    assert "Agent/Event: TraderAgent" in detail_text
+    assert "Profile: growth" in detail_text
+    assert "Action: BUY" in detail_text
+    assert "Votes:" in detail_text
 
 
 def test_replay_selected_agent_timeline_symbol_opens_strategy_assigner_for_selected_symbol():
@@ -1385,3 +1567,35 @@ def test_update_symbols_retargets_coinbase_derivative_charts():
     assert chart.symbol == "BTC/USD:USD"
     assert symbol_picker.currentText() == "BTC/USD:USD"
     assert refreshed == ["BTC/USD:USD"]
+
+
+def test_request_active_orderbook_uses_controller_task_scheduler():
+    _app()
+    scheduled = []
+
+    async def _request_orderbook(*, symbol, limit=20):
+        return {"symbol": symbol, "limit": limit}
+
+    async def _request_recent_trades(*, symbol, limit=40):
+        return [{"symbol": symbol, "limit": limit}]
+
+    def _create_task(coro, name):
+        scheduled.append(name)
+        coro.close()
+        return None
+
+    fake = SimpleNamespace(
+        _ui_shutting_down=False,
+        controller=SimpleNamespace(
+            request_orderbook=_request_orderbook,
+            request_recent_trades=_request_recent_trades,
+            _create_task=_create_task,
+        ),
+        logger=SimpleNamespace(debug=lambda *args, **kwargs: None),
+        _current_chart_symbol=lambda: "BTC/USDT",
+    )
+    _bind(fake, "_defer_controller_coroutine", "_request_active_orderbook")
+
+    Terminal._request_active_orderbook(fake)
+
+    assert scheduled == ["request_orderbook:BTC/USDT", "request_recent_trades:BTC/USDT"]

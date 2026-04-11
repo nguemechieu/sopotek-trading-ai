@@ -62,6 +62,11 @@ class OandaBroker(BaseBroker):
             if self.mode in {"paper", "practice", "sandbox"}
             else "https://api-fxtrade.oanda.com"
         )
+        self.stream_base_url = (
+            "https://stream-fxpractice.oanda.com"
+            if self.mode in {"paper", "practice", "sandbox"}
+            else "https://stream-fxtrade.oanda.com"
+        )
         options = dict(getattr(config, "options", None) or {})
         params = dict(getattr(config, "params", None) or {})
         self.candle_price_component = self._normalize_candle_price_component(
@@ -89,72 +94,148 @@ class OandaBroker(BaseBroker):
         return {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
 
     async def _ensure_connected(self):
-        if not self._connected:
+        if not self._session_is_usable():
             await self.connect()
 
-    async def _request(self, method, path, params=None, payload=None):
-        await self._ensure_connected()
+    def _session_is_usable(self):
+        session = self.session
+        if session is None:
+            return False
+        if bool(getattr(session, "closed", False)):
+            return False
+        return bool(self._connected)
 
-        url = f"{self.base_url}{path}"
+    async def _dispose_session(self):
+        session = self.session
+        self.session = None
+        self._connected = False
+        if session is None:
+            return
         try:
-            async with self.session.request(
-                method,
-                url,
-                headers=self._headers,
-                params=params,
-                json=payload,
-            ) as response:
-                try:
-                    response.raise_for_status()
-                except aiohttp.ClientResponseError as exc:
-                    detail = ""
-                    payload_json = {}
+            await session.close()
+        except Exception:
+            self.logger.debug("Failed to close stale Oanda session cleanly.", exc_info=True)
+
+    @staticmethod
+    def _is_stale_transport_error(exc):
+        reconnectable_types = tuple(
+            error_type
+            for error_type in (
+                ConnectionResetError,
+                BrokenPipeError,
+                aiohttp.ServerDisconnectedError,
+                getattr(aiohttp, "ClientConnectionResetError", None),
+                getattr(aiohttp, "ClientOSError", None),
+            )
+            if error_type is not None
+        )
+        if reconnectable_types and isinstance(exc, reconnectable_types):
+            return True
+
+        message = str(exc or "").strip().lower()
+        return any(
+            token in message
+            for token in (
+                "cannot write to closing transport",
+                "session is closed",
+                "connector is closed",
+                "server disconnected",
+            )
+        )
+
+    async def _request(self, method, path, params=None, payload=None):
+        url = f"{self.base_url}{path}"
+        for attempt in range(2):
+            await self._ensure_connected()
+            try:
+                async with self.session.request(
+                    method,
+                    url,
+                    headers=self._headers,
+                    params=params,
+                    json=payload,
+                ) as response:
                     try:
-                        payload_text = await response.text()
-                        detail = payload_text.strip()
-                        if detail:
-                            payload_json = json.loads(detail)
-                    except Exception:
+                        response.raise_for_status()
+                    except aiohttp.ClientResponseError as exc:
                         detail = ""
                         payload_json = {}
+                        try:
+                            payload_text = await response.text()
+                            detail = payload_text.strip()
+                            if detail:
+                                payload_json = json.loads(detail)
+                        except Exception:
+                            detail = ""
+                            payload_json = {}
 
-                    if isinstance(payload_json, dict):
-                        detail_parts = []
-                        error_message = payload_json.get("errorMessage") or payload_json.get("message")
-                        reject_transaction = payload_json.get("orderRejectTransaction") or {}
-                        reject_reason = ""
-                        if isinstance(reject_transaction, dict):
-                            reject_reason = (
-                                reject_transaction.get("rejectReason")
-                                or reject_transaction.get("reason")
-                                or ""
-                            )
-                        if error_message:
-                            detail_parts.append(str(error_message).strip())
-                        if reject_reason:
-                            detail_parts.append(str(reject_reason).strip())
-                        if detail_parts:
-                            detail = " | ".join(part for part in detail_parts if part)
+                        if isinstance(payload_json, dict):
+                            detail_parts = []
+                            error_message = payload_json.get("errorMessage") or payload_json.get("message")
+                            reject_transaction = payload_json.get("orderRejectTransaction") or {}
+                            reject_reason = ""
+                            if isinstance(reject_transaction, dict):
+                                reject_reason = (
+                                    reject_transaction.get("rejectReason")
+                                    or reject_transaction.get("reason")
+                                    or ""
+                                )
+                            if error_message:
+                                detail_parts.append(str(error_message).strip())
+                            if reject_reason:
+                                detail_parts.append(str(reject_reason).strip())
+                            if detail_parts:
+                                detail = " | ".join(part for part in detail_parts if part)
 
-                    message = f"{exc.status} {exc.message}"
-                    if detail:
-                        message = f"{message}: {detail}"
-                    raise RuntimeError(message) from exc
-                return await response.json()
-        except aiohttp.ClientConnectorDNSError as exc:
-            raise RuntimeError(
-                "Network DNS lookup failed while connecting to Oanda. "
-                "Check your internet connection, DNS settings, VPN, proxy, or firewall."
-            ) from exc
-        except (aiohttp.ClientConnectorError, asyncio.TimeoutError) as exc:
-            raise RuntimeError(
-                f"Network connection failed while connecting to Oanda: {exc}"
-            ) from exc
+                        message = f"{exc.status} {exc.message}"
+                        if detail:
+                            message = f"{message}: {detail}"
+                        raise RuntimeError(message) from exc
+                    return await response.json()
+            except Exception as exc:
+                if attempt == 0 and self._is_stale_transport_error(exc):
+                    self.logger.warning(
+                        "Oanda session became stale during %s %s; rebuilding the HTTP session and retrying once.",
+                        method,
+                        path,
+                    )
+                    await self._dispose_session()
+                    continue
+                if isinstance(exc, aiohttp.ClientConnectorDNSError):
+                    raise RuntimeError(
+                        "Network DNS lookup failed while connecting to Oanda. "
+                        "Check your internet connection, DNS settings, VPN, proxy, or firewall."
+                    ) from exc
+                if isinstance(exc, (aiohttp.ClientConnectorError, asyncio.TimeoutError)):
+                    raise RuntimeError(
+                        f"Network connection failed while connecting to Oanda: {exc}"
+                    ) from exc
+                raise
 
     def _normalize_symbol(self, symbol):
         if not symbol:
             return symbol
         return str(symbol).replace("/", "_").upper()
+
+    @staticmethod
+    def _display_symbol(symbol):
+        if not symbol:
+            return symbol
+        return str(symbol).strip().upper().replace("_", "/").replace("-", "/")
+
+    @classmethod
+    def _instrument_display_name(cls, item):
+        if isinstance(item, dict):
+            candidate = (
+                item.get("displayName")
+                or item.get("display_name")
+                or item.get("name")
+                or item.get("instrument")
+                or item.get("symbol")
+            )
+        else:
+            candidate = item
+        return cls._display_symbol(candidate)
 
     def _normalize_granularity(self, timeframe):
         key = str(timeframe or "1h").lower()
@@ -244,6 +325,68 @@ class OandaBroker(BaseBroker):
             if price.get("instrument") == target:
                 return price
         return prices[0] if prices else {}
+
+    @classmethod
+    def pricing_stream_payload_to_tick(cls, payload, *, requested_symbol=None):
+        if not isinstance(payload, dict):
+            return None
+
+        payload_type = str(payload.get("type") or "").strip().upper()
+        if payload_type and payload_type != "PRICE":
+            return None
+
+        instrument = str(payload.get("instrument") or cls._normalize_symbol(requested_symbol) or "").strip().upper()
+        if not instrument:
+            return None
+
+        bids = list(payload.get("bids") or [])
+        asks = list(payload.get("asks") or [])
+
+        def _price(levels, fallback_key):
+            if levels:
+                try:
+                    return float(levels[0].get("price"))
+                except Exception:
+                    pass
+            try:
+                fallback = payload.get(fallback_key)
+                return float(fallback) if fallback is not None else None
+            except Exception:
+                return None
+
+        bid = _price(bids, "closeoutBid")
+        ask = _price(asks, "closeoutAsk")
+        if bid is None and ask is None:
+            return None
+
+        midpoint = ((bid + ask) / 2.0) if bid is not None and ask is not None else (ask if ask is not None else bid)
+        last = ask if ask is not None else bid
+        symbol = cls._display_symbol(requested_symbol or instrument)
+
+        tick = {
+            "symbol": symbol,
+            "instrument": instrument,
+            "bid": bid,
+            "ask": ask,
+            "price": midpoint,
+            "last": last,
+            "tradeable": payload.get("tradeable"),
+            "status": payload.get("status"),
+            "timestamp": payload.get("time"),
+            "raw": payload,
+        }
+
+        if bids:
+            try:
+                tick["bid_size"] = float(bids[0].get("liquidity", 0) or 0)
+            except Exception:
+                pass
+        if asks:
+            try:
+                tick["ask_size"] = float(asks[0].get("liquidity", 0) or 0)
+            except Exception:
+                pass
+        return tick
 
     async def _ensure_instrument_details(self):
         if self._instrument_details:
@@ -372,7 +515,8 @@ class OandaBroker(BaseBroker):
 
         return {
             "id": str(order.get("id") or fill.get("orderID") or payload.get("id") or ""),
-            "symbol": instrument,
+            "symbol": self._display_symbol(instrument),
+            "instrument": instrument,
             "side": str(side).lower(),
             "type": order_type,
             "status": status,
@@ -404,7 +548,8 @@ class OandaBroker(BaseBroker):
         signed_units = units if leg_side == "long" else -units
 
         return {
-            "symbol": instrument,
+            "symbol": self._display_symbol(instrument),
+            "instrument": instrument,
             "position_id": f"{instrument}:{leg_side}",
             "position_key": f"{instrument}:{leg_side}",
             "position_side": leg_side,
@@ -431,8 +576,10 @@ class OandaBroker(BaseBroker):
     # ===============================
 
     async def connect(self):
-        if self._connected:
+        if self._session_is_usable():
             return True
+
+        await self._dispose_session()
 
         resolver = aiohttp.ThreadedResolver()
         connector = aiohttp.TCPConnector(
@@ -446,10 +593,7 @@ class OandaBroker(BaseBroker):
         return True
 
     async def close(self):
-        if self.session is not None:
-            await self.session.close()
-        self.session = None
-        self._connected = False
+        await self._dispose_session()
 
     # ===============================
     # MARKET DATA
@@ -469,12 +613,81 @@ class OandaBroker(BaseBroker):
         ask = float(asks[0]["price"]) if asks else None
 
         return {
-            "symbol": instrument,
+            "symbol": self._display_symbol(symbol),
+            "instrument": instrument,
             "bid": bid,
             "ask": ask,
             "last": ask or bid,
             "raw": entry,
         }
+
+    async def stream_ticks(self, symbol):
+        instrument = self._normalize_symbol(symbol)
+        url = f"{self.stream_base_url}/v3/accounts/{self.account_id}/pricing/stream"
+        params = {"instruments": instrument}
+
+        reconnectable_errors = (
+            asyncio.TimeoutError,
+            aiohttp.ClientConnectionError,
+            aiohttp.ClientPayloadError,
+            aiohttp.ServerDisconnectedError,
+        )
+
+        while True:
+            timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=None)
+            session = aiohttp.ClientSession(timeout=timeout)
+            try:
+                async with session.request("GET", url, headers=self._headers, params=params) as response:
+                    try:
+                        response.raise_for_status()
+                    except aiohttp.ClientResponseError as exc:
+                        detail = ""
+                        try:
+                            detail = (await response.text()).strip()
+                        except Exception:
+                            detail = ""
+                        message = f"{exc.status} {exc.message}"
+                        if detail:
+                            message = f"{message}: {detail}"
+                        raise RuntimeError(message) from exc
+
+                    async for raw_line in response.content:
+                        line = raw_line.decode("utf-8", errors="ignore").strip()
+                        if not line:
+                            continue
+                        try:
+                            payload = json.loads(line)
+                        except json.JSONDecodeError:
+                            self.logger.debug("Skipping malformed Oanda pricing stream payload: %s", line)
+                            continue
+                        tick = self.pricing_stream_payload_to_tick(payload, requested_symbol=symbol)
+                        if tick is not None:
+                            yield tick
+            except asyncio.CancelledError:
+                raise
+            except aiohttp.ClientConnectorDNSError as exc:
+                raise RuntimeError(
+                    "Network DNS lookup failed while connecting to the Oanda pricing stream. "
+                    "Check your internet connection, DNS settings, VPN, proxy, or firewall."
+                ) from exc
+            except reconnectable_errors as exc:
+                self.logger.warning(
+                    "Oanda pricing stream disconnected for %s; retrying shortly: %s",
+                    instrument,
+                    exc,
+                )
+                await asyncio.sleep(1.0)
+            except Exception as exc:
+                if self._is_stale_transport_error(exc):
+                    self.logger.warning(
+                        "Oanda pricing stream transport became stale for %s; retrying shortly.",
+                        instrument,
+                    )
+                    await asyncio.sleep(1.0)
+                    continue
+                raise
+            finally:
+                await session.close()
 
     async def fetch_orderbook(self, symbol, limit=50):
         ticker = await self.fetch_ticker(symbol)
@@ -487,7 +700,12 @@ class OandaBroker(BaseBroker):
         for level in raw.get("asks", [])[:limit]:
             asks.append([float(level["price"]), float(level.get("liquidity", 0) or 0)])
 
-        return {"symbol": self._normalize_symbol(symbol), "bids": bids, "asks": asks}
+        return {
+            "symbol": self._display_symbol(symbol),
+            "instrument": self._normalize_symbol(symbol),
+            "bids": bids,
+            "asks": asks,
+        }
 
     async def _fetch_ohlcv_with_component(self, instrument, granularity, requested, *, price_component, start_boundary=None, end_boundary=None):
         collected = []
@@ -699,7 +917,12 @@ class OandaBroker(BaseBroker):
             for item in instruments
             if isinstance(item, dict) and item.get("name")
         }
-        return [item.get("name") for item in instruments if item.get("name")]
+        normalized = []
+        for item in instruments:
+            display_name = self._instrument_display_name(item)
+            if display_name and display_name not in normalized:
+                normalized.append(display_name)
+        return normalized
 
     async def fetch_symbols(self):
         return await self.fetch_symbol()
@@ -873,7 +1096,7 @@ class OandaBroker(BaseBroker):
         normalized = self._normalize_order_payload({"order": order}, fallback_symbol=symbol)
         if symbol is None:
             return normalized
-        return normalized if normalized.get("symbol") == self._normalize_symbol(symbol) else None
+        return normalized if normalized.get("instrument") == self._normalize_symbol(symbol) else None
 
     async def create_order(
         self,

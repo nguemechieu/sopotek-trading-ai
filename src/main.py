@@ -52,7 +52,38 @@ def _load_qeventloop() -> type[Any]:
         The QEventLoop class from the qasync module.
     """
     qasync_module = importlib.import_module("qasync")
+    _patch_qasync_duplicate_timer_keyerror(qasync_module)
     return qasync_module.QEventLoop
+
+
+def _patch_qasync_duplicate_timer_keyerror(qasync_module: Any) -> bool:
+    """Guard qasync against duplicate timer callbacks raising ``KeyError``.
+
+    On some Windows/Python combinations, qasync can receive a duplicate
+    ``timerEvent`` after its internal callback entry has already been removed.
+    That failure is noisy and can destabilize lightweight UI actions. We keep
+    the original behavior for everything else and only swallow that specific
+    missing-callback case.
+    """
+    timer_cls = getattr(qasync_module, "_SimpleTimer", None)
+    timer_event = getattr(timer_cls, "timerEvent", None)
+    if timer_cls is None or not callable(timer_event):
+        return False
+    if getattr(timer_event, "_sopotek_duplicate_timer_guard", False):
+        return False
+
+    def guarded_timer_event(self: Any, event: Any) -> Any:
+        try:
+            return timer_event(self, event)
+        except KeyError:
+            with contextlib.suppress(Exception):
+                if event is not None and hasattr(event, "accept"):
+                    event.accept()
+            return None
+
+    guarded_timer_event._sopotek_duplicate_timer_guard = True  # type: ignore[attr-defined]
+    timer_cls.timerEvent = guarded_timer_event
+    return True
 
 
 def _load_app_controller() -> type[Any]:

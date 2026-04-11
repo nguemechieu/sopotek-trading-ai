@@ -18,6 +18,11 @@ CORE_STRATEGY_NAMES = (
     "Volatility Breakout",
     "MACD Trend",
     "Range Fade",
+    "Donchian Trend",
+    "Bollinger Squeeze",
+    "ATR Compression Breakout",
+    "RSI Failure Swing",
+    "Volume Spike Reversal",
     "ML Model",
 )
 
@@ -73,6 +78,17 @@ BASE_STRATEGY_ALIASES = {
     "MACD TREND": "MACD Trend",
     "RANGE": "Range Fade",
     "RANGE FADE": "Range Fade",
+    "DONCHIAN": "Donchian Trend",
+    "DONCHIAN TREND": "Donchian Trend",
+    "BOLLINGER": "Bollinger Squeeze",
+    "BOLLINGER SQUEEZE": "Bollinger Squeeze",
+    "ATR COMPRESSION": "ATR Compression Breakout",
+    "ATR_COMPRESSION": "ATR Compression Breakout",
+    "ATR COMPRESSION BREAKOUT": "ATR Compression Breakout",
+    "RSI FAILURE": "RSI Failure Swing",
+    "RSI FAILURE SWING": "RSI Failure Swing",
+    "VOLUME SPIKE": "Volume Spike Reversal",
+    "VOLUME SPIKE REVERSAL": "Volume Spike Reversal",
     "RSI_MEAN_REVERSION": "Mean Reversion",
     "AI": "AI Hybrid",
     "AI HYBRID": "AI Hybrid",
@@ -275,6 +291,7 @@ class Strategy:
         row = df.iloc[-1]
         prev_row = df.iloc[-2] if len(df) > 1 else row
         close_price = float(row["close"])
+        prev_close = float(prev_row.get("close", close_price) or close_price)
 
         # Trend
         trend_up = row["ema_fast"] > row["ema_slow"]
@@ -366,6 +383,103 @@ class Strategy:
                 return self._signal("buy", 0.57, "Weak trend range fade from lower volatility band", price=close_price, row=row)
             if trend_strength <= 0.003 and band_position >= 0.92 and rsi >= 60:
                 return self._signal("sell", 0.57, "Weak trend range fade from upper volatility band", price=close_price, row=row)
+
+        elif selected_name == "Donchian Trend":
+            breakout_high = row.get("breakout_high")
+            breakout_low = row.get("breakout_low")
+            volume_ratio = float(row.get("volume_ratio", 1.0) or 1.0)
+            momentum = float(row.get("momentum", 0.0) or 0.0)
+            if pd.notna(breakout_high) and trend_up and close_price > float(breakout_high) and volume_ratio >= 0.95 and momentum >= 0:
+                return self._signal("buy", 0.65, "Donchian breakout aligned with trend strength and participation", price=close_price, row=row)
+            if pd.notna(breakout_low) and trend_down and close_price < float(breakout_low) and volume_ratio >= 0.95 and momentum <= 0:
+                return self._signal("sell", 0.65, "Donchian breakdown aligned with trend strength and participation", price=close_price, row=row)
+
+        elif selected_name == "Bollinger Squeeze":
+            breakout_high = row.get("breakout_high")
+            breakout_low = row.get("breakout_low")
+            volume_ratio = float(row.get("volume_ratio", 1.0) or 1.0)
+            momentum = float(row.get("momentum", 0.0) or 0.0)
+            band_position = float(row.get("band_position", 0.5) or 0.5)
+            prev_close_safe = prev_close if prev_close else 1.0
+            prev_band_width_pct = max(
+                0.0,
+                (
+                    float(prev_row.get("upper_band", close_price) or close_price)
+                    - float(prev_row.get("lower_band", close_price) or close_price)
+                ) / prev_close_safe,
+            )
+            if (
+                pd.notna(breakout_high)
+                and prev_band_width_pct <= 0.05
+                and close_price > float(breakout_high)
+                and volume_ratio >= 1.05
+                and momentum > 0
+                and band_position >= 0.80
+            ):
+                return self._signal("buy", 0.66, "Bollinger squeeze expansion resolved upward with volume confirmation", price=close_price, row=row)
+            if (
+                pd.notna(breakout_low)
+                and prev_band_width_pct <= 0.05
+                and close_price < float(breakout_low)
+                and volume_ratio >= 1.05
+                and momentum < 0
+                and band_position <= 0.20
+            ):
+                return self._signal("sell", 0.66, "Bollinger squeeze expansion resolved downward with volume confirmation", price=close_price, row=row)
+
+        elif selected_name == "ATR Compression Breakout":
+            breakout_high = row.get("breakout_high")
+            breakout_low = row.get("breakout_low")
+            atr_pct = float(row.get("atr_pct", 0.0) or 0.0)
+            prev_atr_pct = float(prev_row.get("atr_pct", atr_pct) or atr_pct)
+            volume_ratio = float(row.get("volume_ratio", 1.0) or 1.0)
+            volatility_expanding = prev_atr_pct > 0 and atr_pct >= (prev_atr_pct * 1.15)
+            if (
+                pd.notna(breakout_high)
+                and prev_atr_pct <= 0.02
+                and volatility_expanding
+                and close_price > float(breakout_high)
+                and volume_ratio >= 1.05
+            ):
+                return self._signal("buy", 0.68, "ATR compression released into bullish breakout expansion", price=close_price, row=row)
+            if (
+                pd.notna(breakout_low)
+                and prev_atr_pct <= 0.02
+                and volatility_expanding
+                and close_price < float(breakout_low)
+                and volume_ratio >= 1.05
+            ):
+                return self._signal("sell", 0.68, "ATR compression released into bearish breakout expansion", price=close_price, row=row)
+
+        elif selected_name == "RSI Failure Swing":
+            prev_rsi = float(prev_row.get("rsi", rsi) or rsi)
+            prev_lower_band = float(prev_row.get("lower_band", close_price) or close_price)
+            prev_upper_band = float(prev_row.get("upper_band", close_price) or close_price)
+            if (
+                prev_close <= prev_lower_band
+                and prev_rsi <= self.oversold_threshold
+                and rsi >= min(55.0, self.oversold_threshold + 6)
+                and rsi > prev_rsi
+                and close_price >= float(row["ema_fast"])
+            ):
+                return self._signal("buy", 0.60, "RSI failure swing reclaimed from oversold rejection", price=close_price, row=row)
+            if (
+                prev_close >= prev_upper_band
+                and prev_rsi >= self.overbought_threshold
+                and rsi <= max(45.0, self.overbought_threshold - 6)
+                and rsi < prev_rsi
+                and close_price <= float(row["ema_fast"])
+            ):
+                return self._signal("sell", 0.60, "RSI failure swing rolled over from overbought rejection", price=close_price, row=row)
+
+        elif selected_name == "Volume Spike Reversal":
+            volume_ratio = float(row.get("volume_ratio", 1.0) or 1.0)
+            band_position = float(row.get("band_position", 0.5) or 0.5)
+            trend_strength = float(row.get("trend_strength", 0.0) or 0.0)
+            if volume_ratio >= 1.35 and band_position <= 0.12 and trend_strength <= 0.012 and rsi <= 38 and close_price > prev_close:
+                return self._signal("buy", 0.59, "Volume spike reversal from lower band exhaustion", price=close_price, row=row)
+            if volume_ratio >= 1.35 and band_position >= 0.88 and trend_strength <= 0.012 and rsi >= 62 and close_price < prev_close:
+                return self._signal("sell", 0.59, "Volume spike reversal from upper band exhaustion", price=close_price, row=row)
 
         return None
 

@@ -1,0 +1,76 @@
+name: Code Quality
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: code-quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QT_QPA_PLATFORM: offscreen
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash -el {0}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Conda environment
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: sopotek-trading-ai
+          auto-activate-base: false
+          channels: conda-forge,defaults
+          environment-file: environment.yml
+          python-version: "3.10"
+
+      - name: Prepare report directories
+        run: |
+          mkdir -p reports/code-quality
+          mkdir -p tmp/pytest-cache
+
+      - name: Verify quality toolchain
+        run: |
+          python --version
+          python -m pip --version
+          python -m flake8 --version
+          python -m black --version
+          python -m isort --version-number
+          python -m mypy --version
+          python -m pytest --version
+          python -m bandit --version
+
+      - name: Check formatting
+        run: bash tools/format.sh --check
+
+      - name: Run linting
+        run: bash tools/lint.sh
+
+      - name: Run type checking
+        run: bash tools/type_check.sh
+
+      - name: Run tests with coverage gate
+        run: bash tools/test.sh
+
+      - name: Run security scan
+        run: bash tools/security_scan.sh
+
+      - name: Upload code quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-quality-reports
+          if-no-files-found: warn
+          path: reports/code-quality/

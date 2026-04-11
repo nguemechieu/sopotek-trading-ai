@@ -178,7 +178,16 @@ def test_broker_factory_supports_derivatives_exchanges():
     shared_risk = RiskConfig()
     shared_system = SystemConfig()
 
-    schwab_config = AppConfig(broker=BrokerConfig(type="options", exchange="schwab"), risk=shared_risk, system=shared_system)
+    schwab_config = AppConfig(
+        broker=BrokerConfig(
+            type="options",
+            exchange="schwab",
+            api_key="client-id",
+            password="http://127.0.0.1:8182/callback",
+        ),
+        risk=shared_risk,
+        system=shared_system,
+    )
     ibkr_config = AppConfig(broker=BrokerConfig(type="futures", exchange="ibkr"), risk=shared_risk, system=shared_system)
     amp_config = AppConfig(broker=BrokerConfig(type="futures", exchange="amp"), risk=shared_risk, system=shared_system)
     tradovate_config = AppConfig(broker=BrokerConfig(type="futures", exchange="tradovate"), risk=shared_risk, system=shared_system)

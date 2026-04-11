@@ -7,16 +7,13 @@ __pycache__/
 .coverage
 coverage.xml
 htmlcov/
+reports/code-quality/
+tmp/pytest-basetemp*/
+tmp/pytest-cache/
 build/
 dist/
-.deps/
-.deps_legacy/
-.deps_ui/
-.codex-clean-push/
-.codex-publish-clean-*/
 
 src/logs/*.log
-logs/
 data/
 src/Sopotek_Screenshot_*.png
 src/reports/*.csv

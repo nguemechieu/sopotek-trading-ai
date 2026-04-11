@@ -156,9 +156,16 @@ def open_text_window(terminal, key, title, html, width=760, height=520):
     if browser is None:
         browser = QTextBrowser()
         browser.setOpenExternalLinks(True)
-        browser.setStyleSheet(
-            "QTextBrowser { background-color: #0b1220; color: #e6edf7; padding: 16px; }"
-        )
+        browser_style = None
+        browser_style_getter = getattr(terminal, "_tool_window_text_browser_style", None)
+        if callable(browser_style_getter):
+            try:
+                browser_style = browser_style_getter()
+            except Exception:
+                browser_style = None
+        if not isinstance(browser_style, str) or not browser_style.strip():
+            browser_style = "QTextBrowser { background-color: #0b1220; color: #e6edf7; padding: 16px; }"
+        browser.setStyleSheet(browser_style)
         window.setCentralWidget(browser)
         window._browser = browser
 

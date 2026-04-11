@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping, Optional
 
@@ -62,7 +62,7 @@ class Order:
     account_id: Optional[str] = None
     strategy_name: Optional[str] = None
     execution_strategy: Optional[str] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     legs: list[OrderLeg] = field(default_factory=list)
     params: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)

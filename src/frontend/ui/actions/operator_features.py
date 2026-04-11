@@ -1,6 +1,7 @@
 import json
+import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, cast
 
 from PySide6.QtCore import Qt
@@ -35,6 +36,7 @@ WORKSPACE_DOCKS = (
     "strategy_debug_dock",
     "risk_heatmap_dock",
     "ai_signal_dock",
+    "live_agent_timeline_dock",
     "system_console_dock",
     "system_status_dock",
 )
@@ -79,10 +81,12 @@ TOOL_WINDOW_ALIASES = {
     "system_logs": "logs",
     "trade_checklist": "trade_checklist",
     "trade_journal_review": "trade_journal_review",
-    "trader_agent": "trader_agent_monitor",
-    "traderagent": "trader_agent_monitor",
-    "trader_agent_monitor": "trader_agent_monitor",
-    "trader_agent_timeline": "trader_agent_monitor",
+    # TraderAgent now shares the same detached runtime window as the broader
+    # agent monitor so saved layouts and aliases all converge on one live view.
+    "trader_agent": "agent_timeline",
+    "traderagent": "agent_timeline",
+    "trader_agent_monitor": "agent_timeline",
+    "trader_agent_timeline": "agent_timeline",
     "trade_review": "trade_review",
     "trade_recommendations": "trade_recommendations",
 }
@@ -115,12 +119,46 @@ PANEL_ACTION_SPECS = (
     ("action_trade_log_panel", "Trade Log", "trade_log_dock"),
     ("action_orderbook_panel", "Order Book", "orderbook_dock"),
     ("action_ai_signal_panel", "AI Signal Monitor", "ai_signal_dock"),
+    ("action_live_agent_timeline_panel", "Agent Runtime Monitor", "live_agent_timeline_dock"),
     ("action_risk_heatmap_panel", "Risk Heatmap", "risk_heatmap_dock"),
     ("action_strategy_scorecard_panel", "Strategy Scorecard", "strategy_scorecard_dock"),
     ("action_strategy_debug_panel", "Strategy Debug", "strategy_debug_dock"),
     ("action_system_console_panel", "System Console", "system_console_dock"),
     ("action_system_status_panel", "System Status", "system_status_dock"),
 )
+
+
+def _runtime_timestamp_seconds(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric > 1_000_000_000_000:
+            return numeric / 1000.0
+        return numeric
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        numeric = float(text)
+    except (TypeError, ValueError):
+        numeric = None
+    if numeric is not None:
+        if numeric > 1_000_000_000_000:
+            return numeric / 1000.0
+        return numeric
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.timestamp()
 
 
 def install_terminal_operator_features(Terminal):
@@ -335,7 +373,14 @@ def install_terminal_operator_features(Terminal):
                         return normalized
                 except Exception:
                     pass
-            return text.upper().replace("-", "/").replace("_", "/")
+            upper_text = text.upper()
+            if (
+                "PERP" in upper_text
+                or re.fullmatch(r"[A-Z0-9]+-\d{2}[A-Z]{3}\d{2}-[A-Z0-9]+", upper_text)
+                or re.fullmatch(r"[A-Z0-9]+-[A-Z0-9]+-\d{8}", upper_text)
+            ):
+                return upper_text
+            return upper_text.replace("-", "/").replace("_", "/")
 
         def normalize_symbols(values):
             normalized = []
@@ -510,6 +555,11 @@ def install_terminal_operator_features(Terminal):
             rows = []
         else:
             rows = list(controller.live_agent_runtime_feed(limit=300) or [])
+        row_source_label = "live agent events"
+        if not rows:
+            rows = list(self._agent_timeline_snapshot_rows(limit=180) or [])
+            if rows:
+                row_source_label = "restored decision steps"
 
         pinned_symbol = str(getattr(window, "_agent_timeline_pinned_symbol", "") or "").strip().upper().replace("-", "/").replace("_", "/")
         if pinned_symbol:
@@ -545,6 +595,8 @@ def install_terminal_operator_features(Terminal):
                         "agent_name",
                         "event_type",
                         "stage",
+                        "profile_id",
+                        "action",
                         "strategy_name",
                         "timeframe",
                         "message",
@@ -578,13 +630,14 @@ def install_terminal_operator_features(Terminal):
             symbol_rows = grouped_rows.get(symbol, [])
             latest = symbol_rows[0] if symbol_rows else {}
             latest_message = str(latest.get("message") or latest.get("reason") or "").strip()
+            latest_stage = str(latest.get("stage") or latest.get("action") or "").strip()
             group_item = QTreeWidgetItem(
                 [
                     str(latest.get("timestamp_label") or "-"),
                     "Symbol",
                     symbol,
                     f"{len(symbol_rows)} events",
-                    str(latest.get("stage") or "").strip(),
+                    latest_stage,
                     str(latest.get("strategy_name") or "").strip(),
                     str(latest.get("timeframe") or "").strip(),
                     latest_message,
@@ -604,13 +657,14 @@ def install_terminal_operator_features(Terminal):
             for row in symbol_rows:
                 actor = str(row.get("agent_name") or row.get("event_type") or "Agent").strip() or "Agent"
                 message = str(row.get("message") or row.get("reason") or "").strip()
+                stage_text = str(row.get("stage") or row.get("action") or "").strip()
                 child = QTreeWidgetItem(
                     [
                         str(row.get("timestamp_label") or "-"),
                         str(row.get("kind") or "").strip().title() or "Runtime",
                         symbol,
                         actor,
-                        str(row.get("stage") or "").strip(),
+                        stage_text,
                         str(row.get("strategy_name") or "").strip(),
                         str(row.get("timeframe") or "").strip(),
                         message,
@@ -640,7 +694,7 @@ def install_terminal_operator_features(Terminal):
             active_filters.append(selected_strategy)
         suffix = f" | Filters: {', '.join(active_filters)}" if active_filters else ""
         summary.setText(
-            f"{sum(len(grouped_rows[symbol]) for symbol in ordered_symbols)} live agent events across {len(ordered_symbols)} symbols.{suffix}"
+            f"{sum(len(grouped_rows[symbol]) for symbol in ordered_symbols)} {row_source_label} across {len(ordered_symbols)} symbols.{suffix}"
         )
         if pin_btn is not None:
             pin_btn.setText(f"Unpin {pinned_symbol}" if pinned_symbol else "Pin Selected Symbol")
@@ -649,6 +703,133 @@ def install_terminal_operator_features(Terminal):
         self._refresh_agent_timeline_health(window, rows)
         self._refresh_agent_timeline_anomalies(window, rows)
         self._refresh_agent_timeline_details(window)
+
+    def agent_timeline_snapshot_rows(self, limit=120):
+        controller = getattr(self, "controller", None)
+        snapshot_resolver = getattr(controller, "decision_timeline_snapshot", None) if controller is not None else None
+        if not callable(snapshot_resolver):
+            return []
+
+        def normalize_symbol(symbol):
+            return str(symbol or "").strip().upper().replace("-", "/").replace("_", "/")
+
+        candidates = []
+        seen_candidates = set()
+
+        def append_candidate(symbol):
+            normalized = normalize_symbol(symbol)
+            if not normalized or normalized in seen_candidates:
+                return
+            seen_candidates.add(normalized)
+            candidates.append(normalized)
+
+        symbol_resolver = getattr(controller, "get_active_autotrade_symbols", None) if controller is not None else None
+        if callable(symbol_resolver):
+            try:
+                for symbol in list(symbol_resolver() or []):
+                    append_candidate(symbol)
+            except Exception:
+                pass
+
+        for symbol in list(getattr(controller, "symbols", []) or []):
+            append_candidate(symbol)
+
+        raw_assignments = getattr(controller, "symbol_strategy_assignments", None)
+        if isinstance(raw_assignments, dict):
+            for symbol in raw_assignments.keys():
+                append_candidate(symbol)
+
+        current_symbol_resolver = getattr(self, "_current_chart_symbol", None)
+        if callable(current_symbol_resolver):
+            try:
+                current_symbol = normalize_symbol(current_symbol_resolver())
+            except Exception:
+                current_symbol = ""
+            if current_symbol and (not candidates or current_symbol in seen_candidates):
+                append_candidate(current_symbol)
+
+        if not candidates:
+            candidates = [""]
+
+        rows = []
+        seen_rows = set()
+        max_symbols = max(1, min(8, int(limit or 120)))
+        for candidate in candidates[:max_symbols]:
+            try:
+                snapshot = dict(snapshot_resolver(symbol=candidate or None, limit=12) or {})
+            except TypeError:
+                snapshot = dict(snapshot_resolver(candidate or None) or {})
+            except Exception:
+                snapshot = {}
+            steps = list(snapshot.get("steps") or [])
+            if not steps:
+                continue
+
+            snapshot_symbol = normalize_symbol(snapshot.get("symbol") or candidate)
+            summary_text = str(snapshot.get("summary") or "").strip()
+            for step in reversed(steps):
+                payload = dict(step.get("payload") or {}) if isinstance(step.get("payload"), dict) else {}
+                status = str(step.get("status") or "").strip().lower()
+                approved = payload.get("approved")
+                if approved is None:
+                    if status == "approved":
+                        approved = True
+                    elif status == "rejected":
+                        approved = False
+                action = str(payload.get("action") or payload.get("decision") or "").strip().upper()
+                fingerprint = (
+                    snapshot_symbol,
+                    str(step.get("decision_id") or payload.get("decision_id") or "").strip(),
+                    str(step.get("agent_name") or "").strip(),
+                    str(step.get("stage") or "").strip(),
+                    str(step.get("timestamp_label") or "").strip(),
+                )
+                if fingerprint in seen_rows:
+                    continue
+                seen_rows.add(fingerprint)
+                rows.append(
+                    {
+                        "kind": "snapshot",
+                        "symbol": snapshot_symbol,
+                        "agent_name": str(step.get("agent_name") or "").strip(),
+                        "event_type": str(step.get("status") or "").strip(),
+                        "stage": str(step.get("stage") or step.get("status") or "").strip(),
+                        "strategy_name": str(step.get("strategy_name") or payload.get("strategy_name") or payload.get("selected_strategy") or "").strip(),
+                        "timeframe": str(step.get("timeframe") or payload.get("timeframe") or "").strip(),
+                        "decision_id": str(step.get("decision_id") or payload.get("decision_id") or "").strip(),
+                        "timestamp": step.get("timestamp"),
+                        "timestamp_label": str(step.get("timestamp_label") or "").strip(),
+                        "message": str(step.get("reason") or payload.get("reason") or summary_text).strip(),
+                        "reason": str(step.get("reason") or payload.get("reason") or "").strip(),
+                        "side": str(step.get("side") or payload.get("side") or "").strip().lower(),
+                        "approved": approved,
+                        "profile_id": str(payload.get("profile_id") or "").strip(),
+                        "action": action,
+                        "confidence": payload.get("confidence", step.get("confidence")),
+                        "model_probability": payload.get("model_probability"),
+                        "quantity": payload.get("quantity"),
+                        "price": payload.get("price"),
+                        "applied_constraints": list(payload.get("applied_constraints") or []) if isinstance(payload.get("applied_constraints"), (list, tuple, set)) else [],
+                        "votes": dict(payload.get("votes") or {}) if isinstance(payload.get("votes"), dict) else {},
+                        "features": dict(payload.get("features") or {}) if isinstance(payload.get("features"), dict) else {},
+                        "metadata": dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {},
+                        "payload": payload,
+                        "source": "snapshot",
+                    }
+                )
+                if len(rows) >= max(1, int(limit or 120)):
+                    break
+            if len(rows) >= max(1, int(limit or 120)):
+                break
+
+        rows.sort(
+            key=lambda row: (
+                _runtime_timestamp_seconds(row.get("timestamp")) or 0.0,
+                str(row.get("timestamp_label") or ""),
+            ),
+            reverse=True,
+        )
+        return [dict(row) for row in rows[: max(1, int(limit or 120))]]
 
     def selected_agent_timeline_symbol(self, window=None):
         window = window or (getattr(self, "detached_tool_windows", {}) or {}).get("agent_timeline")
@@ -763,7 +944,7 @@ def install_terminal_operator_features(Terminal):
         elif selected_symbol:
             window._agent_timeline_pinned_symbol = selected_symbol
         else:
-            self._show_async_message("Live Agent Timeline", "Select a symbol before pinning it in the timeline.", QMessageBox.Icon.Warning)
+            self._show_async_message("Agent Runtime Monitor", "Select a symbol before pinning it in the monitor.", QMessageBox.Icon.Warning)
             return current_pinned
 
         self._refresh_agent_timeline_window(window)
@@ -793,10 +974,7 @@ def install_terminal_operator_features(Terminal):
                 visible_symbols.append(symbol)
 
             timestamp_value = (row or {}).get("timestamp")
-            try:
-                timestamp_float = float(timestamp_value)
-            except Exception:
-                timestamp_float = None
+            timestamp_float = _runtime_timestamp_seconds(timestamp_value)
             if timestamp_float is not None and (now_value - timestamp_float) <= 60.0:
                 recent_count += 1
                 if symbol and symbol not in recent_symbols:
@@ -832,9 +1010,8 @@ def install_terminal_operator_features(Terminal):
 
             latest_timestamp = None
             for row in symbol_rows:
-                try:
-                    timestamp_value = float((row or {}).get("timestamp"))
-                except Exception:
+                timestamp_value = _runtime_timestamp_seconds((row or {}).get("timestamp"))
+                if timestamp_value is None:
                     continue
                 latest_timestamp = timestamp_value if latest_timestamp is None else max(latest_timestamp, timestamp_value)
             if latest_timestamp is not None and (now_value - latest_timestamp) > 300.0:
@@ -964,7 +1141,7 @@ def install_terminal_operator_features(Terminal):
         window = window or (getattr(self, "detached_tool_windows", {}) or {}).get("agent_timeline")
         symbol = self._selected_agent_timeline_symbol(window)
         if not symbol:
-            self._show_async_message("Live Agent Timeline", "Select a symbol or event before refreshing it.", QMessageBox.Icon.Warning)
+            self._show_async_message("Agent Runtime Monitor", "Select a symbol or event before refreshing it.", QMessageBox.Icon.Warning)
             return ""
 
         row = self._selected_agent_timeline_row(window)
@@ -985,7 +1162,7 @@ def install_terminal_operator_features(Terminal):
 
         symbol = self._selected_agent_timeline_symbol(window)
         if not symbol:
-            self._show_async_message("Live Agent Timeline", "Select an anomalous symbol before acknowledging it.", QMessageBox.Icon.Warning)
+            self._show_async_message("Agent Runtime Monitor", "Select an anomalous symbol before acknowledging it.", QMessageBox.Icon.Warning)
             return ""
 
         raw_snapshot = getattr(window, "_agent_timeline_anomaly_snapshot_all", None)
@@ -993,7 +1170,7 @@ def install_terminal_operator_features(Terminal):
             raw_snapshot = self._agent_timeline_anomaly_snapshot(getattr(window, "_agent_timeline_current_rows", []) or [])
         matching_item = next((item for item in list(raw_snapshot.get("items", []) or []) if str(item.get("symbol") or "").strip().upper().replace("-", "/").replace("_", "/") == symbol), None)
         if not isinstance(matching_item, dict):
-            self._show_async_message("Live Agent Timeline", f"{symbol} does not have an active anomaly in the current view.", QMessageBox.Icon.Information)
+            self._show_async_message("Agent Runtime Monitor", f"{symbol} does not have an active anomaly in the current view.", QMessageBox.Icon.Information)
             return ""
 
         acknowledged = dict(getattr(window, "_agent_timeline_acknowledged", {}) or {})
@@ -1095,19 +1272,49 @@ def install_terminal_operator_features(Terminal):
 
         payload = row.get("payload")
         pretty_payload = json.dumps(payload, indent=2, sort_keys=True, default=str) if isinstance(payload, dict) else str(payload or "")
+        votes = dict(row.get("votes") or {}) if isinstance(row.get("votes"), dict) else {}
+        features = dict(row.get("features") or {}) if isinstance(row.get("features"), dict) else {}
+        metadata = dict(row.get("metadata") or {}) if isinstance(row.get("metadata"), dict) else {}
+        constraints = ", ".join(str(item or "").strip() for item in list(row.get("applied_constraints", []) or []) if str(item or "").strip())
+        vote_lines = [f"  {key}: {value:.2f}" if isinstance(value, (int, float)) else f"  {key}: {value}" for key, value in votes.items()]
+        feature_lines = [f"  {key}: {value:.6f}" if isinstance(value, (int, float)) else f"  {key}: {value}" for key, value in features.items()]
+        metadata_text = json.dumps(metadata, indent=2, sort_keys=True, default=str) if metadata else "{}"
         detail_lines = [
             f"Symbol: {str(row.get('symbol') or symbol or '').strip()}",
             f"Kind: {str(row.get('kind') or '').strip()}",
             f"Agent/Event: {str(row.get('agent_name') or row.get('event_type') or '').strip()}",
-            f"Stage: {str(row.get('stage') or '').strip()}",
+            f"Stage: {str(row.get('stage') or row.get('action') or '').strip()}",
             f"Strategy: {str(row.get('strategy_name') or '').strip()}",
             f"Timeframe: {str(row.get('timeframe') or '').strip()}",
             f"Decision ID: {str(row.get('decision_id') or '').strip()}",
             f"Timestamp: {str(row.get('timestamp_label') or '').strip()}",
             f"Message: {str(row.get('message') or row.get('reason') or '').strip()}",
         ]
+        trader_fields = []
+        if str(row.get("profile_id") or "").strip():
+            trader_fields.append(f"Profile: {str(row.get('profile_id') or '').strip()}")
+        if str(row.get("action") or "").strip():
+            trader_fields.append(f"Action: {str(row.get('action') or '').strip().upper()}")
+        if row.get("confidence") not in (None, ""):
+            trader_fields.append(f"Confidence: {format_compact_number(row.get('confidence'))}")
+        if row.get("model_probability") not in (None, ""):
+            trader_fields.append(f"Model Probability: {format_compact_number(row.get('model_probability'))}")
+        if row.get("quantity") not in (None, ""):
+            trader_fields.append(f"Quantity: {format_compact_number(row.get('quantity'))}")
+        if row.get("price") not in (None, ""):
+            trader_fields.append(f"Price: {format_compact_number(row.get('price'))}")
+        if constraints:
+            trader_fields.append(f"Constraints: {constraints}")
+        if trader_fields:
+            detail_lines.extend(trader_fields)
         if symbol and symbol in anomaly_map:
             detail_lines.append(f"Anomalies: {', '.join(anomaly_map[symbol])}")
+        if vote_lines:
+            detail_lines.extend(["", "Votes:", "\n".join(vote_lines)])
+        if feature_lines:
+            detail_lines.extend(["", "Features:", "\n".join(feature_lines)])
+        if metadata:
+            detail_lines.extend(["", "Metadata:", metadata_text])
         detail_lines.extend(
             [
                 "",
@@ -1121,7 +1328,7 @@ def install_terminal_operator_features(Terminal):
         window = window or (getattr(self, "detached_tool_windows", {}) or {}).get("agent_timeline")
         symbol = self._selected_agent_timeline_symbol(window)
         if not symbol:
-            self._show_async_message("Live Agent Timeline", "Select a symbol or event before replaying its latest chain.", QMessageBox.Icon.Warning)
+            self._show_async_message("Agent Runtime Monitor", "Select a symbol or event before replaying its latest chain.", QMessageBox.Icon.Warning)
             return None
 
         opener = getattr(self, "_open_strategy_assignment_window", None)
@@ -1144,13 +1351,13 @@ def install_terminal_operator_features(Terminal):
         return strategy_window
 
     def open_agent_timeline(self):
-        window = self._get_or_create_tool_window("agent_timeline", "Live Agent Timeline", width=1120, height=620)
+        window = self._get_or_create_tool_window("agent_timeline", "Agent Runtime Monitor", width=1120, height=620)
         if getattr(window, "_agent_timeline_container", None) is None:
             container = QWidget()
             layout = QVBoxLayout(container)
             layout.setContentsMargins(12, 12, 12, 12)
             layout.setSpacing(10)
-            summary = QLabel("Watch the live multi-agent flow across symbols, from signal selection through risk and execution.")
+            summary = QLabel("Watch agent runtime health across symbols, from signal selection through risk and execution.")
             summary.setWordWrap(True)
             summary.setStyleSheet("color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; border-radius: 12px; padding: 10px;")
             layout.addWidget(summary)
@@ -1588,94 +1795,13 @@ def install_terminal_operator_features(Terminal):
         self._refresh_trader_agent_monitor_details(window)
 
     def open_trader_agent_monitor(self):
-        window = self._get_or_create_tool_window("trader_agent_monitor", "Trader Agent Monitor", width=1160, height=640)
-        if getattr(window, "_trader_agent_monitor_container", None) is None:
-            container = QWidget()
-            layout = QVBoxLayout(container)
-            layout.setContentsMargins(12, 12, 12, 12)
-            layout.setSpacing(10)
-            summary = QLabel("Watch the TraderAgent think in real time across profiles, symbols, model confidence, and final actions.")
-            summary.setWordWrap(True)
-            summary.setStyleSheet("color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; border-radius: 12px; padding: 10px;")
-            layout.addWidget(summary)
-            controls = QHBoxLayout()
-            filter_input = QLineEdit()
-            filter_input.setPlaceholderText("Filter by profile, symbol, action, strategy, or reasoning")
-            filter_input.textChanged.connect(lambda *_: self._refresh_trader_agent_monitor_window(window))
-            controls.addWidget(filter_input, 1)
-            profile_filter = QComboBox()
-            profile_filter.addItem("All Profiles")
-            profile_filter.currentTextChanged.connect(lambda *_: self._refresh_trader_agent_monitor_window(window))
-            controls.addWidget(profile_filter)
-            action_filter = QComboBox()
-            action_filter.addItem("All Actions")
-            action_filter.currentTextChanged.connect(lambda *_: self._refresh_trader_agent_monitor_window(window))
-            controls.addWidget(action_filter)
-            strategy_filter = QComboBox()
-            strategy_filter.addItem("All Strategies")
-            strategy_filter.currentTextChanged.connect(lambda *_: self._refresh_trader_agent_monitor_window(window))
-            controls.addWidget(strategy_filter)
-            refresh_btn = QPushButton("Refresh")
-            refresh_btn.clicked.connect(lambda: self._refresh_trader_agent_monitor_window(window))
-            controls.addWidget(refresh_btn)
-            clear_filters_btn = QPushButton("Clear Filters")
-            clear_filters_btn.clicked.connect(
-                lambda: (
-                    filter_input.clear(),
-                    profile_filter.setCurrentIndex(0),
-                    action_filter.setCurrentIndex(0),
-                    strategy_filter.setCurrentIndex(0),
-                    self._refresh_trader_agent_monitor_window(window),
-                )
-            )
-            controls.addWidget(clear_filters_btn)
-            open_timeline_btn = QPushButton("Open Live Agent Timeline")
-            open_timeline_btn.clicked.connect(lambda: invoke_callable(getattr(self, "_open_agent_timeline", None)))
-            controls.addWidget(open_timeline_btn)
-            layout.addLayout(controls)
-            score_row = QHBoxLayout()
-            score_label = QLabel("Action Mix\nBUY: 0  |  SELL: 0  |  HOLD: 0  |  SKIP: 0")
-            score_label.setWordWrap(True)
-            score_label.setStyleSheet("color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; border-radius: 10px; padding: 10px;")
-            score_row.addWidget(score_label, 1)
-            profile_label = QLabel("Profile Coverage\nProfiles: No active profiles\nAvg confidence: 0.00")
-            profile_label.setWordWrap(True)
-            profile_label.setStyleSheet("color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; border-radius: 10px; padding: 10px;")
-            score_row.addWidget(profile_label, 1)
-            layout.addLayout(score_row)
-            tree = QTreeWidget()
-            tree.setColumnCount(8)
-            tree.setHeaderLabels(["Time", "Profile", "Symbol", "Action", "Strategy", "Confidence", "Model", "Reasoning"])
-            tree.setRootIsDecorated(True)
-            tree.setUniformRowHeights(True)
-            tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-            tree.itemSelectionChanged.connect(lambda: self._refresh_trader_agent_monitor_details(window))
-            layout.addWidget(tree, 1)
-            detail_browser = QTextBrowser()
-            detail_browser.setMinimumHeight(200)
-            detail_browser.setStyleSheet("background-color: #0f1726; color: #d9e6f7; border: 1px solid #20324d; border-radius: 10px;")
-            detail_browser.setPlainText("Select a TraderAgent decision to inspect its live reasoning and payload.")
-            layout.addWidget(detail_browser)
-            window.setCentralWidget(container)
-            window._trader_agent_monitor_container = container
-            window._trader_agent_monitor_summary = summary
-            window._trader_agent_monitor_filter = filter_input
-            window._trader_agent_monitor_profile_filter = profile_filter
-            window._trader_agent_monitor_action_filter = action_filter
-            window._trader_agent_monitor_strategy_filter = strategy_filter
-            window._trader_agent_monitor_score_label = score_label
-            window._trader_agent_monitor_profile_label = profile_label
-            window._trader_agent_monitor_tree = tree
-            window._trader_agent_monitor_detail_browser = detail_browser
-            window._trader_agent_monitor_open_timeline_btn = open_timeline_btn
-            window._trader_agent_monitor_clear_filters_btn = clear_filters_btn
-        self._refresh_trader_agent_monitor_window(window)
-        window.show()
-        window.raise_()
-        window.activateWindow()
-        if getattr(window, "_trader_agent_monitor_filter", None) is not None:
-            window._trader_agent_monitor_filter.setFocus()
-        return window
+        legacy_window = (getattr(self, "detached_tool_windows", {}) or {}).get("trader_agent_monitor")
+        if self._is_qt_object_alive(legacy_window):
+            try:
+                legacy_window.hide()
+            except Exception:
+                pass
+        return invoke_callable(getattr(self, "_open_agent_timeline", None))
 
     def record_trade_notification(self, trade):
         if not isinstance(trade, dict):
@@ -2237,7 +2363,7 @@ def install_terminal_operator_features(Terminal):
             self.action_notifications = QAction("Notification Center", self)
             self.action_notifications.setShortcut("Ctrl+Shift+N")
             self.action_notifications.triggered.connect(self._open_notification_center)
-            self.action_agent_timeline = QAction("Live Agent Timeline", self)
+            self.action_agent_timeline = QAction("Agent Runtime Monitor", self)
             self.action_agent_timeline.setShortcut("Ctrl+Shift+L")
             self.action_agent_timeline.triggered.connect(self._open_agent_timeline)
             self.action_trader_agent_monitor = QAction("Trader Agent Monitor", self)
@@ -2328,6 +2454,10 @@ def install_terminal_operator_features(Terminal):
             self._refresh_symbol_universe_window()
         except Exception:
             pass
+        try:
+            self._refresh_live_agent_timeline_panel()
+        except Exception:
+            pass
         return result
 
     def restore_settings(self):
@@ -2405,6 +2535,7 @@ def install_terminal_operator_features(Terminal):
     Terminal._symbol_universe_snapshot = symbol_universe_snapshot
     Terminal._refresh_symbol_universe_window = refresh_symbol_universe_window
     Terminal._open_symbol_universe = open_symbol_universe
+    Terminal._agent_timeline_snapshot_rows = agent_timeline_snapshot_rows
     Terminal._refresh_agent_timeline_window = refresh_agent_timeline_window
     Terminal._selected_agent_timeline_symbol = selected_agent_timeline_symbol
     Terminal._selected_agent_timeline_row = selected_agent_timeline_row

@@ -11,6 +11,7 @@ import asyncio
 import inspect
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -97,6 +98,7 @@ class SopotekTrading:
             broker=self.broker,
         )
         self.signal_engine = SignalEngine(self.strategy)
+        self.alpha_aggregator = getattr(self.signal_engine, "alpha_aggregator", None)
 
         self.event_bus = EventBus()
 
@@ -227,6 +229,7 @@ class SopotekTrading:
             self.controller.signal_consensus_agent = self.signal_consensus_agent
             self.controller.signal_aggregation_agent = self.signal_aggregation_agent
             self.controller.reasoning_engine = self.reasoning_engine
+            self.controller.alpha_aggregator = self.alpha_aggregator
             self.controller.paper_trade_learning_repository = self.paper_trade_learning_repository
             self.controller.paper_trade_dataset_builder = self.paper_trade_dataset_builder
             self.controller.paper_trade_learning_service = self.paper_trade_learning_service
@@ -336,6 +339,15 @@ class SopotekTrading:
         )
 
     def _assigned_strategies_for_symbol(self, symbol):
+        portfolio_resolver = getattr(self.controller, "strategy_portfolio_profile_for_symbol", None) if self.controller is not None else None
+        if callable(portfolio_resolver):
+            try:
+                assigned = list(portfolio_resolver(symbol) or [])
+            except Exception:
+                assigned = []
+            if assigned:
+                return assigned
+
         resolver = getattr(self.controller, "assigned_strategies_for_symbol", None) if self.controller is not None else None
         if callable(resolver):
             try:
@@ -1004,7 +1016,7 @@ class SopotekTrading:
         handler = getattr(self, "process_signal", None)
         if not callable(handler):
             return None
-        if handler == SopotekTrading.process_signal:
+        if getattr(handler, "__func__", handler) is SopotekTrading.process_signal:
             return None
         return handler
 
@@ -1035,8 +1047,11 @@ class SopotekTrading:
             display_signal = dict(signal)
             display_signal.setdefault("strategy_name", display_strategy_name)
             return display_signal
+        hold_reason = str((context or {}).get("signal_hold_reason") or "").strip()
         if (context or {}).get("blocked_by_news_bias"):
             reason = str((context or {}).get("news_bias_reason") or "Signal was neutralized by news bias controls.").strip()
+        elif hold_reason:
+            reason = hold_reason
         else:
             reason = "No entry signal on the latest scan."
         return {
@@ -1080,6 +1095,24 @@ class SopotekTrading:
             return getattr(dataset, "frame", None)
 
     def _build_regime_snapshot(self, symbol=None, signal=None, candles=None, dataset=None, timeframe=None):
+        if isinstance(signal, dict) and isinstance(signal.get("regime_snapshot"), dict):
+            snapshot = dict(signal.get("regime_snapshot") or {})
+            primary = str(snapshot.get("primary") or signal.get("regime") or "unknown").strip()
+            return {
+                "symbol": str(symbol or "").strip().upper(),
+                "timeframe": str(timeframe or self.time_frame or "1h").strip() or "1h",
+                "regime": primary,
+                "volatility": str(snapshot.get("volatility") or ("high" if "HIGH_VOLATILITY" in list(snapshot.get("active_regimes") or []) else "low")).strip(),
+                "atr_pct": self._safe_numeric_value(snapshot.get("atr_pct"), 0.0),
+                "trend_strength": self._safe_numeric_value(snapshot.get("metadata", {}).get("trend_strength"), 0.0),
+                "momentum": self._safe_numeric_value(snapshot.get("metadata", {}).get("momentum"), 0.0),
+                "band_position": self._safe_numeric_value(snapshot.get("metadata", {}).get("band_position"), 0.5),
+                "active_regimes": list(snapshot.get("active_regimes") or []),
+                "adx": self._safe_numeric_value(snapshot.get("adx"), 0.0),
+                "realized_volatility": self._safe_numeric_value(snapshot.get("realized_volatility"), 0.0),
+                "liquidity_score": self._safe_numeric_value(snapshot.get("liquidity_score"), 0.0),
+                "metadata": dict(snapshot.get("metadata") or {}),
+            }
         feature_frame = self._feature_frame_for_context(candles or [], dataset=dataset, strategy_name=(signal or {}).get("strategy_name") if isinstance(signal, dict) else None)
         regime_engine = getattr(self.signal_engine, "regime_engine", None)
         regime = regime_engine.classify_frame(feature_frame) if regime_engine is not None else "unknown"
@@ -1180,7 +1213,19 @@ class SopotekTrading:
         self.logger.warning(template, normalized_reason)
 
     def _symbols_match(self, left, right):
-        normalize = lambda value: str(value or "").strip().upper().replace("-", "/").replace("_", "/")
+        def normalize(value):
+            text = str(value or "").strip().upper()
+            if not text:
+                return ""
+            if "/" not in text and "_" not in text:
+                if (
+                    "PERP" in text
+                    or re.fullmatch(r"[A-Z0-9]+-\d{2}[A-Z]{3}\d{2}-[A-Z0-9]+", text)
+                    or re.fullmatch(r"[A-Z0-9]+-[A-Z0-9]+-\d{8}", text)
+                ):
+                    return text
+            return text.replace("-", "/").replace("_", "/")
+
         left_text = normalize(left)
         right_text = normalize(right)
         return bool(left_text and right_text and left_text == right_text)
@@ -1368,7 +1413,7 @@ class SopotekTrading:
             return canceled, f"Canceled {canceled} stale open order(s) before exit handling."
         return 0, "Unable to cancel stale open orders before exit handling."
 
-    async def process_symbol(self, symbol, timeframe=None, limit=None, publish_debug=True):
+    async def process_symbol(self, symbol, timeframe=None, limit=None, publish_debug=True, allow_execution=True):
         normalized_symbol = str(symbol or "").strip().upper()
         if not normalized_symbol:
             raise ValueError("Symbol is required")
@@ -1396,6 +1441,56 @@ class SopotekTrading:
             "features": getattr(dataset, "frame", None),
             "publish_debug": bool(publish_debug),
         }
+
+        if not bool(allow_execution):
+            context = await self._run_signal_agents(context)
+            signal = context.get("signal")
+            if isinstance(signal, dict):
+                signal.setdefault("decision_id", context.get("decision_id"))
+            display_signal = context.get("display_signal") or self._build_display_signal(
+                context,
+                signal,
+                context.get("assigned_strategies") or [],
+            )
+            if signal:
+                self._record_pipeline_status(
+                    normalized_symbol,
+                    "signal_engine",
+                    "signal",
+                    signal.get("reason"),
+                    signal=signal,
+                )
+                return {
+                    "status": "signal",
+                    "symbol": normalized_symbol,
+                    "decision_id": context.get("decision_id"),
+                    "signal": dict(signal),
+                    "display_signal": dict(display_signal or signal),
+                }
+
+            if context.get("blocked_by_news_bias"):
+                self._record_pipeline_status(
+                    normalized_symbol,
+                    "news_bias",
+                    "blocked",
+                    context.get("news_bias_reason"),
+                    signal=display_signal,
+                )
+            else:
+                self._record_pipeline_status(
+                    normalized_symbol,
+                    "signal_engine",
+                    "hold",
+                    display_signal.get("reason") if isinstance(display_signal, dict) else "No entry signal on the latest scan.",
+                    signal=display_signal if isinstance(display_signal, dict) else None,
+                )
+            return {
+                "status": "hold",
+                "symbol": normalized_symbol,
+                "decision_id": context.get("decision_id"),
+                "signal": None,
+                "display_signal": dict(display_signal or {}),
+            }
 
         custom_handler = self._custom_process_signal_handler()
         if custom_handler is not None:
@@ -1922,6 +2017,11 @@ class SopotekTrading:
             "reason": signal.get("reason"),
             "confidence": signal.get("confidence"),
             "expected_price": signal.get("price"),
+            "expected_return": signal.get("expected_return"),
+            "risk_estimate": signal.get("risk_estimate"),
+            "alpha_score": signal.get("alpha_score"),
+            "alpha_models": list(signal.get("alpha_models") or []),
+            "alpha_horizon": signal.get("horizon"),
             "pnl": signal.get("pnl"),
             "execution_strategy": review.get("execution_strategy"),
             "reasoning_decision": review.get("reasoning_decision"),

@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from PySide6.QtCore import QEvent, QRect
-from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
+from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QTabWidget
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -74,9 +74,23 @@ class _ToolbarTerminal(QMainWindow):
             language_code="en",
             set_language=lambda _code: None,
             symbols=["BTC/USDT", "ETH/USDT"],
+            broker=SimpleNamespace(exchange_name="binance"),
+            config=None,
+            is_live_mode=lambda: False,
+            current_account_label=lambda: "Paper Desk",
+            is_emergency_stop_active=lambda: False,
+            telegram_enabled=False,
+            trade_close_notifications_enabled=False,
+            trade_close_notify_telegram=False,
+            trade_close_notify_email=False,
+            trade_close_notify_sms=False,
+            openai_model="gpt-5-mini",
+            news_enabled=False,
         )
         self.symbol = "BTC/USDT"
         self.current_timeframe = "1h"
+        self.bound_session_id = ""
+        self.bound_session_label = ""
         self.timeframe_buttons = {}
         self.toolbar = None
         self.toolbar_timeframe_label = None
@@ -93,6 +107,10 @@ class _ToolbarTerminal(QMainWindow):
         self.live_trading_bar_frame = None
         self.live_trading_bar_label = None
         self.live_trading_bar = None
+        self.desk_status_frame = None
+        self.desk_status_title_label = None
+        self.desk_status_primary_label = None
+        self.desk_status_secondary_label = None
         self.kill_switch_button = None
         self.trading_activity_label = None
         self.symbol_picker = None
@@ -136,8 +154,17 @@ class _ToolbarTerminal(QMainWindow):
     def _update_live_trading_bar(self):
         return None
 
+    def _update_desk_status_panel(self):
+        return Terminal._update_desk_status_panel(self)
+
     def _update_kill_switch_button(self):
         return None
+
+    def _active_exchange_name(self):
+        return Terminal._active_exchange_name(self)
+
+    def _autotrade_scope_label(self):
+        return Terminal._autotrade_scope_label(self)
 
     def _set_active_timeframe_button(self, _timeframe):
         return None
@@ -392,6 +419,79 @@ def test_create_toolbar_keeps_symbol_and_screenshot_on_same_row_and_drops_toolba
         widget is not None and widget.isAncestorOf(terminal.screenshot_button)
         for widget in controls_toolbar_widgets
     )
+    assert terminal.desk_status_frame is not None
+    assert terminal.desk_status_title_label.text() == "DESK STATUS"
+    assert "PAPER BINANCE" in terminal.desk_status_primary_label.text()
+    assert "Paper Desk" in terminal.desk_status_primary_label.text()
+    assert "AI idle on All Symbols" in terminal.desk_status_secondary_label.text()
+
+
+def test_create_toolbar_adds_professional_desk_status_summary():
+    _app()
+    terminal = _ToolbarTerminal()
+    terminal.bound_session_label = "Desk Alpha"
+    terminal.controller.is_live_mode = lambda: True
+    terminal.controller.current_account_label = lambda: "Primary Futures"
+    terminal.controller.trade_close_notifications_enabled = True
+    terminal.controller.trade_close_notify_telegram = True
+    terminal.controller.trade_close_notify_email = True
+    terminal.controller.news_enabled = True
+    terminal.controller.openai_model = "gpt-5.4-mini"
+
+    Terminal._create_toolbar(terminal)
+
+    assert terminal.desk_status_title_label.text() == "DESK STATUS"
+    assert "Desk Alpha" in terminal.desk_status_primary_label.text()
+    assert "LIVE BINANCE" in terminal.desk_status_primary_label.text()
+    assert "Alerts: Telegram, Email" in terminal.desk_status_secondary_label.text()
+    assert "News on" in terminal.desk_status_secondary_label.text()
+    assert "Model gpt-5.4-mini" in terminal.desk_status_secondary_label.text()
+
+
+def test_update_desk_status_panel_reflects_live_execution_and_kill_switch():
+    _app()
+    terminal = _ToolbarTerminal()
+    terminal.controller.is_live_mode = lambda: True
+    terminal.controller.is_emergency_stop_active = lambda: True
+    terminal.controller.trade_close_notifications_enabled = True
+    terminal.controller.trade_close_notify_sms = True
+    terminal.autotrading_enabled = True
+
+    Terminal._create_toolbar(terminal)
+    Terminal._update_desk_status_panel(terminal)
+
+    assert terminal.desk_status_title_label.text() == "DESK LOCKDOWN"
+    assert "LIVE BINANCE" in terminal.desk_status_primary_label.text()
+    assert "AI live on All Symbols" in terminal.desk_status_secondary_label.text()
+    assert "Kill switch on" in terminal.desk_status_secondary_label.text()
+    assert "Alerts: SMS" in terminal.desk_status_secondary_label.text()
+
+
+def test_apply_workspace_tab_chrome_sets_professional_tab_shell():
+    _app()
+    terminal = _ToolbarTerminal()
+    tabs = QTabWidget()
+
+    Terminal._apply_workspace_tab_chrome(terminal, tabs)
+
+    assert tabs.documentMode() is True
+    assert "QTabWidget::pane" in tabs.styleSheet()
+    assert "QTabBar::tab:selected" in tabs.styleSheet()
+
+
+def test_empty_state_html_promotes_title_message_and_hint():
+    terminal = _ToolbarTerminal()
+
+    markup = Terminal._empty_state_html(
+        terminal,
+        "Recommendation Detail",
+        "Select a symbol to review the rationale.",
+        hint="Live confidence and regime context will appear here.",
+    )
+
+    assert "Recommendation Detail" in markup
+    assert "Select a symbol to review the rationale." in markup
+    assert "Live confidence and regime context will appear here." in markup
 
 
 def test_autotrade_toolbar_compacts_scope_controls_before_hiding_the_picker():
@@ -455,3 +555,155 @@ def test_set_status_value_ignores_deleted_qt_labels():
     Terminal._set_status_value(terminal, "Websocket", "Restarting", "Restarting market data")
 
     assert terminal.status_labels == {}
+
+
+def test_set_status_value_skips_redundant_label_updates():
+    terminal = _FakeTerminal()
+
+    class _Label:
+        def __init__(self):
+            self.text_calls = 0
+            self.tooltip_calls = 0
+
+        def setText(self, _value):
+            self.text_calls += 1
+
+        def setToolTip(self, _value):
+            self.tooltip_calls += 1
+
+    label = _Label()
+    terminal.status_labels = {"Websocket": label}
+    terminal._is_qt_object_alive = lambda obj: obj is label
+    terminal._elide_text = lambda value, max_length=42: str(value)
+    terminal._status_value_cache = {}
+
+    Terminal._set_status_value(terminal, "Websocket", "Running", "Connected")
+    Terminal._set_status_value(terminal, "Websocket", "Running", "Connected")
+
+    assert label.text_calls == 1
+    assert label.tooltip_calls == 1
+
+
+def test_refresh_session_selector_skips_rebuilding_identical_sessions():
+    class _Selector:
+        def __init__(self):
+            self.items = []
+            self.clear_calls = 0
+            self.add_calls = 0
+            self._current_index = 0
+            self._signals_blocked = False
+
+        def blockSignals(self, value):
+            previous = self._signals_blocked
+            self._signals_blocked = bool(value)
+            return previous
+
+        def clear(self):
+            self.clear_calls += 1
+            self.items = []
+
+        def addItem(self, text, data):
+            self.add_calls += 1
+            self.items.append((text, data))
+
+        def setCurrentIndex(self, index):
+            self._current_index = int(index)
+
+        def currentIndex(self):
+            return self._current_index
+
+        def count(self):
+            return len(self.items)
+
+    selector = _Selector()
+    sessions = [
+        {"session_id": "sess-1", "label": "Primary", "status": "running"},
+        {"session_id": "sess-2", "label": "Backup", "status": "paused"},
+    ]
+    fake = SimpleNamespace(
+        session_selector=selector,
+        controller=SimpleNamespace(
+            list_trading_sessions=lambda: list(sessions),
+            active_session_id="sess-1",
+        ),
+        _session_selector_signature=None,
+    )
+
+    Terminal._refresh_session_selector(fake)
+    Terminal._refresh_session_selector(fake)
+
+    assert selector.clear_calls == 1
+    assert selector.add_calls == 2
+    assert selector.items[0] == ("Primary [RUNNING]", "sess-1")
+
+
+def test_refresh_session_tabs_skips_rebuilding_identical_sessions():
+    _app()
+
+    class _Tabs:
+        def __init__(self):
+            self._tabs = []
+            self.add_calls = 0
+            self.remove_calls = 0
+            self._current_index = 0
+
+        def count(self):
+            return len(self._tabs)
+
+        def widget(self, index):
+            return self._tabs[index][0]
+
+        def removeTab(self, index):
+            self.remove_calls += 1
+            self._tabs.pop(index)
+
+        def addTab(self, widget, label):
+            self.add_calls += 1
+            self._tabs.append((widget, label))
+
+        def setCurrentIndex(self, index):
+            self._current_index = int(index)
+
+        def currentIndex(self):
+            return self._current_index
+
+    tabs = _Tabs()
+    sessions = [
+        {
+            "session_id": "sess-1",
+            "label": "Primary",
+            "status": "running",
+            "mode": "paper",
+            "equity": 10100.0,
+            "drawdown_pct": 0.02,
+            "gross_exposure": 3500.0,
+            "symbols_count": 12,
+            "positions_count": 2,
+            "open_orders_count": 1,
+            "trade_count": 8,
+            "strategy": "Trend Following",
+        }
+    ]
+    fake = SimpleNamespace(
+        session_tabs_widget=tabs,
+        controller=SimpleNamespace(
+            list_trading_sessions=lambda: list(sessions),
+            aggregate_session_portfolio=lambda: {
+                "session_count": 1,
+                "running_sessions": 1,
+                "risk_blocked_sessions": 0,
+                "total_equity": 10100.0,
+                "total_gross_exposure": 3500.0,
+                "total_unrealized_pnl": 125.0,
+            },
+            active_session_id="sess-1",
+        ),
+        _session_tabs_signature=None,
+    )
+
+    Terminal._refresh_session_tabs(fake)
+    Terminal._refresh_session_tabs(fake)
+
+    assert tabs.add_calls == 2
+    assert tabs.remove_calls == 0
+    assert tabs.currentIndex() == 1

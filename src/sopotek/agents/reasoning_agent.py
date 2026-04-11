@@ -13,6 +13,12 @@ def _safe_float(value, default: float = 0.0) -> float:
         return float(default)
 
 
+def _normalize_feature_map(payload) -> dict[str, float]:
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): _safe_float(value) for key, value in payload.items() if str(key).strip()}
+
+
 class ReasoningAgent(BaseAgent):
     """Publishes explainable trade rationale from live signals and features."""
 
@@ -75,7 +81,9 @@ class ReasoningAgent(BaseAgent):
         await self.bus.publish(EventType.REASONING_DECISION, decision, priority=58, source=self.name)
 
     def _build_decision(self, signal: Signal) -> ReasoningDecision:
-        features = dict((self.latest_features.get(signal.symbol).values if self.latest_features.get(signal.symbol) is not None else {}) or {})
+        features = _normalize_feature_map(dict(getattr(signal, "metadata", {}) or {}).get("features"))
+        if self.latest_features.get(signal.symbol) is not None:
+            features.update(_normalize_feature_map(self.latest_features[signal.symbol].values))
         insight = self.latest_insights.get(signal.symbol)
         model_score = self.latest_model_scores.get(signal.symbol)
         side = str(signal.side).lower()

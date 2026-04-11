@@ -19,17 +19,28 @@ Set-Content -Path $latestLogInfo -Value @(
     "stderr=$stderrLog"
 ) -Encoding utf8
 
-$vendorPythonPath = @(
+$projectPythonPath = Join-Path $repoRoot "src"
+$vendoredPythonPaths = @(
     (Join-Path $repoRoot ".deps_ui")
     (Join-Path $repoRoot ".deps_legacy")
     (Join-Path $repoRoot ".deps")
-    (Join-Path $repoRoot "src")
-) -join ";"
+) | Where-Object { Test-Path $_ }
+$originalPythonPath = $env:PYTHONPATH
 
-if ([string]::IsNullOrWhiteSpace($env:PYTHONPATH)) {
-    $env:PYTHONPATH = $vendorPythonPath
-} else {
-    $env:PYTHONPATH = "$vendorPythonPath;$($env:PYTHONPATH)"
+function Set-SopotekPythonPath {
+    param(
+        [bool]$UseVendoredPackages = $false
+    )
+
+    $paths = @($projectPythonPath)
+    if ($UseVendoredPackages) {
+        $paths = @($vendoredPythonPaths + $paths)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($originalPythonPath)) {
+        $paths += $originalPythonPath
+    }
+
+    $env:PYTHONPATH = ($paths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ";"
 }
 
 $candidateSpecs = @()
@@ -42,13 +53,13 @@ if (-not [string]::IsNullOrWhiteSpace($env:SOPOTEK_PYTHON_EXE)) {
 }
 $candidateSpecs += @(
     @{
-        Name = "Python 3.14"
-        FilePath = "C:\Python314\python.exe"
+        Name = ".venv"
+        FilePath = (Join-Path $repoRoot ".venv\Scripts\python.exe")
         Arguments = @()
     },
     @{
-        Name = ".venv"
-        FilePath = (Join-Path $repoRoot ".venv\Scripts\python.exe")
+        Name = "Python 3.14"
+        FilePath = "C:\Python314\python.exe"
         Arguments = @()
     },
     @{
@@ -68,19 +79,26 @@ $candidateSpecs += @(
     }
 )
 
-$probeCode = "import PySide6, qasync, keyring, sqlalchemy; print('ok')"
+$probeCode = "import PySide6, qasync, keyring, sqlalchemy, pymysql; print('ok')"
 $selected = $null
 
 foreach ($candidate in $candidateSpecs) {
     try {
         $cmd = Get-Command $candidate.FilePath -ErrorAction Stop
-        & $cmd.Source @($candidate.Arguments + @("-c", $probeCode)) *> $null
-        if ($LASTEXITCODE -eq 0) {
-            $selected = @{
-                Name = $candidate.Name
-                FilePath = $cmd.Source
-                Arguments = $candidate.Arguments
+        foreach ($useVendoredPackages in @($false, $true)) {
+            Set-SopotekPythonPath -UseVendoredPackages:$useVendoredPackages
+            & $cmd.Source @($candidate.Arguments + @("-c", $probeCode)) *> $null
+            if ($LASTEXITCODE -eq 0) {
+                $selected = @{
+                    Name = $candidate.Name
+                    FilePath = $cmd.Source
+                    Arguments = $candidate.Arguments
+                    UseVendoredPackages = $useVendoredPackages
+                }
+                break
             }
+        }
+        if ($null -ne $selected) {
             break
         }
     } catch {
@@ -89,8 +107,10 @@ foreach ($candidate in $candidateSpecs) {
 }
 
 if ($null -eq $selected) {
-    Write-Error "No compatible Python runtime was found. Install the desktop dependencies or set SOPOTEK_PYTHON_EXE."
+    Write-Error "No compatible Python runtime with the desktop and storage dependencies was found. Run 'python -m pip install -r requirements.txt' in the project environment, or set SOPOTEK_PYTHON_EXE to a Python that already has PySide6, qasync, SQLAlchemy, keyring, and PyMySQL installed."
 }
+
+Set-SopotekPythonPath -UseVendoredPackages:$selected.UseVendoredPackages
 
 if ($DryRun) {
     Write-Host "Repo root: $repoRoot"

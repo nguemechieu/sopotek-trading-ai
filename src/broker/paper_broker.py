@@ -5,6 +5,10 @@ from typing import Dict, Optional
 
 from broker.base_broker import BaseBroker
 from broker.ccxt_broker import CCXTBroker
+try:
+    from broker.solana_broker import SolanaBroker
+except Exception:  # pragma: no cover - optional dependency in stripped test environments
+    SolanaBroker = None
 
 
 class PaperBroker(BaseBroker, ABC):
@@ -17,7 +21,6 @@ class PaperBroker(BaseBroker, ABC):
         self.controller = controller
         self.config = controller
         self.logger = getattr(controller, "logger", None) or logging.getLogger("PaperBroker")
-        self.exchange_name = "paper"
 
         self.balance = getattr(controller, "paper_balance", None)
         if self.balance is None:
@@ -30,7 +33,9 @@ class PaperBroker(BaseBroker, ABC):
         self.order_id = 0
         self._connected = False
         self.market_data_broker = None
-        self.market_data_exchange = self._resolve_market_data_exchange()
+        self.paper_exchange_name = self._resolve_market_data_exchange()
+        self.exchange_name = self.paper_exchange_name or "paper"
+        self.market_data_exchange = self.paper_exchange_name
         self.market_data_exchanges = self._resolve_market_data_exchanges()
         self.market_data_brokers = {}
 
@@ -92,9 +97,13 @@ class PaperBroker(BaseBroker, ABC):
             params.get("paper_data_exchange")
             or params.get("market_data_exchange")
             or getattr(self.controller, "paper_data_exchange", None)
+            or getattr(broker_cfg, "exchange", None)
+            or getattr(self.controller, "exchange", None)
         )
         if exchange:
-            return str(exchange).lower()
+            normalized = str(exchange).strip().lower()
+            if normalized and normalized != "paper":
+                return normalized
         return "binanceus"
 
     def _resolve_market_data_exchanges(self):
@@ -126,6 +135,61 @@ class PaperBroker(BaseBroker, ABC):
         symbols = getattr(self.controller, "symbols", None) or []
         return any("/" in str(item) for item in symbols)
 
+    @staticmethod
+    def _normalize_symbol_sequence(symbols):
+        if symbols is None:
+            return []
+        if isinstance(symbols, str):
+            raw_values = [item for item in symbols.split(",")]
+        elif isinstance(symbols, dict):
+            raw_values = list(symbols.keys())
+        else:
+            raw_values = list(symbols or [])
+
+        normalized = []
+        for symbol in raw_values:
+            value = str(symbol or "").strip().upper().replace("_", "/").replace("-", "/")
+            if value and value not in normalized:
+                normalized.append(value)
+        return normalized
+
+    def _configured_symbol_hints(self):
+        broker_cfg = getattr(getattr(self.controller, "config", None), "broker", None)
+        normalized = []
+        sources = (
+            getattr(broker_cfg, "params", None),
+            getattr(broker_cfg, "options", None),
+        )
+        for source in sources:
+            if isinstance(source, dict):
+                candidates = (
+                    source.get("symbols"),
+                    source.get("default_symbols"),
+                    source.get("watchlist_symbols"),
+                )
+            else:
+                candidates = ()
+            for candidate in candidates:
+                for symbol in self._normalize_symbol_sequence(candidate):
+                    if symbol not in normalized:
+                        normalized.append(symbol)
+
+        local_symbols = []
+        local_symbols.extend(
+            position.get("symbol")
+            for position in list(getattr(self, "positions", {}).values())
+            if isinstance(position, dict)
+        )
+        local_symbols.extend(
+            order.get("symbol")
+            for order in list(getattr(self, "orders", {}).values())
+            if isinstance(order, dict)
+        )
+        for symbol in self._normalize_symbol_sequence(local_symbols):
+            if symbol not in normalized:
+                normalized.append(symbol)
+        return normalized
+
     def _build_market_data_config(self, exchange_name=None):
         return SimpleNamespace(
             exchange=exchange_name or self.market_data_exchange,
@@ -146,7 +210,12 @@ class PaperBroker(BaseBroker, ABC):
 
     async def _connect_market_data_broker(self, exchange_name):
         try:
-            broker = CCXTBroker(self._build_market_data_config(exchange_name))
+            if exchange_name == "solana":
+                if SolanaBroker is None:
+                    raise RuntimeError("Solana broker dependencies are not available.")
+                broker = SolanaBroker(self._build_market_data_config(exchange_name))
+            else:
+                broker = CCXTBroker(self._build_market_data_config(exchange_name))
             await broker.connect()
             self.market_data_brokers[exchange_name] = broker
             if self.market_data_broker is None:
@@ -568,17 +637,19 @@ class PaperBroker(BaseBroker, ABC):
         symbols = await self._call_market_data("fetch_symbols", empty_values=(None, []))
         if symbols:
             return symbols
-
-        if hasattr(self.controller, "symbols"):
-            return self.controller.symbols
-
-        return []
+        return self._configured_symbol_hints()
 
     async def fetch_symbol(self):
         return await self.fetch_symbols()
 
     async def fetch_status(self):
-        return {"status": "ok" if self._connected else "disconnected", "broker": "paper"}
+        return {
+            "status": "ok" if self._connected else "disconnected",
+            "broker": self.exchange_name or "paper",
+            "mode": "paper",
+            "execution_mode": "paper",
+            "market_data_exchange": self.market_data_exchange or self.exchange_name or "paper",
+        }
 
     # ======================================================
     # CLOSE

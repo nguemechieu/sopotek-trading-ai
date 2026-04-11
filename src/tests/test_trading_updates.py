@@ -184,6 +184,37 @@ def test_populate_positions_table_applies_query_filter_and_summary():
     assert summary.text() == "Showing 1 of 2 positions"
 
 
+def test_populate_positions_table_skips_rebuilding_identical_rows():
+    _app()
+    table = QTableWidget()
+    summary = QLabel()
+    search = QLineEdit()
+    built_buttons = []
+    fake = SimpleNamespace(
+        positions_table=table,
+        positions_filter_input=search,
+        positions_filter_summary=summary,
+        positions_close_all_button=SimpleNamespace(setEnabled=lambda _value: None),
+        controller=SimpleNamespace(broker=object()),
+        _positions_table_signature=None,
+        _normalize_position_entry=lambda payload: normalize_position_entry(
+            SimpleNamespace(_lookup_symbol_mid_price=lambda _symbol: 105.0),
+            payload,
+        ),
+        _build_position_close_button=lambda position, compact=False: built_buttons.append((position["symbol"], compact)) or None,
+    )
+
+    rows = [
+        {"symbol": "BTC/USDT", "side": "long", "amount": 1.0, "entry_price": 100.0},
+        {"symbol": "ETH/USDT", "side": "short", "amount": 2.0, "entry_price": 200.0, "mark_price": 190.0},
+    ]
+
+    populate_positions_table(fake, rows)
+    populate_positions_table(fake, rows)
+
+    assert len(built_buttons) == 2
+
+
 def test_populate_open_orders_table_applies_query_filter_and_summary():
     _app()
     table = QTableWidget()
@@ -211,6 +242,44 @@ def test_populate_open_orders_table_applies_query_filter_and_summary():
     assert table.isRowHidden(0) is True
     assert table.isRowHidden(1) is False
     assert summary.text() == "Showing 1 of 2 open orders"
+
+
+def test_populate_open_orders_table_skips_rebuilding_identical_rows():
+    _app()
+
+    class _CountingTable(QTableWidget):
+        def __init__(self):
+            super().__init__()
+            self.set_item_calls = 0
+
+        def setItem(self, row, column, item):
+            self.set_item_calls += 1
+            super().setItem(row, column, item)
+
+    table = _CountingTable()
+    summary = QLabel()
+    search = QLineEdit()
+    fake = SimpleNamespace(
+        open_orders_table=table,
+        open_orders_filter_input=search,
+        open_orders_filter_summary=summary,
+        _open_orders_table_signature=None,
+        _normalize_open_order_entry=lambda payload: normalize_open_order_entry(
+            SimpleNamespace(_lookup_symbol_mid_price=lambda _symbol: 105.0),
+            payload,
+        ),
+    )
+
+    rows = [
+        {"symbol": "BTC/USDT", "side": "buy", "type": "limit", "price": 100.0, "amount": 1.0, "filled": 0.0, "status": "open"},
+        {"symbol": "ETH/USDT", "side": "sell", "type": "market", "amount": 3.0, "filled": 1.0, "status": "pending"},
+    ]
+
+    populate_open_orders_table(fake, rows)
+    first_pass_calls = table.set_item_calls
+    populate_open_orders_table(fake, rows)
+
+    assert table.set_item_calls == first_pass_calls
 
 
 def test_update_trade_log_applies_query_filter_and_summary():

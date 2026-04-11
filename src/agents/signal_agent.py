@@ -129,7 +129,11 @@ class SignalAgent(BaseAgent):
             if isinstance(display_signal, dict):
                 reason = str(display_signal.get("reason") or "").strip()
             if not reason:
-                reason = str(working.get("news_bias_reason") or "No entry signal on the latest scan.").strip()
+                reason = str(
+                    working.get("signal_hold_reason")
+                    or working.get("news_bias_reason")
+                    or "No entry signal on the latest scan."
+                ).strip()
             self.remember(
                 stage,
                 {

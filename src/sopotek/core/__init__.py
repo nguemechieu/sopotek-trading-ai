@@ -20,6 +20,7 @@ from sopotek.core.models import (
     TradeFeedback,
     TradeReview,
 )
+from sopotek.core.runtime_state_cache import RuntimeStateCache
 
 __all__ = [
     "AlertEvent",
@@ -41,4 +42,5 @@ __all__ = [
     "TradeJournalSummary",
     "TradeFeedback",
     "TradeReview",
+    "RuntimeStateCache",
 ]

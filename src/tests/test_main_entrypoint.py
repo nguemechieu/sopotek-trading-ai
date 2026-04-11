@@ -1,13 +1,12 @@
 import sys
 import socket
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main as app_main
-from sopotek_trading import main as compat_main
-from sopotek_trading_ai import launcher as package_launcher
 
 
 def test_qt_windows_noise_filter_matches_known_console_noise():
@@ -22,6 +21,41 @@ def test_dns_resolution_noise_filter_matches_known_dns_cases():
     assert app_main._is_dns_resolution_noise({"message": "ClientConnectorDNSError: dns lookup failed"}) is True
     assert app_main._is_dns_resolution_noise({"future": "getaddrinfo failed for broker host"}) is True
     assert app_main._is_dns_resolution_noise({"message": "unexpected failure"}) is False
+
+
+def test_patch_qasync_duplicate_timer_keyerror_swallows_missing_callback_once():
+    accepted = []
+
+    class _Event:
+        def accept(self):
+            accepted.append(True)
+
+    class _SimpleTimer:
+        def timerEvent(self, _event):
+            raise KeyError(123)
+
+    module = SimpleNamespace(_SimpleTimer=_SimpleTimer)
+
+    patched = app_main._patch_qasync_duplicate_timer_keyerror(module)
+    result = module._SimpleTimer().timerEvent(_Event())
+
+    assert patched is True
+    assert result is None
+    assert accepted == [True]
+
+
+def test_patch_qasync_duplicate_timer_keyerror_is_idempotent():
+    class _SimpleTimer:
+        def timerEvent(self, _event):
+            return "ok"
+
+    module = SimpleNamespace(_SimpleTimer=_SimpleTimer)
+
+    first = app_main._patch_qasync_duplicate_timer_keyerror(module)
+    second = app_main._patch_qasync_duplicate_timer_keyerror(module)
+
+    assert first is True
+    assert second is False
 
 
 def test_install_asyncio_exception_filter_suppresses_dns_noise_and_logs_debug():
@@ -122,19 +156,6 @@ def test_configure_qt_platform_preserves_explicit_setting(monkeypatch):
     assert app_main.os.environ["QT_QPA_PLATFORM"] == "xcb"
 
 
-def test_configure_qt_platform_leaves_gui_mode_when_display_exists(monkeypatch):
-    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
-    monkeypatch.setenv("DISPLAY", ":0")
-    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-    monkeypatch.setattr(app_main.sys, "platform", "linux")
-    monkeypatch.setattr(app_main.os.path, "exists", lambda path: True)
-
-    selected = app_main._configure_qt_platform()
-
-    assert selected is None
-    assert "QT_QPA_PLATFORM" not in app_main.os.environ
-
-
 def test_configure_browser_qt_runtime_sets_software_container_defaults(monkeypatch):
     monkeypatch.setenv("SOPOTEK_HTTP_UI", "1")
     monkeypatch.delenv("SOPOTEK_DISABLE_WEBENGINE", raising=False)
@@ -171,25 +192,13 @@ def test_configure_browser_qt_runtime_is_noop_without_browser_env(monkeypatch):
     assert enabled is False
 
 
-def test_packaged_launcher_delegates_to_desktop_entrypoint(monkeypatch):
-    calls = []
-    fake_module = SimpleNamespace(main=lambda argv=None: calls.append(argv) or 7)
-    monkeypatch.setattr(package_launcher, "_load_desktop_entrypoint", lambda: fake_module)
+def test_importing_event_bus_submodule_does_not_eagerly_import_runtime():
+    for module_name in list(sys.modules):
+        if module_name == "sopotek" or module_name.startswith("sopotek."):
+            sys.modules.pop(module_name, None)
 
-    assert package_launcher.main(["--headless"]) == 7
-    assert calls == [["--headless"]]
+    event_module = importlib.import_module("sopotek.core.event_bus.event")
 
-
-def test_packaged_launcher_requires_callable_main(monkeypatch):
-    monkeypatch.setattr(package_launcher, "_load_desktop_entrypoint", lambda: SimpleNamespace())
-
-    try:
-        package_launcher.main()
-    except RuntimeError as exc:
-        assert "callable main" in str(exc)
-    else:
-        raise AssertionError("launcher should reject entrypoints without a callable main")
-
-
-def test_compat_module_exports_packaged_launcher():
-    assert compat_main is package_launcher.main
+    assert event_module.Event is not None
+    assert "sopotek.core.orchestrator" not in sys.modules
+    assert "sopotek.ml.pipeline" not in sys.modules

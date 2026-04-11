@@ -175,6 +175,9 @@ def test_chart_visual_theme_updates_plot_background_and_axis_colors():
     assert "#f4efe5" in widget.market_tabs.styleSheet()
     assert "#223344" in widget.instrument_label.styleSheet()
     assert "rgba(244,239,229" in widget.controls_container.styleSheet()
+    assert "rgba(244,239,229" in widget.market_info_summary.styleSheet()
+    assert "rgba(34,51,68" in widget.market_info_details.styleSheet()
+    assert "rgba(34,51,68" in widget.market_info_card_titles["Last"].styleSheet()
 
 
 def test_chart_coinbase_style_surfaces_market_summary_and_segmented_tabs():
@@ -186,6 +189,24 @@ def test_chart_coinbase_style_surfaces_market_summary_and_segmented_tabs():
     assert "#1652f0" in widget.market_tabs.styleSheet()
     assert "#1652f0" in widget.timeframe_picker.styleSheet()
     assert "border-radius: 20px" in widget.candlestick_shell.styleSheet()
+
+
+def test_chart_moves_timeframe_controls_into_tab_strip_and_limits_them_to_candlestick_view():
+    _app()
+    widget = ChartWidget("BTC/USDT", "1h", _controller())
+
+    assert widget.market_tabs.cornerWidget() is widget.controls_container
+    assert widget.controls_container.isHidden() is False
+
+    widget.market_tabs.setCurrentWidget(widget.market_info_page)
+    QApplication.processEvents()
+
+    assert widget.controls_container.isHidden() is True
+
+    widget.market_tabs.setCurrentWidget(widget.candlestick_page)
+    QApplication.processEvents()
+
+    assert widget.controls_container.isHidden() is False
 
 
 def test_chart_indicators_can_be_removed_from_price_and_lower_panes():

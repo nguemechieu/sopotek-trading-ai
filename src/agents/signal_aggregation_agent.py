@@ -21,6 +21,20 @@ class SignalAggregationAgent(BaseAgent):
             -int(signal.get("strategy_assignment_rank", 0) or 0),
         )
 
+    def _hold_reason(self, context, candidates):
+        consensus = dict((context or {}).get("signal_consensus") or {})
+        total_candidates = int(consensus.get("total_candidates", len(candidates)) or len(candidates))
+        status = str(consensus.get("status") or "").strip().lower()
+        if total_candidates > 1 and status == "split":
+            minimum_votes = int(
+                consensus.get("effective_minimum_votes", consensus.get("minimum_votes", 1)) or 1
+            )
+            return (
+                "Signal agents disagreed and no side reached the required "
+                f"{minimum_votes}-vote consensus."
+            )
+        return str((context or {}).get("signal_hold_reason") or "").strip()
+
     async def process(self, context):
         working = dict(context or {})
         symbol = str(working.get("symbol") or "").strip().upper()
@@ -34,6 +48,9 @@ class SignalAggregationAgent(BaseAgent):
 
         if not candidates:
             working["signal"] = None
+            working["signal_hold_reason"] = self._hold_reason(working, candidates) or str(
+                working.get("news_bias_reason") or "No entry signal on the latest scan."
+            ).strip()
             display_signal = (
                 self.display_builder(working, None, assigned_strategies)
                 if callable(self.display_builder)
@@ -45,9 +62,35 @@ class SignalAggregationAgent(BaseAgent):
             self.remember(
                 "hold",
                 {
-                    "reason": str(working.get("news_bias_reason") or "No entry signal on the latest scan.").strip(),
+                    "reason": working["signal_hold_reason"],
                     "timeframe": working.get("timeframe"),
                     "candidate_count": 0,
+                },
+                symbol=symbol,
+                decision_id=decision_id,
+            )
+            return working
+
+        hold_reason = self._hold_reason(working, candidates)
+        if hold_reason:
+            working["signal"] = None
+            working["signal_hold_reason"] = hold_reason
+            display_signal = (
+                self.display_builder(working, None, assigned_strategies)
+                if callable(self.display_builder)
+                else None
+            )
+            working["display_signal"] = display_signal
+            if callable(self.publisher):
+                self.publisher(working, display_signal)
+            self.remember(
+                "hold",
+                {
+                    "reason": hold_reason,
+                    "timeframe": working.get("timeframe"),
+                    "candidate_count": len(candidates),
+                    "consensus_side": str((working.get("signal_consensus") or {}).get("side") or "").strip(),
+                    "consensus_status": str((working.get("signal_consensus") or {}).get("status") or "").strip(),
                 },
                 symbol=symbol,
                 decision_id=decision_id,
@@ -57,10 +100,36 @@ class SignalAggregationAgent(BaseAgent):
         ranked_candidates = sorted(candidates, key=self._candidate_rank, reverse=True)
         selected_candidate = ranked_candidates[0]
         signal = dict(selected_candidate.get("signal") or {})
+        consensus_side = str((working.get("signal_consensus") or {}).get("side") or "").strip().lower()
+        if consensus_side and str(signal.get("side") or "").strip().lower() != consensus_side:
+            working["signal"] = None
+            working["signal_hold_reason"] = "The highest-ranked signal did not match the consensus side."
+            display_signal = (
+                self.display_builder(working, None, assigned_strategies)
+                if callable(self.display_builder)
+                else None
+            )
+            working["display_signal"] = display_signal
+            if callable(self.publisher):
+                self.publisher(working, display_signal)
+            self.remember(
+                "hold",
+                {
+                    "reason": working["signal_hold_reason"],
+                    "timeframe": working.get("timeframe"),
+                    "candidate_count": len(candidates),
+                    "consensus_side": consensus_side,
+                    "consensus_status": str((working.get("signal_consensus") or {}).get("status") or "").strip(),
+                },
+                symbol=symbol,
+                decision_id=decision_id,
+            )
+            return working
         signal["signal_source_agent"] = str(selected_candidate.get("agent_name") or "").strip()
         signal["consensus_status"] = str((working.get("signal_consensus") or {}).get("status") or "").strip()
         signal["consensus_side"] = str((working.get("signal_consensus") or {}).get("side") or "").strip()
         working["signal"] = signal
+        working.pop("signal_hold_reason", None)
         working["signal_source_agent"] = signal.get("signal_source_agent")
         working["assigned_strategies"] = assigned_strategies or list(selected_candidate.get("assigned_strategies") or [])
         display_signal = (

@@ -2,11 +2,17 @@ import asyncio
 import html
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 import uuid
 
 import aiohttp
+
+from integrations.trade_notifications import (
+    build_trade_close_summary,
+    format_trade_close_html,
+    trade_notification_reason,
+)
 
 
 class TelegramService:
@@ -36,26 +42,7 @@ class TelegramService:
 
     @staticmethod
     def _trade_notification_reason(trade):
-        if not isinstance(trade, dict):
-            return ""
-
-        candidates = [
-            trade.get("reason"),
-            trade.get("message"),
-        ]
-        raw = trade.get("raw")
-        if isinstance(raw, dict):
-            candidates.extend([raw.get("error"), raw.get("reason"), raw.get("message")])
-
-        for candidate in candidates:
-            text = str(candidate or "").strip()
-            if text:
-                return text
-
-        status = str(trade.get("status") or "").strip().lower().replace("-", "_")
-        if status in {"rejected", "blocked", "skipped", "failed", "error"}:
-            return "No rejection reason was supplied by the broker or safety checks."
-        return ""
+        return trade_notification_reason(trade)
 
     async def start(self):
         if not self.enabled or not self.bot_token:
@@ -102,7 +89,7 @@ class TelegramService:
             size = raw_size
         pnl = trade.get("pnl", "-")
         order_id = trade.get("order_id", trade.get("id", "-"))
-        timestamp = trade.get("timestamp") or datetime.utcnow().isoformat()
+        timestamp = trade.get("timestamp") or datetime.now(timezone.utc).isoformat()
         reason_line = f"Reason: <code>{html.escape(reason)}</code>\n" if reason else ""
         message = (
             "<b>Trading Activity</b>\n"
@@ -116,6 +103,13 @@ class TelegramService:
             f"Order ID: <code>{order_id}</code>\n"
             f"Time: <code>{timestamp}</code>"
         )
+        await self.send_message(message, reply_markup=self._menu_markup("portfolio"))
+
+    async def notify_trade_close(self, trade):
+        if not self.can_send() or not isinstance(trade, dict):
+            return
+        summary = build_trade_close_summary(trade)
+        message = format_trade_close_html(summary)
         await self.send_message(message, reply_markup=self._menu_markup("portfolio"))
 
     async def send_message(self, text, include_keyboard=False, reply_markup=None):

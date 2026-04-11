@@ -23,11 +23,60 @@ class FakeSession:
         self.closed = True
 
 
+class FakeHTTPResponse:
+    def __init__(self, payload, status=200):
+        self.payload = payload
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def text(self):
+        if isinstance(self.payload, str):
+            return self.payload
+        return json.dumps(self.payload)
+
+    async def json(self, content_type=None):
+        if isinstance(self.payload, str):
+            return json.loads(self.payload)
+        return self.payload
+
+
+class FakeCoinbaseApiSession(FakeSession):
+    def __init__(self, connector=None, responses=None):
+        super().__init__(connector=connector)
+        self.responses = dict(responses or {})
+        self.requested_methods = []
+        self.requested_urls = []
+        self.requested_headers = []
+        self.requested_json = []
+
+    def request(self, method, url, headers=None, json=None):
+        normalized_method = str(method or "GET").upper()
+        self.requested_methods.append(normalized_method)
+        self.requested_urls.append(url)
+        self.requested_headers.append(dict(headers or {}))
+        self.requested_json.append(json)
+        payload = self.responses.get(f"{normalized_method} {url}", self.responses.get(url, {}))
+        status = 200
+        if isinstance(payload, tuple):
+            status, payload = payload
+        return FakeHTTPResponse(payload, status=status)
+
+    def get(self, url, headers=None):
+        return self.request("GET", url, headers=headers)
+
+
 class FakeCoinbaseExchange:
     def __init__(self, cfg):
         self.cfg = cfg
         self.closed = False
         self.sandbox_mode = None
+        self.id = "coinbase"
+        self.urls = {"api": {"rest": "https://api.coinbase.com"}}
         self.fetch_ticker_calls = []
         self.fetch_balance_calls = 0
         self.fetch_open_orders_calls = []
@@ -129,6 +178,25 @@ class FakeCoinbaseExchange:
 
     async def close(self):
         self.closed = True
+
+
+class FakeFastBootstrapCoinbaseExchange(FakeCoinbaseExchange):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.has["fetchMarkets"] = True
+        self.fetch_markets_calls = 0
+        self.load_markets_calls = 0
+
+    async def fetch_markets(self):
+        self.fetch_markets_calls += 1
+        return [
+            {"id": "BTC-USD", "symbol": "BTC/USD", "base": "BTC", "quote": "USD", "spot": True, "active": True},
+            {"id": "ETH-USD", "symbol": "ETH/USD", "base": "ETH", "quote": "USD", "spot": True, "active": True},
+        ]
+
+    async def load_markets(self):
+        self.load_markets_calls += 1
+        raise AssertionError("Coinbase fast bootstrap should avoid load_markets")
 
 
 class FakeSocket:
@@ -250,6 +318,40 @@ class FakeBuggyCoinbaseCreateOrderExchange(FakeCoinbaseExchange):
         return await super().create_order(symbol, order_type, side, amount, price, params)
 
 
+class FakeBuggyCoinbaseErrorHandlingExchange(FakeCoinbaseExchange):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.id = "coinbase"
+
+    def handle_errors(
+        self,
+        code,
+        reason,
+        url,
+        method,
+        headers,
+        body,
+        response,
+        request_headers,
+        request_body,
+    ):
+        raise RuntimeError(self.id + " " + body)
+
+    async def create_order(self, symbol, order_type, side, amount, price, params):
+        self.id = 123456789
+        self.handle_errors(
+            400,
+            "Bad Request",
+            "https://api.coinbase.com/api/v3/brokerage/orders",
+            "POST",
+            {},
+            '{"error":"bad request"}',
+            {},
+            {},
+            "{}",
+        )
+
+
 class FakeCoinbaseDerivativeExchange(FakeCoinbaseExchange):
     def __init__(self, cfg):
         super().__init__(cfg)
@@ -284,6 +386,68 @@ class FakeCoinbaseDerivativeExchange(FakeCoinbaseExchange):
     async def fetch_positions(self, symbols=None):
         self.fetch_positions_calls.append(symbols)
         return [{"symbol": "BTC/USD:USD", "contracts": 1.0, "side": "long"}]
+
+
+class FakeCoinbaseRawFuturesExchange(FakeCoinbaseExchange):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.has["fetchMarkets"] = True
+        self.has["fetchPositions"] = False
+        self.fetch_markets_calls = 0
+
+    async def fetch_markets(self):
+        self.fetch_markets_calls += 1
+        return [
+            {
+                "id": "SLP-20DEC30-CDE",
+                "symbol": "SLP/USD",
+                "base": "SLP",
+                "quote": "USD",
+                "type": "future",
+                "spot": False,
+                "future": False,
+                "swap": False,
+                "contract": False,
+                "active": True,
+                "info": {
+                    "product_id": "SLP-20DEC30-CDE",
+                    "product_type": "FUTURE",
+                    "product_venue": "FCM",
+                    "base_currency_id": "SLP",
+                    "quote_currency_id": "USD",
+                    "future_product_details": {
+                        "contract_expiry_type": "EXPIRING",
+                        "expiration_time": "2030-12-20T17:00:00Z",
+                    },
+                },
+            },
+            {
+                "id": "ETH-USD-20241227",
+                "symbol": "ETH/USD",
+                "base": "ETH",
+                "quote": "USD",
+                "type": "future",
+                "spot": False,
+                "future": False,
+                "swap": False,
+                "contract": False,
+                "active": True,
+                "info": {
+                    "product_id": "ETH-USD-20241227",
+                    "product_type": "FUTURE",
+                    "product_venue": "FCM",
+                    "base_currency_id": "ETH",
+                    "quote_currency_id": "USD",
+                    "future_product_details": {
+                        "contract_expiry_type": "EXPIRING",
+                        "expiration_time": "2024-12-27T17:00:00Z",
+                    },
+                },
+            },
+        ]
+
+    async def load_markets(self):
+        raise AssertionError("Coinbase futures bootstrap should use fetch_markets")
 
 
 def test_coinbase_ccxt_broker_supports_market_data_and_order_methods(monkeypatch):
@@ -358,6 +522,49 @@ def test_coinbase_ccxt_broker_supports_market_data_and_order_methods(monkeypatch
     asyncio.run(scenario())
 
 
+def test_coinbase_ccxt_broker_uses_fast_market_bootstrap_when_fetch_markets_is_available(monkeypatch):
+    import broker.ccxt_broker as broker_mod
+
+    monkeypatch.setattr(
+        broker_mod.aiohttp,
+        "TCPConnector",
+        lambda family=None, resolver=None, ttl_dns_cache=None: {
+            "family": family,
+            "resolver": resolver,
+            "ttl_dns_cache": ttl_dns_cache,
+        },
+    )
+    monkeypatch.setattr(broker_mod.aiohttp, "ThreadedResolver", lambda: "threaded-resolver")
+    monkeypatch.setattr(broker_mod.aiohttp, "ClientSession", lambda connector=None, **kwargs: FakeSession(connector=connector, **kwargs))
+    monkeypatch.setattr(broker_mod.ccxt, "coinbase", FakeFastBootstrapCoinbaseExchange, raising=False)
+
+    async def scenario():
+        broker = CCXTBroker(
+            SimpleNamespace(
+                exchange="coinbase",
+                api_key="key",
+                secret="secret",
+                password=None,
+                uid=None,
+                mode="live",
+                sandbox=False,
+                timeout=15000,
+                options={},
+                params={},
+            )
+        )
+
+        await broker.connect()
+
+        assert broker.symbols == ["BTC/USD", "ETH/USD"]
+        assert broker.exchange.fetch_markets_calls == 1
+        assert broker.exchange.load_markets_calls == 0
+
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
 def test_coinbase_ccxt_broker_restores_exchange_id_after_create_order(monkeypatch):
     import broker.ccxt_broker as broker_mod
 
@@ -409,6 +616,214 @@ def test_coinbase_ccxt_broker_restores_exchange_id_after_create_order(monkeypatc
 
         assert order["id"] == "cb-1"
         assert broker.exchange.id == "coinbase"
+
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_coinbase_ccxt_broker_preserves_exchange_id_during_error_handling(monkeypatch):
+    import broker.ccxt_broker as broker_mod
+
+    monkeypatch.setattr(
+        broker_mod.aiohttp,
+        "TCPConnector",
+        lambda family=None, resolver=None, ttl_dns_cache=None: {
+            "family": family,
+            "resolver": resolver,
+            "ttl_dns_cache": ttl_dns_cache,
+        },
+    )
+    monkeypatch.setattr(broker_mod.aiohttp, "ThreadedResolver", lambda: "threaded-resolver")
+    monkeypatch.setattr(broker_mod.aiohttp, "ClientSession", lambda connector=None, **kwargs: FakeSession(connector=connector, **kwargs))
+    monkeypatch.setattr(broker_mod.ccxt, "coinbase", FakeBuggyCoinbaseErrorHandlingExchange, raising=False)
+
+    async def scenario():
+        broker = CCXTBroker(
+            SimpleNamespace(
+                exchange="coinbase",
+                api_key="organizations/test/apiKeys/key-1",
+                secret=(
+                    "-----BEGIN EC PRIVATE KEY-----\n"
+                    "MHcCAQEEIAqSV4qAfY1Nm0xd6k95EZ39suUWAuze5Vuhn671kB9OoAoGCCqGSM49\n"
+                    "AwEHoUQDQgAEcgYO1ly0wyz23wipRFpoM6Oyvh6WB1wy9EB8PHhrNw5VSJsAqsb7\n"
+                    "gc1E+mZ1HVX3H8eKNlw8GrQCQJsZ5ExllA==\n"
+                    "-----END EC PRIVATE KEY-----\n"
+                ),
+                password=None,
+                uid=None,
+                mode="live",
+                sandbox=False,
+                timeout=15000,
+                options={},
+                params={},
+            )
+        )
+
+        await broker.connect()
+        assert broker.exchange.id == "coinbase"
+
+        try:
+            await broker.create_order(
+                symbol="BTC/USD",
+                side="buy",
+                amount=0.01,
+                type="limit",
+                price=65000.0,
+            )
+        except RuntimeError as exc:
+            assert str(exc) == 'coinbase {"error":"bad request"}'
+        else:
+            raise AssertionError("Expected create_order to surface the exchange error")
+
+        assert broker.exchange.id == "coinbase"
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_coinbase_ccxt_broker_exposes_advanced_trade_helpers():
+    broker = CCXTBroker(SimpleNamespace(exchange="coinbase", options={}, params={}))
+
+    expected_methods = [
+        "fetch_coinbase_accounts",
+        "fetch_coinbase_account",
+        "create_coinbase_order",
+        "cancel_coinbase_orders",
+        "fetch_coinbase_orders",
+        "fetch_coinbase_fills",
+        "fetch_coinbase_historical_order",
+        "preview_coinbase_order",
+        "fetch_coinbase_best_bid_ask",
+        "fetch_coinbase_product_book",
+        "fetch_coinbase_products",
+        "fetch_coinbase_product",
+        "fetch_coinbase_product_candles",
+        "fetch_coinbase_market_trades",
+        "fetch_coinbase_transaction_summary",
+        "create_coinbase_convert_quote",
+        "commit_coinbase_convert_trade",
+        "fetch_coinbase_convert_trade",
+        "fetch_coinbase_portfolios",
+        "create_coinbase_portfolio",
+        "move_coinbase_portfolio_funds",
+        "fetch_coinbase_portfolio_breakdown",
+        "delete_coinbase_portfolio",
+        "edit_coinbase_portfolio",
+        "fetch_coinbase_futures_balance_summary",
+        "fetch_coinbase_futures_positions",
+        "fetch_coinbase_futures_position",
+        "schedule_coinbase_futures_sweep",
+        "fetch_coinbase_futures_sweeps",
+        "cancel_coinbase_futures_sweep",
+        "fetch_coinbase_intraday_margin_setting",
+        "set_coinbase_intraday_margin_setting",
+        "fetch_coinbase_current_margin_window",
+        "fetch_coinbase_perpetuals_portfolio_summary",
+        "fetch_coinbase_perpetuals_positions",
+        "fetch_coinbase_perpetuals_position",
+        "fetch_coinbase_perpetuals_balances",
+        "opt_in_coinbase_multi_asset_collateral",
+        "allocate_coinbase_portfolio",
+        "fetch_coinbase_payment_methods",
+        "fetch_coinbase_payment_method",
+        "fetch_coinbase_key_permissions",
+        "fetch_coinbase_server_time",
+        "fetch_coinbase_public_product_book",
+        "fetch_coinbase_public_products",
+        "fetch_coinbase_public_product",
+        "fetch_coinbase_public_product_candles",
+        "fetch_coinbase_public_market_trades",
+    ]
+
+    missing = [name for name in expected_methods if not callable(getattr(broker, name, None))]
+    assert missing == []
+
+
+def test_coinbase_ccxt_broker_routes_advanced_trade_requests(monkeypatch):
+    import broker.ccxt_broker as broker_mod
+
+    monkeypatch.setattr(
+        broker_mod.aiohttp,
+        "TCPConnector",
+        lambda family=None, resolver=None, ttl_dns_cache=None: {
+            "family": family,
+            "resolver": resolver,
+            "ttl_dns_cache": ttl_dns_cache,
+        },
+    )
+    monkeypatch.setattr(broker_mod.aiohttp, "ThreadedResolver", lambda: "threaded-resolver")
+    api_session = FakeCoinbaseApiSession(
+        responses={
+            "GET https://api.coinbase.com/api/v3/brokerage/accounts": {"accounts": [{"uuid": "acct-1"}]},
+            "POST https://api.coinbase.com/api/v3/brokerage/orders/preview": {"preview_id": "preview-1"},
+            "GET https://api.coinbase.com/api/v3/brokerage/orders/historical/batch?product_id=BTC-USD&limit=25": {
+                "orders": [{"order_id": "order-1"}]
+            },
+            "GET https://api.coinbase.com/api/v3/brokerage/key_permissions": {"permissions": ["view", "trade"]},
+            "GET https://api.coinbase.com/api/v3/brokerage/market/products?limit=2": {"products": [{"product_id": "BTC-USD"}]},
+            "GET https://api.coinbase.com/api/v3/brokerage/time": {"iso": "2026-04-07T08:15:53Z"},
+        }
+    )
+    monkeypatch.setattr(
+        broker_mod.aiohttp,
+        "ClientSession",
+        lambda connector=None, **kwargs: api_session,
+    )
+    monkeypatch.setattr(broker_mod.ccxt, "coinbase", FakeCoinbaseExchange, raising=False)
+
+    async def scenario():
+        broker = broker_mod.CCXTBroker(
+            SimpleNamespace(
+                exchange="coinbase",
+                api_key="organizations/test/apiKeys/key-1",
+                secret=(
+                    "-----BEGIN EC PRIVATE KEY-----\n"
+                    "MHcCAQEEIAqSV4qAfY1Nm0xd6k95EZ39suUWAuze5Vuhn671kB9OoAoGCCqGSM49\n"
+                    "AwEHoUQDQgAEcgYO1ly0wyz23wipRFpoM6Oyvh6WB1wy9EB8PHhrNw5VSJsAqsb7\n"
+                    "gc1E+mZ1HVX3H8eKNlw8GrQCQJsZ5ExllA==\n"
+                    "-----END EC PRIVATE KEY-----\n"
+                ),
+                password=None,
+                uid=None,
+                mode="live",
+                sandbox=False,
+                timeout=15000,
+                options={},
+                params={},
+            )
+        )
+
+        await broker.connect()
+
+        accounts = await broker.fetch_coinbase_accounts()
+        preview = await broker.preview_coinbase_order({"product_id": "BTC-USD", "side": "BUY"})
+        orders = await broker.fetch_coinbase_orders(params={"product_id": "BTC-USD", "limit": 25})
+        permissions = await broker.fetch_coinbase_key_permissions()
+        public_products = await broker.fetch_coinbase_public_products(params={"limit": 2})
+        server_time = await broker.fetch_coinbase_server_time()
+
+        assert accounts["accounts"][0]["uuid"] == "acct-1"
+        assert preview["preview_id"] == "preview-1"
+        assert orders["orders"][0]["order_id"] == "order-1"
+        assert permissions["permissions"] == ["view", "trade"]
+        assert public_products["products"][0]["product_id"] == "BTC-USD"
+        assert server_time["iso"] == "2026-04-07T08:15:53Z"
+
+        assert api_session.requested_methods == ["GET", "POST", "GET", "GET", "GET", "GET"]
+        assert api_session.requested_urls == [
+            "https://api.coinbase.com/api/v3/brokerage/accounts",
+            "https://api.coinbase.com/api/v3/brokerage/orders/preview",
+            "https://api.coinbase.com/api/v3/brokerage/orders/historical/batch?product_id=BTC-USD&limit=25",
+            "https://api.coinbase.com/api/v3/brokerage/key_permissions",
+            "https://api.coinbase.com/api/v3/brokerage/market/products?limit=2",
+            "https://api.coinbase.com/api/v3/brokerage/time",
+        ]
+        assert api_session.requested_json[1] == {"product_id": "BTC-USD", "side": "BUY"}
+        assert api_session.requested_headers[0]["Authorization"].startswith("Bearer ")
+        assert api_session.requested_headers[1]["Authorization"].startswith("Bearer ")
+        assert "Authorization" not in api_session.requested_headers[4]
+        assert "Authorization" not in api_session.requested_headers[5]
 
         await broker.close()
 
@@ -514,6 +929,153 @@ def test_coinbase_ccxt_broker_derivative_mode_uses_native_positions(monkeypatch)
         assert broker._supports_positions_endpoint() is True
         assert positions[0]["symbol"] == "BTC/USD:USD"
         assert broker.exchange.fetch_positions_calls == [None]
+
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_coinbase_ccxt_broker_hydrates_futures_markets_from_coinbase_products(monkeypatch):
+    import broker.ccxt_broker as broker_mod
+
+    monkeypatch.setattr(
+        broker_mod.aiohttp,
+        "TCPConnector",
+        lambda family=None, resolver=None, ttl_dns_cache=None: {
+            "family": family,
+            "resolver": resolver,
+            "ttl_dns_cache": ttl_dns_cache,
+        },
+    )
+    monkeypatch.setattr(broker_mod.aiohttp, "ThreadedResolver", lambda: "threaded-resolver")
+    monkeypatch.setattr(broker_mod.aiohttp, "ClientSession", lambda connector=None, **kwargs: FakeSession(connector=connector, **kwargs))
+    monkeypatch.setattr(broker_mod.ccxt, "coinbase", FakeCoinbaseRawFuturesExchange, raising=False)
+
+    async def scenario():
+        broker = broker_mod.CCXTBroker(
+            SimpleNamespace(
+                exchange="coinbase",
+                api_key="organizations/test/apiKeys/key-1",
+                secret=(
+                    "-----BEGIN EC PRIVATE KEY-----\n"
+                    "MHcCAQEEIAqSV4qAfY1Nm0xd6k95EZ39suUWAuze5Vuhn671kB9OoAoGCCqGSM49\n"
+                    "AwEHoUQDQgAEcgYO1ly0wyz23wipRFpoM6Oyvh6WB1wy9EB8PHhrNw5VSJsAqsb7\n"
+                    "gc1E+mZ1HVX3H8eKNlw8GrQCQJsZ5ExllA==\n"
+                    "-----END EC PRIVATE KEY-----\n"
+                ),
+                password=None,
+                uid=None,
+                mode="live",
+                sandbox=False,
+                timeout=15000,
+                options={"market_type": "derivative"},
+                params={},
+            )
+        )
+
+        await broker.connect()
+
+        assert broker.exchange.cfg["options"]["defaultType"] == "future"
+        assert sorted(broker.symbols) == ["ETH-USD-20241227", "SLP-20DEC30-CDE"]
+        assert broker.supported_market_venues() == ["auto", "spot", "derivative"]
+        assert broker._supports_positions_endpoint() is True
+        assert broker.exchange.fetch_markets_calls == 1
+        assert broker.exchange.markets["SLP-20DEC30-CDE"]["future"] is True
+        assert broker.exchange.markets["SLP-20DEC30-CDE"]["contract"] is True
+        assert broker.exchange.markets["SLP-20DEC30-CDE"]["underlying_symbol"] == "SLP/USD"
+        assert broker.exchange.markets["SLP-20DEC30-CDE"]["native_symbol"] == "SLP-20DEC30-CDE"
+
+        await broker.close()
+
+    asyncio.run(scenario())
+
+
+def test_coinbase_ccxt_broker_fetches_futures_balance_and_positions_via_direct_cfm_api(monkeypatch):
+    import broker.ccxt_broker as broker_mod
+
+    monkeypatch.setattr(
+        broker_mod.aiohttp,
+        "TCPConnector",
+        lambda family=None, resolver=None, ttl_dns_cache=None: {
+            "family": family,
+            "resolver": resolver,
+            "ttl_dns_cache": ttl_dns_cache,
+        },
+    )
+    monkeypatch.setattr(broker_mod.aiohttp, "ThreadedResolver", lambda: "threaded-resolver")
+    api_session = FakeCoinbaseApiSession(
+        responses={
+            "https://api.coinbase.com/api/v3/brokerage/cfm/balance_summary": {
+                "balance_summary": {
+                    "total_usd_balance": "12500.50",
+                    "cfm_usd_balance": "8200.25",
+                    "available_margin": "3500.00",
+                    "futures_buying_power": "4000.00",
+                    "unrealized_pnl": "125.50",
+                }
+            },
+            "https://api.coinbase.com/api/v3/brokerage/cfm/positions": {
+                "positions": [
+                    {
+                        "product_id": "SLP-20DEC30-CDE",
+                        "side": "LONG",
+                        "number_of_contracts": "2",
+                        "avg_entry_price": "62000.0",
+                        "current_price": "63000.0",
+                        "unrealized_pnl": "200.0",
+                        "daily_realized_pnl": "50.0",
+                        "expiration_time": "2024-12-27T17:00:00Z",
+                    }
+                ]
+            },
+        }
+    )
+    monkeypatch.setattr(
+        broker_mod.aiohttp,
+        "ClientSession",
+        lambda connector=None, **kwargs: api_session,
+    )
+    monkeypatch.setattr(broker_mod.ccxt, "coinbase", FakeCoinbaseRawFuturesExchange, raising=False)
+
+    async def scenario():
+        broker = broker_mod.CCXTBroker(
+            SimpleNamespace(
+                exchange="coinbase",
+                api_key="organizations/test/apiKeys/key-1",
+                secret=(
+                    "-----BEGIN EC PRIVATE KEY-----\n"
+                    "MHcCAQEEIAqSV4qAfY1Nm0xd6k95EZ39suUWAuze5Vuhn671kB9OoAoGCCqGSM49\n"
+                    "AwEHoUQDQgAEcgYO1ly0wyz23wipRFpoM6Oyvh6WB1wy9EB8PHhrNw5VSJsAqsb7\n"
+                    "gc1E+mZ1HVX3H8eKNlw8GrQCQJsZ5ExllA==\n"
+                    "-----END EC PRIVATE KEY-----\n"
+                ),
+                password=None,
+                uid=None,
+                mode="live",
+                sandbox=False,
+                timeout=15000,
+                options={"market_type": "derivative"},
+                params={},
+            )
+        )
+
+        await broker.connect()
+        balance = await broker.fetch_balance()
+        positions = await broker.fetch_positions()
+
+        assert balance["equity"] == 12500.5
+        assert balance["cash"] == 8200.25
+        assert balance["free"]["USD"] == 3500.0
+        assert positions[0]["symbol"] == "SLP-20DEC30-CDE"
+        assert positions[0]["product_id"] == "SLP-20DEC30-CDE"
+        assert positions[0]["contracts"] == 2.0
+        assert positions[0]["side"] == "long"
+        assert positions[0]["instrument"]["type"] == "future"
+        assert api_session.requested_urls == [
+            "https://api.coinbase.com/api/v3/brokerage/cfm/balance_summary",
+            "https://api.coinbase.com/api/v3/brokerage/cfm/positions",
+        ]
+        assert api_session.requested_headers[0]["Authorization"].startswith("Bearer ")
 
         await broker.close()
 
@@ -964,25 +1526,35 @@ def test_coinbase_ccxt_broker_backfills_requested_ohlcv_limit(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_coinbase_websocket_normalizes_product_ids_to_app_symbols(monkeypatch):
+def test_coinbase_websocket_uses_advanced_trade_ticker_messages(monkeypatch):
     import market_data.websocket.coinbase_web_socket as ws_mod
 
     payload = json.dumps(
         {
-            "type": "ticker",
-            "product_id": "BTC-USD",
-            "price": "65000.10",
-            "best_bid": "64999.50",
-            "best_ask": "65000.50",
-            "volume_24h": "120.5",
-            "time": "2026-03-10T10:00:00Z",
+            "channel": "ticker",
+            "timestamp": "2026-03-10T10:00:00Z",
+            "events": [
+                {
+                    "type": "snapshot",
+                    "tickers": [
+                        {
+                            "product_id": "SLP-20DEC30-CDE",
+                            "price": "65000.10",
+                            "best_bid": "64999.50",
+                            "best_ask": "65000.50",
+                            "volume_24_h": "120.5",
+                        }
+                    ],
+                }
+            ],
         }
     )
-    monkeypatch.setattr(ws_mod.websockets, "connect", lambda url: FakeSocket([payload]))
+    socket = FakeSocket([payload])
+    monkeypatch.setattr(ws_mod.websockets, "connect", lambda url: socket)
 
     async def scenario():
         bus = EventBus()
-        client = CoinbaseWebSocket(symbols=["BTC-USD"], event_bus=bus)
+        client = CoinbaseWebSocket(symbols=["SLP-20DEC30-CDE"], event_bus=bus)
 
         try:
             await client.connect()
@@ -990,7 +1562,12 @@ def test_coinbase_websocket_normalizes_product_ids_to_app_symbols(monkeypatch):
             pass
 
         event = await bus.queue.get()
-        assert event.data["symbol"] == "BTC/USD"
+        assert json.loads(socket.sent) == {
+            "type": "subscribe",
+            "channel": "ticker",
+            "product_ids": ["SLP-20DEC30-CDE"],
+        }
+        assert event.data["symbol"] == "SLP-20DEC30-CDE"
         assert event.data["bid"] == 64999.5
         assert event.data["ask"] == 65000.5
 

@@ -1,10 +1,12 @@
 import asyncio
 import copy
 from datetime import datetime, timezone
+import json
 import logging
 import re
 import socket
 import time
+from urllib.parse import urlencode
 
 import aiohttp
 import ccxt.async_support as ccxt
@@ -23,6 +25,25 @@ _COINBASE_EXCHANGE_CLASS_CACHE = {}
 
 
 class _CoinbaseJWTAuthMixin:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        stable_id = str(getattr(self, "id", "")).strip() or "coinbase"
+        self._sopotek_exchange_id = stable_id
+        self.id = stable_id
+
+    def _stable_exchange_id(self):
+        stable_id = str(getattr(self, "_sopotek_exchange_id", "")).strip()
+        if stable_id:
+            return stable_id
+        current_id = str(getattr(self, "id", "")).strip() or "coinbase"
+        self._sopotek_exchange_id = current_id
+        return current_id
+
+    def _restore_exchange_id(self):
+        stable_id = self._stable_exchange_id()
+        self.id = stable_id
+        return stable_id
+
     def sign(self, path, api=None, method="GET", params=None, headers=None, body=None):
         api = api or []
         params = params or {}
@@ -61,9 +82,38 @@ class _CoinbaseJWTAuthMixin:
         }
 
     async def create_order(self, symbol, type, side, amount, price=None, params=None):
-        original_id = getattr(self, "id", None)
+        original_id = self._restore_exchange_id()
         try:
             return await super().create_order(symbol, type, side, amount, price, params)
+        finally:
+            if original_id is not None:
+                self.id = original_id
+
+    def handle_errors(
+        self,
+        code,
+        reason,
+        url,
+        method,
+        headers,
+        body,
+        response,
+        request_headers,
+        request_body,
+    ):
+        original_id = self._restore_exchange_id()
+        try:
+            return super().handle_errors(
+                code,
+                reason,
+                url,
+                method,
+                headers,
+                body,
+                response,
+                request_headers,
+                request_body,
+            )
         finally:
             if original_id is not None:
                 self.id = original_id
@@ -83,6 +133,8 @@ def _coinbase_exchange_class(base_class):
 
 class CCXTBroker(BaseBroker):
     DEFAULT_TIMEOUT_MS = 30000
+    COINBASE_FUTURES_BALANCE_PATH = "/api/v3/brokerage/cfm/balance_summary"
+    COINBASE_FUTURES_POSITIONS_PATH = "/api/v3/brokerage/cfm/positions"
     COINBASE_MAX_OHLCV_CANDLES = 300
     GENERIC_MAX_OHLCV_CANDLES = 1000
     COINBASE_OHLCV_CACHE_SECONDS = 8.0
@@ -198,8 +250,23 @@ class CCXTBroker(BaseBroker):
         return str(self.exchange_name or "").strip().lower()
 
     @staticmethod
+    def _looks_like_native_contract_symbol(symbol):
+        text = str(symbol or "").strip().upper()
+        if not text or "/" in text or "_" in text:
+            return False
+        if "PERP" in text:
+            return True
+        return bool(
+            re.fullmatch(r"[A-Z0-9]+-\d{2}[A-Z]{3}\d{2}-[A-Z0-9]+", text)
+            or re.fullmatch(r"[A-Z0-9]+-[A-Z0-9]+-\d{8}", text)
+        )
+
+    @staticmethod
     def _normalize_market_symbol(symbol):
-        return str(symbol or "").strip().upper().replace("_", "/").replace("-", "/")
+        text = str(symbol or "").strip().upper()
+        if CCXTBroker._looks_like_native_contract_symbol(text):
+            return text
+        return text.replace("_", "/").replace("-", "/")
 
     def _refresh_market_symbol_lookup(self, markets=None):
         lookup = set()
@@ -388,7 +455,7 @@ class CCXTBroker(BaseBroker):
         if self.market_preference == "derivative":
             subtype = str(self.extra_options.get("defaultSubType", "") or "").strip().lower()
             if self._exchange_code() == "coinbase":
-                return subtype if subtype in {"future", "swap"} else None
+                return subtype if subtype in {"future", "swap"} else "future"
             return "future" if subtype == "future" else "swap"
         return None
 
@@ -454,6 +521,157 @@ class CCXTBroker(BaseBroker):
         if summary["derivative"] and not summary["spot"]:
             return True
         return False
+
+    @staticmethod
+    def _coinbase_market_info(market):
+        info = (market or {}).get("info") if isinstance(market, dict) else None
+        return dict(info) if isinstance(info, dict) else {}
+
+    @classmethod
+    def _coinbase_market_subtype(cls, market):
+        if not isinstance(market, dict):
+            return ""
+        if bool(market.get("swap")):
+            return "swap"
+        if bool(market.get("future")):
+            return "future"
+
+        info = cls._coinbase_market_info(market)
+        future_details = info.get("future_product_details")
+        future_details = future_details if isinstance(future_details, dict) else {}
+        perpetual_details = info.get("perpetual_details")
+        perpetual_details = perpetual_details if isinstance(perpetual_details, dict) else {}
+        contract_expiry_type = str(
+            future_details.get("contract_expiry_type")
+            or perpetual_details.get("contract_expiry_type")
+            or info.get("contract_expiry_type")
+            or ""
+        ).strip().upper()
+        product_venue = str(info.get("product_venue") or "").strip().upper()
+        product_id = str(info.get("product_id") or market.get("id") or "").strip().upper()
+        product_type = str(info.get("product_type") or market.get("type") or "").strip().upper()
+
+        if (
+            contract_expiry_type == "PERPETUAL"
+            or "PERP" in product_id
+            or product_venue == "INTX"
+            or perpetual_details
+        ):
+            return "swap"
+        if product_type == "FUTURE" or future_details:
+            return "future"
+        return ""
+
+    @classmethod
+    def _coinbase_market_settle_currency(cls, market):
+        info = cls._coinbase_market_info(market)
+        for candidate in (
+            info.get("settlement_currency_id"),
+            info.get("quote_currency_id"),
+            info.get("quote_display_symbol"),
+            market.get("settle") if isinstance(market, dict) else None,
+            market.get("quote") if isinstance(market, dict) else None,
+        ):
+            text = str(candidate or "").strip().upper()
+            if text:
+                return text
+        return ""
+
+    @classmethod
+    def _hydrate_coinbase_market(cls, market):
+        if not isinstance(market, dict):
+            return market
+
+        hydrated = dict(market)
+        subtype = cls._coinbase_market_subtype(hydrated)
+        if not subtype:
+            if str(hydrated.get("type") or "").strip().lower() == "spot":
+                hydrated["spot"] = True
+            return hydrated
+
+        info = cls._coinbase_market_info(hydrated)
+        future_details = info.get("future_product_details")
+        future_details = future_details if isinstance(future_details, dict) else {}
+        base = str(info.get("base_currency_id") or hydrated.get("base") or "").strip().upper()
+        quote = str(info.get("quote_currency_id") or hydrated.get("quote") or "").strip().upper()
+        settle = cls._coinbase_market_settle_currency(hydrated) or quote
+        native_symbol = str(info.get("product_id") or hydrated.get("id") or "").strip().upper()
+        if subtype == "future" and native_symbol:
+            symbol = native_symbol
+        elif base and quote and settle:
+            symbol = f"{base}/{quote}:{settle}"
+        else:
+            symbol = str(hydrated.get("symbol") or hydrated.get("id") or "").strip().upper()
+
+        expiry = (
+            future_details.get("expiration_time")
+            or future_details.get("contract_expiry")
+            or info.get("expiration_time")
+            or info.get("contract_expiry")
+        )
+
+        hydrated.update(
+            {
+                "symbol": symbol,
+                "settle": settle or None,
+                "settleId": settle or None,
+                "type": subtype,
+                "spot": False,
+                "contract": True,
+                "future": subtype == "future",
+                "swap": subtype == "swap",
+                "option": False,
+            }
+        )
+        if base and quote:
+            hydrated["underlying_symbol"] = f"{base}/{quote}"
+        if native_symbol:
+            hydrated["native_symbol"] = native_symbol
+        if expiry:
+            hydrated["expiryDatetime"] = expiry
+        return hydrated
+
+    @classmethod
+    def _hydrate_coinbase_markets(cls, markets):
+        if isinstance(markets, dict):
+            hydrated = {}
+            for market_symbol, market in markets.items():
+                if not isinstance(market, dict):
+                    continue
+                item = cls._hydrate_coinbase_market(market)
+                key = str((item or {}).get("symbol") or market_symbol or "").strip()
+                if key:
+                    hydrated[key] = item
+            return hydrated
+
+        if isinstance(markets, list):
+            return [
+                cls._hydrate_coinbase_market(market)
+                for market in list(markets or [])
+                if isinstance(market, dict)
+            ]
+
+        return markets
+
+    def _coinbase_derivative_subtype(self):
+        subtype = str(self.extra_options.get("defaultSubType", "") or "").strip().lower()
+        if subtype in {"future", "swap"}:
+            return subtype
+
+        markets = getattr(self.exchange, "markets", None)
+        if isinstance(markets, dict) and markets:
+            if any(self._coinbase_market_subtype(market) == "future" for market in markets.values()):
+                return "future"
+            if any(self._coinbase_market_subtype(market) == "swap" for market in markets.values()):
+                return "swap"
+
+        effective_preference = normalize_market_venue(
+            getattr(self, "resolved_market_preference", None),
+            default=self.market_preference or "auto",
+        )
+        if effective_preference == "derivative":
+            return "future"
+        return ""
 
     def _filtered_symbols_from_markets(self, markets):
         if not isinstance(markets, dict):
@@ -592,6 +810,66 @@ class CCXTBroker(BaseBroker):
             self._coinbase_ohlcv_semaphore = limiter
         return limiter
 
+    def _install_exchange_markets(self, markets):
+        if self.exchange is None:
+            return {}
+
+        normalized = markets
+        if self._exchange_code() == "coinbase":
+            normalized = self._hydrate_coinbase_markets(markets)
+
+        currencies = getattr(self.exchange, "currencies", None)
+        if hasattr(self.exchange, "set_markets"):
+            payload = list(normalized.values()) if isinstance(normalized, dict) else normalized
+            try:
+                self.exchange.set_markets(payload, currencies=currencies)
+            except TypeError:
+                self.exchange.set_markets(normalized, currencies=currencies)
+        elif hasattr(self.exchange, "setMarkets"):
+            payload = list(normalized.values()) if isinstance(normalized, dict) else normalized
+            try:
+                self.exchange.setMarkets(payload, currencies)
+            except TypeError:
+                self.exchange.setMarkets(normalized, currencies)
+        elif isinstance(normalized, dict):
+            self.exchange.markets = dict(normalized)
+        else:
+            self.exchange.markets = {
+                str((market or {}).get("symbol") or (market or {}).get("id") or "").strip(): dict(market)
+                for market in list(normalized or [])
+                if isinstance(market, dict)
+                and str((market or {}).get("symbol") or (market or {}).get("id") or "").strip()
+            }
+
+        hydrated = getattr(self.exchange, "markets", None)
+        if isinstance(hydrated, dict) and hydrated:
+            return hydrated
+        return normalized if isinstance(normalized, dict) else {}
+
+    async def _load_exchange_markets(self):
+        if self.exchange is None:
+            return {}
+
+        exchange_code = self._exchange_code()
+        if exchange_code == "coinbase" and self._exchange_has("fetchMarkets"):
+            try:
+                fast_markets = await self.exchange.fetch_markets()
+                if fast_markets:
+                    hydrated = self._install_exchange_markets(fast_markets)
+                    if isinstance(hydrated, dict) and hydrated:
+                        self.logger.info("Coinbase fast market bootstrap loaded %s markets", len(hydrated))
+                        return hydrated
+            except Exception as exc:
+                self.logger.debug("Coinbase fast market bootstrap fell back to load_markets: %s", exc)
+
+        loaded = await self.exchange.load_markets()
+        markets = getattr(self.exchange, "markets", None)
+        if exchange_code == "coinbase":
+            markets = self._install_exchange_markets(markets if isinstance(markets, dict) and markets else loaded)
+        if isinstance(markets, dict) and markets:
+            return markets
+        return markets if isinstance(markets, dict) else (loaded if isinstance(loaded, dict) else {})
+
     @staticmethod
     def _ticker_mid_price(ticker):
         if not isinstance(ticker, dict):
@@ -691,8 +969,9 @@ class CCXTBroker(BaseBroker):
             if base and quote:
                 return base, quote
 
-        normalized = str((market or {}).get("symbol") if isinstance(market, dict) else symbol or "").upper().strip()
-        normalized = normalized.replace("_", "/").replace("-", "/")
+        normalized = CCXTBroker._normalize_market_symbol(
+            (market or {}).get("symbol") if isinstance(market, dict) else symbol
+        )
         if "/" not in normalized:
             return "", ""
         base, quote = normalized.split("/", 1)
@@ -893,14 +1172,13 @@ class CCXTBroker(BaseBroker):
         requested_symbols = set()
         requested_assets = set()
         for symbol in symbols or []:
-            normalized = str(symbol or "").upper().strip()
+            normalized = CCXTBroker._normalize_market_symbol(symbol)
             if not normalized:
                 continue
-            compact = normalized.replace("_", "/").replace("-", "/")
-            requested_symbols.add(compact)
-            requested_assets.add(compact.split("/", 1)[0] if "/" in compact else compact)
+            requested_symbols.add(normalized)
+            requested_assets.add(normalized.split("/", 1)[0] if "/" in normalized else normalized)
 
-        position_symbol = str(position.get("symbol") or "").upper().strip().replace("_", "/").replace("-", "/")
+        position_symbol = CCXTBroker._normalize_market_symbol(position.get("symbol"))
         asset_code = str(position.get("asset_code") or "").upper().strip()
         return position_symbol in requested_symbols or asset_code in requested_assets
 
@@ -935,6 +1213,682 @@ class CCXTBroker(BaseBroker):
             normalized.setdefault("total_account_value", account_value)
             normalized.setdefault("net_liquidation", account_value)
         return normalized
+
+    @staticmethod
+    def _safe_float_value(value, default=0.0):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _coinbase_market_by_product_id(self, product_id):
+        normalized_id = str(product_id or "").strip()
+        if not normalized_id:
+            return None
+
+        markets_by_id = getattr(self.exchange, "markets_by_id", None)
+        if isinstance(markets_by_id, dict):
+            direct = markets_by_id.get(normalized_id)
+            if isinstance(direct, dict):
+                return direct
+            if isinstance(direct, list):
+                for market in direct:
+                    if isinstance(market, dict):
+                        return market
+
+        markets = getattr(self.exchange, "markets", None)
+        if not isinstance(markets, dict):
+            return None
+        for market in markets.values():
+            if not isinstance(market, dict):
+                continue
+            if str(market.get("id") or "").strip() == normalized_id:
+                return market
+        return None
+
+    def _coinbase_rest_base_url(self):
+        return str(
+            ((getattr(self.exchange, "urls", {}) or {}).get("api", {}) or {}).get("rest") or "https://api.coinbase.com"
+        ).rstrip("/")
+
+    @staticmethod
+    def _coinbase_normalize_request_path(path):
+        request_path = str(path or "").strip()
+        if not request_path:
+            raise ValueError("Coinbase request path is required")
+        if not request_path.startswith("/"):
+            request_path = "/" + request_path
+        return request_path
+
+    @staticmethod
+    def _coinbase_query_pairs(params):
+        if not isinstance(params, dict):
+            return []
+
+        pairs = []
+        for key, value in params.items():
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    if item is not None:
+                        pairs.append((key, item))
+                continue
+            pairs.append((key, value))
+        return pairs
+
+    def _coinbase_request_target(self, path, params=None):
+        rest_url = self._coinbase_rest_base_url()
+        request_path = self._coinbase_normalize_request_path(path)
+        query_pairs = self._coinbase_query_pairs(params)
+        query_string = urlencode(query_pairs, doseq=True) if query_pairs else ""
+        full_path = request_path if not query_string else f"{request_path}?{query_string}"
+        return rest_url, request_path, full_path
+
+    def _coinbase_request_headers(self, method, request_path, *, authenticated=True, headers=None):
+        request_headers = {
+            "Content-Type": "application/json",
+        }
+        if authenticated:
+            jwt_token = build_coinbase_rest_jwt(
+                request_method=method,
+                request_host=resolve_coinbase_rest_host(self._coinbase_rest_base_url()),
+                request_path=request_path,
+                api_key=self.api_key,
+                api_secret=self.secret,
+            )
+            request_headers["Authorization"] = f"Bearer {jwt_token}"
+        if isinstance(headers, dict):
+            request_headers.update(headers)
+        return request_headers
+
+    def _coinbase_session_request(self, method, url, **kwargs):
+        request = getattr(self.session, "request", None)
+        if callable(request):
+            return request(method, url, **kwargs)
+
+        method_callable = getattr(self.session, str(method or "").strip().lower(), None)
+        if not callable(method_callable):
+            raise RuntimeError(f"Coinbase session does not support {method} requests")
+        return method_callable(url, **kwargs)
+
+    async def _coinbase_request_json(self, method, path, params=None, payload=None, *, authenticated=True, headers=None):
+        await self._ensure_connected()
+        if self.session is None:
+            raise RuntimeError("Coinbase session is not initialized")
+
+        normalized_method = str(method or "GET").strip().upper() or "GET"
+        rest_url, request_path, full_path = self._coinbase_request_target(path, params=params)
+        request_headers = self._coinbase_request_headers(
+            normalized_method,
+            request_path,
+            authenticated=authenticated,
+            headers=headers,
+        )
+        request_kwargs = {"headers": request_headers}
+        if payload is not None:
+            request_kwargs["json"] = payload
+
+        async with self._coinbase_session_request(normalized_method, f"{rest_url}{full_path}", **request_kwargs) as response:
+            body_text = await response.text()
+            if int(getattr(response, "status", 0) or 0) >= 400:
+                raise RuntimeError(
+                    f"Coinbase request failed ({response.status}) for {normalized_method} {request_path}: "
+                    f"{body_text.strip() or 'empty response'}"
+                )
+            try:
+                return await response.json(content_type=None)
+            except Exception:
+                return json.loads(body_text) if body_text else {}
+
+    async def _coinbase_private_get_json(self, path, params=None):
+        return await self._coinbase_request_json("GET", path, params=params, authenticated=True)
+
+    async def fetch_coinbase_accounts(self, params=None):
+        return await self._coinbase_request_json("GET", "/api/v3/brokerage/accounts", params=params, authenticated=True)
+
+    async def fetch_coinbase_account(self, account_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/accounts/{str(account_id or '').strip()}",
+            params=params,
+            authenticated=True,
+        )
+
+    async def create_coinbase_order(self, payload, params=None):
+        return await self._coinbase_request_json(
+            "POST",
+            "/api/v3/brokerage/orders",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def cancel_coinbase_orders(self, payload, params=None):
+        return await self._coinbase_request_json(
+            "POST",
+            "/api/v3/brokerage/orders/batch_cancel",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_orders(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/orders/historical/batch",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_fills(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/orders/historical/fills",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_historical_order(self, order_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/orders/historical/{str(order_id or '').strip()}",
+            params=params,
+            authenticated=True,
+        )
+
+    async def preview_coinbase_order(self, payload, params=None):
+        return await self._coinbase_request_json(
+            "POST",
+            "/api/v3/brokerage/orders/preview",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_best_bid_ask(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/best_bid_ask",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_product_book(self, product_id, params=None):
+        query = dict(params or {})
+        if product_id:
+            query.setdefault("product_id", product_id)
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/product_book",
+            params=query,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_products(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/products",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_product(self, product_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/products/{str(product_id or '').strip()}",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_product_candles(self, product_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/products/{str(product_id or '').strip()}/candles",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_market_trades(self, product_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/products/{str(product_id or '').strip()}/ticker",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_transaction_summary(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/transaction_summary",
+            params=params,
+            authenticated=True,
+        )
+
+    async def create_coinbase_convert_quote(self, payload, params=None):
+        return await self._coinbase_request_json(
+            "POST",
+            "/api/v3/brokerage/convert/quote",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def commit_coinbase_convert_trade(self, trade_id, payload=None, params=None):
+        return await self._coinbase_request_json(
+            "POST",
+            f"/api/v3/brokerage/convert/{str(trade_id or '').strip()}",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_convert_trade(self, trade_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/convert/{str(trade_id or '').strip()}",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_portfolios(self, portfolio_id=None, params=None):
+        path = "/api/v3/brokerage/portfolios"
+        if portfolio_id:
+            path += f"/{str(portfolio_id).strip()}"
+        return await self._coinbase_request_json("GET", path, params=params, authenticated=True)
+
+    async def create_coinbase_portfolio(self, payload, params=None):
+        return await self._coinbase_request_json(
+            "POST",
+            "/api/v3/brokerage/portfolios",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def move_coinbase_portfolio_funds(self, payload, params=None):
+        return await self._coinbase_request_json(
+            "POST",
+            "/api/v3/brokerage/portfolios",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_portfolio_breakdown(self, portfolio_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/portfolios/{str(portfolio_id or '').strip()}",
+            params=params,
+            authenticated=True,
+        )
+
+    async def delete_coinbase_portfolio(self, portfolio_id=None, payload=None, params=None):
+        path = "/api/v3/brokerage/portfolios"
+        if portfolio_id:
+            path += f"/{str(portfolio_id).strip()}"
+        return await self._coinbase_request_json(
+            "DELETE",
+            path,
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def edit_coinbase_portfolio(self, portfolio_id=None, payload=None, params=None):
+        path = "/api/v3/brokerage/portfolios"
+        if portfolio_id:
+            path += f"/{str(portfolio_id).strip()}"
+        return await self._coinbase_request_json(
+            "PUT",
+            path,
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_futures_balance_summary(self, params=None, *, normalize=False):
+        payload = await self._coinbase_request_json(
+            "GET",
+            self.COINBASE_FUTURES_BALANCE_PATH,
+            params=params,
+            authenticated=True,
+        )
+        if normalize:
+            return self._normalize_coinbase_futures_balance_summary(payload)
+        return payload
+
+    async def fetch_coinbase_futures_positions(self, params=None, *, symbols=None, normalize=False):
+        payload = await self._coinbase_request_json(
+            "GET",
+            self.COINBASE_FUTURES_POSITIONS_PATH,
+            params=params,
+            authenticated=True,
+        )
+        if not normalize:
+            return payload
+
+        records = []
+        if isinstance(payload, dict):
+            for key in ("positions", "cfm_positions", "data"):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    records = list(candidate)
+                    break
+        elif isinstance(payload, list):
+            records = list(payload)
+
+        normalized_positions = []
+        for item in records:
+            position = self._normalize_coinbase_futures_position(item)
+            if position is None:
+                continue
+            if symbols and not self._spot_position_matches_symbols(position, symbols):
+                continue
+            normalized_positions.append(position)
+        return normalized_positions
+
+    async def fetch_coinbase_futures_position(self, product_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/cfm/positions/{str(product_id or '').strip()}",
+            params=params,
+            authenticated=True,
+        )
+
+    async def schedule_coinbase_futures_sweep(self, payload, params=None):
+        return await self._coinbase_request_json(
+            "POST",
+            "/api/v3/brokerage/cfm/sweeps/schedule",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_futures_sweeps(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/cfm/sweeps",
+            params=params,
+            authenticated=True,
+        )
+
+    async def cancel_coinbase_futures_sweep(self, payload=None, params=None):
+        return await self._coinbase_request_json(
+            "DELETE",
+            "/api/v3/brokerage/cfm/sweeps",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_intraday_margin_setting(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/cfm/intraday/margin_setting",
+            params=params,
+            authenticated=True,
+        )
+
+    async def set_coinbase_intraday_margin_setting(self, payload, params=None):
+        return await self._coinbase_request_json(
+            "POST",
+            "/api/v3/brokerage/cfm/intraday/margin_setting",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_current_margin_window(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/cfm/intraday/current_margin_window",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_perpetuals_portfolio_summary(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/intx/portfolio",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_perpetuals_positions(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/intx/positions",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_perpetuals_position(self, product_id, params=None):
+        query = dict(params or {})
+        if product_id:
+            query.setdefault("product_id", product_id)
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/intx/positions",
+            params=query,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_perpetuals_balances(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/intx/balances",
+            params=params,
+            authenticated=True,
+        )
+
+    async def opt_in_coinbase_multi_asset_collateral(self, payload=None, params=None):
+        return await self._coinbase_request_json(
+            "POST",
+            "/api/v3/brokerage/intx/multi_asset_collateral",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def allocate_coinbase_portfolio(self, payload, params=None):
+        return await self._coinbase_request_json(
+            "POST",
+            "/api/v3/brokerage/intx/allocate",
+            params=params,
+            payload=payload,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_payment_methods(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/payment_methods",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_payment_method(self, payment_method_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/payment_methods/{str(payment_method_id or '').strip()}",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_key_permissions(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/key_permissions",
+            params=params,
+            authenticated=True,
+        )
+
+    async def fetch_coinbase_server_time(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/time",
+            params=params,
+            authenticated=False,
+        )
+
+    async def fetch_coinbase_public_product_book(self, product_id, params=None):
+        query = dict(params or {})
+        if product_id:
+            query.setdefault("product_id", product_id)
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/market/product_book",
+            params=query,
+            authenticated=False,
+        )
+
+    async def fetch_coinbase_public_products(self, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            "/api/v3/brokerage/market/products",
+            params=params,
+            authenticated=False,
+        )
+
+    async def fetch_coinbase_public_product(self, product_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/market/products/{str(product_id or '').strip()}",
+            params=params,
+            authenticated=False,
+        )
+
+    async def fetch_coinbase_public_product_candles(self, product_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/market/products/{str(product_id or '').strip()}/candles",
+            params=params,
+            authenticated=False,
+        )
+
+    async def fetch_coinbase_public_market_trades(self, product_id, params=None):
+        return await self._coinbase_request_json(
+            "GET",
+            f"/api/v3/brokerage/market/products/{str(product_id or '').strip()}/ticker",
+            params=params,
+            authenticated=False,
+        )
+
+    def _normalize_coinbase_futures_balance_summary(self, payload):
+        summary = payload.get("balance_summary") if isinstance(payload, dict) and isinstance(payload.get("balance_summary"), dict) else payload
+        if not isinstance(summary, dict):
+            return {}
+
+        total_usd_balance = self._safe_float_value(
+            summary.get("total_usd_balance")
+            or summary.get("equity")
+            or summary.get("portfolio_value")
+            or summary.get("balance")
+            or 0.0
+        )
+        available_margin = self._safe_float_value(
+            summary.get("available_margin")
+            or summary.get("available_buying_power")
+            or summary.get("futures_buying_power")
+            or summary.get("cfm_usd_balance")
+            or total_usd_balance
+        )
+        cash_value = self._safe_float_value(summary.get("cfm_usd_balance") or available_margin)
+
+        normalized = {
+            "currency": "USD",
+            "cash": cash_value,
+            "equity": total_usd_balance or cash_value,
+            "available_margin": available_margin,
+            "futures_buying_power": self._safe_float_value(
+                summary.get("futures_buying_power") or available_margin
+            ),
+            "free": {"USD": available_margin},
+            "total": {"USD": total_usd_balance or cash_value},
+            "raw": summary,
+        }
+        for key in (
+            "unrealized_pnl",
+            "daily_realized_pnl",
+            "initial_margin",
+            "available_margin",
+            "total_open_orders_hold_amount",
+            "cfm_usd_balance",
+            "cbi_usd_balance",
+        ):
+            if key in summary:
+                normalized[key] = self._safe_float_value(summary.get(key))
+        return normalized
+
+    def _normalize_coinbase_futures_position(self, raw_position):
+        if not isinstance(raw_position, dict):
+            return None
+
+        product_id = str(raw_position.get("product_id") or raw_position.get("instrument") or "").strip()
+        market = self._coinbase_market_by_product_id(product_id)
+        symbol = str((market or {}).get("symbol") or product_id).strip().upper()
+        contracts = abs(
+            self._safe_float_value(
+                raw_position.get("number_of_contracts")
+                or raw_position.get("contracts")
+                or raw_position.get("size")
+                or raw_position.get("position_size")
+                or 0.0
+            )
+        )
+        side = str(raw_position.get("side") or raw_position.get("position_side") or "long").strip().lower() or "long"
+        if side not in {"long", "short"}:
+            side = "short" if side.startswith("s") else "long"
+        entry_price = self._safe_float_value(raw_position.get("avg_entry_price") or raw_position.get("entry_price"))
+        mark_price = self._safe_float_value(
+            raw_position.get("current_price")
+            or raw_position.get("mark_price")
+            or raw_position.get("price")
+        )
+
+        normalized = {
+            "symbol": symbol,
+            "product_id": product_id or None,
+            "side": side,
+            "position_side": side,
+            "asset_code": str((market or {}).get("base") or "").strip().upper() or None,
+            "quote_currency": str((market or {}).get("quote") or (market or {}).get("settle") or "").strip().upper() or None,
+            "contracts": contracts,
+            "amount": contracts,
+            "quantity": contracts,
+            "units": contracts,
+            "entry_price": entry_price,
+            "avg_entry_price": entry_price,
+            "mark_price": mark_price,
+            "market_price": mark_price,
+            "value": self._safe_float_value(raw_position.get("notional_value") or raw_position.get("position_value")),
+            "pnl": self._safe_float_value(raw_position.get("unrealized_pnl")),
+            "unrealized_pnl": self._safe_float_value(raw_position.get("unrealized_pnl")),
+            "realized_pnl": self._safe_float_value(raw_position.get("daily_realized_pnl")),
+            "daily_realized_pnl": self._safe_float_value(raw_position.get("daily_realized_pnl")),
+            "expiry": raw_position.get("expiration_time") or (market or {}).get("expiryDatetime"),
+            "instrument_type": "future",
+            "raw": raw_position,
+        }
+        if isinstance(market, dict):
+            normalized["instrument"] = {
+                "symbol": symbol,
+                "type": "future" if bool(market.get("future")) else "derivative",
+                "exchange": self.exchange_name,
+                "currency": str(market.get("quote") or market.get("settle") or "").strip().upper() or None,
+                "contract_size": market.get("contractSize"),
+                "multiplier": market.get("contractSize"),
+                "expiry": raw_position.get("expiration_time") or market.get("expiryDatetime"),
+                "metadata": market,
+            }
+        return normalized
+
+    async def _fetch_coinbase_futures_balance_summary(self):
+        return await self.fetch_coinbase_futures_balance_summary(normalize=True)
+
+    async def _fetch_coinbase_futures_positions(self, symbols=None):
+        return await self.fetch_coinbase_futures_positions(symbols=symbols, normalize=True)
 
     def _spot_account_cache_seconds(self):
         if self._exchange_code() == "coinbase":
@@ -1159,8 +2113,7 @@ class CCXTBroker(BaseBroker):
             if callable(getattr(self.exchange, "load_time_difference", None)):
                 await self.exchange.load_time_difference()
 
-            await self.exchange.load_markets()
-            markets = getattr(self.exchange, "markets", {}) or {}
+            markets = await self._load_exchange_markets()
             self.symbols = self._filtered_symbols_from_markets(markets)
             self._refresh_market_symbol_lookup(markets)
             self._connected = True
@@ -1256,8 +2209,8 @@ class CCXTBroker(BaseBroker):
     async def _fetch_coinbase_ohlcv(self, symbol, timeframe="1h", limit=100, start_time=None, end_time=None):
         await self._ensure_connected()
 
-        # Respect the user-requested limit while capping at Coinbase's maximum.
-        requested_limit = max(min(int(limit or self.COINBASE_MAX_OHLCV_CANDLES), self.COINBASE_MAX_OHLCV_CANDLES), 1)
+        # Respect the requested history window while chunking each Coinbase API call to its 300-candle maximum.
+        requested_limit = max(int(limit or self.COINBASE_MAX_OHLCV_CANDLES), 1)
         timeframe_seconds = max(self._timeframe_seconds(timeframe), 1)
         remaining = requested_limit
         end_ms = self._normalize_ohlcv_boundary_ms(end_time, end_of_day=True)
@@ -1509,6 +2462,13 @@ class CCXTBroker(BaseBroker):
     # ==========================================================
 
     async def fetch_balance(self):
+        if self._exchange_code() == "coinbase" and self._coinbase_derivative_subtype() == "future":
+            try:
+                balance_summary = await self._fetch_coinbase_futures_balance_summary()
+                if isinstance(balance_summary, dict) and balance_summary:
+                    return balance_summary
+            except Exception as exc:
+                self.logger.debug("Unable to load Coinbase futures balance summary: %s", exc)
         if not self._supports_positions_endpoint():
             try:
                 snapshot = await self._get_spot_account_snapshot_cached()
@@ -1521,6 +2481,15 @@ class CCXTBroker(BaseBroker):
         return raw_balance
 
     async def fetch_positions(self, symbols=None):
+        if (
+            self._exchange_code() == "coinbase"
+            and self._coinbase_derivative_subtype() == "future"
+            and not self._exchange_has("fetchPositions")
+        ):
+            try:
+                return await self._fetch_coinbase_futures_positions(symbols=symbols)
+            except Exception as exc:
+                self.logger.debug("Unable to load Coinbase futures positions via direct API: %s", exc)
         if not self._supports_positions_endpoint():
             try:
                 snapshot = await self._get_spot_account_snapshot_cached()

@@ -122,11 +122,15 @@ class SymbolWorker:
                     continue
 
                 if self.controller and hasattr(self.controller, "_safe_fetch_ohlcv"):
-                    candles = await self.controller._safe_fetch_ohlcv(
-                        self.symbol,
-                        timeframe=self.timeframe,
-                        limit=self.limit,
-                    )
+                    fetch_ohlcv = self.controller._safe_fetch_ohlcv
+                    try:
+                        candles = await fetch_ohlcv(
+                            self.symbol,
+                            timeframe=self.timeframe,
+                            limit=self.limit,
+                        )
+                    except TypeError:
+                        candles = await fetch_ohlcv(self.symbol, self.timeframe, self.limit)
                 else:
                     candles = await self.broker.fetch_ohlcv(
                         self.symbol,

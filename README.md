@@ -115,6 +115,13 @@ flowchart LR
 - `paper` through `PaperBroker`
 - `stellar` through `StellarBroker`
 
+### Coinbase Futures Path
+- Coinbase futures run through the `crypto` broker family, not the IBKR-style `futures` adapter path.
+- Use `Broker Type = crypto`, `Exchange = coinbase`, and `Venue = derivative`.
+- Sopotek now treats that path as Coinbase futures by default and hydrates futures products from the Advanced Trade product feed instead of falling back to spot-only parsing.
+- Futures balances and positions now use Coinbase's direct CFM account endpoints when the connected Coinbase session is in derivative mode.
+- Derivative watchlists, chart requests, and order preflight now preserve native Coinbase futures contract IDs such as `SLP-20DEC30-CDE`.
+
 ### Derivatives Layer
 - Common broker contract now includes `connect()`, `disconnect()`, `get_account_info()`, `get_positions()`, `place_order()`, `cancel_order()`, and `stream_market_data()`.
 - Instrument modeling now supports `stock`, `option`, `future`, `forex`, and `crypto` with expiry, strike, option right, contract size, and multiplier metadata.
@@ -127,6 +134,8 @@ flowchart LR
 
 - Broker-backed balances, equity, and positions are favored over local fallbacks when the connected adapter can provide them directly.
 - Coinbase runtime now treats venue selection more explicitly, keeping `spot` and `derivative` paths distinct while leaving stocks and options disabled there until a dedicated adapter path is added.
+- Coinbase futures products are now reclassified from the raw Advanced Trade product payload so derivative mode exposes native contract symbols such as `SLP-20DEC30-CDE` and `BTC-USD-20241227` instead of silently falling back to spot-only markets.
+- Coinbase derivative mode now defaults to the futures contract path and can pull CFM futures balances plus open positions directly when the pinned CCXT build does not expose those endpoints natively.
 - Coinbase history loading now backfills candle requests in chunks, skips unsupported stale symbols safely, and avoids fabricating duplicate synthetic candles when real history is missing.
 - Oanda history loading now retries empty latest-candle responses with an explicit recent time window and can fall back to midpoint candles when bid or ask candles come back empty.
 - Charts now show a visible loading state, a `No data received.` background message for empty responses, and shorter-history notices when the broker returns fewer candles than requested.
@@ -261,10 +270,10 @@ Validate the compose stack:
 docker compose config
 ```
 
-Run the local MySQL-backed stack:
+Run the local PostgreSQL-backed stack:
 
 ```powershell
-docker compose up -d mysql app
+docker compose up -d postgres app
 ```
 
 Run the headless profile:
@@ -287,13 +296,13 @@ http://localhost:6080/vnc.html?autoconnect=1&resize=off
 
 The browser profile defaults `NOVNC_RESIZE_MODE` to `off` so your browser scrollbars can reach the full virtual desktop. Set `NOVNC_RESIZE_MODE=scale` before launch if you prefer the UI to shrink to fit the browser window instead.
 
-Compose defaults the app to the local `mysql` service using a SQLAlchemy URL such as `mysql+pymysql://sopotek:sopotek_local@mysql:3306/sopotek_trading?charset=utf8mb4`. Override `MYSQL_DATABASE`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_ROOT_PASSWORD`, or `MYSQL_PORT` in your shell or `.env` before launch to change the local container defaults or the host port mapping. If you want Sopotek to connect to an external MySQL instance instead, set `SOPOTEK_DATABASE_URL` directly, for example `mysql+pymysql://user:secret@db-host:3306/sopotek_trading?charset=utf8mb4`.
+Compose defaults the app to the local `postgres` service using a SQLAlchemy URL such as `postgresql+psycopg://sopotek:sopotek_local@postgres:5432/sopotek_trading`. Override `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_PORT` in your shell or `.env` before launch to change the local container defaults or the host port mapping. If you want Sopotek to connect to an external PostgreSQL instance instead, set `SOPOTEK_DATABASE_URL` directly, for example `postgresql+psycopg://user:secret@db-host:5432/sopotek_trading`.
 
-Those `MYSQL_*` values only initialize the bundled MySQL container the first time the `mysql_data` volume is created. If you later change the credentials and start seeing `Access denied for user ...` from the app container, the existing volume still contains the older MySQL accounts. Reuse the original credentials if you need the saved local data, or recreate the local volume for a fresh dev database:
+Those `POSTGRES_*` values only initialize the bundled PostgreSQL container the first time the `postgres_data` volume is created. If you later change the credentials and start seeing authentication failures from the app container, the existing volume still contains the older PostgreSQL credentials. Reuse the original credentials if you need the saved local data, or recreate the local volume for a fresh dev database:
 
 ```powershell
 docker compose down -v
-docker compose up -d mysql app
+docker compose up -d postgres app
 ```
 
 ## CI And Release Workflows
@@ -304,7 +313,7 @@ docker compose up -d mysql app
 
 ## Storage And Runtime Files
 
-- Local Docker database: MySQL persisted in the `mysql_data` volume
+- Local Docker database: PostgreSQL persisted in the `postgres_data` volume
 - Local non-Docker fallback database: `data/sopotek_trading.db`
 - Logs: `logs/` and `src/logs/`
 - Generated screenshots: `output/screenshots/`

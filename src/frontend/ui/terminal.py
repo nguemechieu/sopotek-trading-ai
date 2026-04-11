@@ -12,6 +12,7 @@ methods that are assigned outside of class definitions.
 import asyncio
 
 import html
+import inspect
 import json
 from pathlib import Path
 import random
@@ -21,6 +22,7 @@ import sys
 import threading
 import time
 from urllib.parse import quote_plus
+import warnings
 import shiboken6 # type: ignore[import-untyped]
 import traceback
 import numpy as np
@@ -100,6 +102,7 @@ from frontend.ui.i18n import apply_runtime_translations, iter_supported_language
 from frontend.ui.panels.system_panels import (
     AI_MONITOR_HEADERS,
     create_ai_signal_panel,
+    create_live_agent_timeline_panel,
     create_system_console_panel,
     create_system_status_panel,
 )
@@ -409,6 +412,42 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
+def _coerce_timestamp_seconds(value: Any) -> float | None:
+    """Normalize epoch or ISO-8601 timestamps into UTC seconds."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, QDateTime):
+        return value.toMSecsSinceEpoch() / 1000.0
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric > 1_000_000_000_000:
+            return numeric / 1000.0
+        return numeric
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        numeric = float(text)
+    except (TypeError, ValueError):
+        numeric = None
+    if numeric is not None:
+        if numeric > 1_000_000_000_000:
+            return numeric / 1000.0
+        return numeric
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.timestamp()
+
+
 def _read_pyproject_version(pyproject_path: Path) -> str | None:
     """Read the project version from pyproject.toml (PEP 621 [project] version)."""
     try:
@@ -475,6 +514,12 @@ class Terminal(QMainWindow):
         self.bound_session_id = str(getattr(controller, "active_session_id", "") or "").strip()
         self.bound_session_label = ""
         self._controller_signal_bindings = []
+        self._status_value_cache = {}
+        self._session_selector_signature = None
+        self._session_tabs_signature = None
+        self._positions_table_signature = None
+        self._open_orders_table_signature = None
+        self._risk_heatmap_signature = None
 
         self.settings = QSettings("Sopotek", "TradingPlatform")
 
@@ -496,6 +541,9 @@ class Terminal(QMainWindow):
 
         self.MAX_LOG_ROWS = 200
         self.AI_TABLE_REFRESH_MIN_SECONDS = 0.5
+        self.AI_SIGNAL_LOG_MIN_SECONDS = 30.0
+        self.PASSIVE_SIGNAL_SCAN_INTERVAL_MS = 5000
+        self.PASSIVE_SIGNAL_SCAN_MAX_SYMBOLS = 6
         self.current_timeframe = getattr(controller,"time_frame")
         self.autotrading_enabled = False
         scope_normalizer = getattr(controller, "_normalize_autotrade_scope", None)
@@ -520,7 +568,11 @@ class Terminal(QMainWindow):
         self._latest_broker_status_snapshot = {"status": "disconnected", "summary": "Disconnected"}
         self._last_broker_status_refresh_at = 0.0
         self._last_ai_table_refresh_at = 0.0
+        self._last_passive_signal_scan_at = 0.0
+        self._passive_signal_scan_task = None
+        self._autotrade_enable_task = None
         self._ai_signal_records = {}
+        self._ai_signal_log_state = {}
         self._recommendation_records = {}
         self._closed_journal_refresh_task = None
 
@@ -552,6 +604,11 @@ class Terminal(QMainWindow):
         self.orderbook_timer = QTimer()
         self.orderbook_timer.timeout.connect(self._request_active_orderbook)
         self.orderbook_timer.start(1500)
+
+        self.signal_scan_timer = QTimer()
+        self.signal_scan_timer.timeout.connect(self._schedule_passive_signal_scan)
+        self.signal_scan_timer.start(int(self.PASSIVE_SIGNAL_SCAN_INTERVAL_MS))
+        QTimer.singleShot(1800, self._schedule_passive_signal_scan)
 
         self.ai_signal.connect(self._update_ai_signal)
 
@@ -590,6 +647,9 @@ class Terminal(QMainWindow):
         self.system_status_button = None
         self.system_status_dock = None
         self.ai_signal_dock = None
+        self.live_agent_timeline_dock = None
+        self.live_agent_timeline_summary = None
+        self.live_agent_timeline_browser = None
         self.secondary_toolbar = None
         self.market_watch_dock = None
         self.tick_chart_dock = None
@@ -609,6 +669,10 @@ class Terminal(QMainWindow):
         self.session_selector = None
         self.session_tabs_dock = None
         self.session_tabs_widget = None
+        self.desk_status_frame = None
+        self.desk_status_title_label = None
+        self.desk_status_primary_label = None
+        self.desk_status_secondary_label = None
         self.license_badge = None
         self.kill_switch_button = None
         self.symbol_picker = None
@@ -1680,36 +1744,25 @@ class Terminal(QMainWindow):
         return None
 
     def _safe_disconnect(self, signal, slot):
+        if signal is None or slot is None:
+            return False
         try:
-            signal.disconnect(slot)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"Failed to disconnect .*",
+                    category=RuntimeWarning,
+                )
+                signal.disconnect(slot)
+            return True
         except (RuntimeError, TypeError):
-            pass
+            return False
 
     def _disconnect_controller_signals(self):
-        controller = getattr(self, "controller", None)
-        if controller is None:
-            return
-
-        for signal_name, slot in (
-            ("candle_signal", self._update_chart),
-            ("equity_signal", self._update_equity),
-            ("trade_signal", self._update_trade_log),
-            ("ticker_signal", self._update_ticker),
-            ("news_signal", self._update_news),
-            ("orderbook_signal", self._update_orderbook),
-            ("recent_trades_signal", self._update_recent_trades),
-            ("strategy_debug_signal", self._handle_strategy_debug),
-            ("training_status_signal", self._update_training_status),
-            ("symbols_signal", self._update_symbols),
-            ("agent_runtime_signal", self._handle_agent_runtime_event),
-        ):
-            signal = getattr(controller, signal_name, None)
-            if signal is not None:
-                self._safe_disconnect(signal, slot)
-
-        ai_monitor = getattr(controller, "ai_signal_monitor", None)
-        if ai_monitor is not None:
-            self._safe_disconnect(ai_monitor, self._update_ai_signal)
+        bindings = list(getattr(self, "_controller_signal_bindings", []) or [])
+        self._controller_signal_bindings = []
+        for signal, slot in bindings:
+            self._safe_disconnect(signal, slot)
 
     def _timeframe_button_style(self):
         return """
@@ -1795,6 +1848,308 @@ class Terminal(QMainWindow):
             "}"
         )
 
+    def _desk_status_frame_style(self, tone="idle"):
+        palette = {
+            "idle": {
+                "background": "#101827",
+                "border": "#2b3954",
+                "title": "#8fa3c2",
+                "primary": "#eef4ff",
+                "secondary": "#b7c6db",
+            },
+            "live": {
+                "background": "#10211f",
+                "border": "#2f8b73",
+                "title": "#8ed6c4",
+                "primary": "#ebfff8",
+                "secondary": "#bfe7dc",
+            },
+            "alert": {
+                "background": "#2a1117",
+                "border": "#be5d71",
+                "title": "#ffb7c5",
+                "primary": "#fff0f3",
+                "secondary": "#f1c8d1",
+            },
+        }.get(str(tone or "idle").lower(), None) or {
+            "background": "#101827",
+            "border": "#2b3954",
+            "title": "#8fa3c2",
+            "primary": "#eef4ff",
+            "secondary": "#b7c6db",
+        }
+        return (
+            "QFrame { "
+            f"background-color: {palette['background']}; border: 1px solid {palette['border']}; border-radius: 16px; "
+            "}"
+            "QLabel { background: transparent; border: 0; }"
+            "QLabel#desk_status_title { "
+            f"color: {palette['title']}; font-size: 10px; font-weight: 800; letter-spacing: 1.1px; "
+            "}"
+            "QLabel#desk_status_primary { "
+            f"color: {palette['primary']}; font-size: 13px; font-weight: 800; "
+            "}"
+            "QLabel#desk_status_secondary { "
+            f"color: {palette['secondary']}; font-size: 11px; font-weight: 600; "
+            "}"
+        )
+
+    def _desk_notification_summary(self):
+        controller = getattr(self, "controller", None)
+        if not bool(getattr(controller, "trade_close_notifications_enabled", False)):
+            return "Alerts off"
+        channels = []
+        if bool(getattr(controller, "trade_close_notify_telegram", False)):
+            channels.append("Telegram")
+        if bool(getattr(controller, "trade_close_notify_email", False)):
+            channels.append("Email")
+        if bool(getattr(controller, "trade_close_notify_sms", False)):
+            channels.append("SMS")
+        if not channels:
+            return "Alerts on"
+        return f"Alerts: {', '.join(channels)}"
+
+    def _update_desk_status_panel(self):
+        frame = getattr(self, "desk_status_frame", None)
+        title_label = getattr(self, "desk_status_title_label", None)
+        primary_label = getattr(self, "desk_status_primary_label", None)
+        secondary_label = getattr(self, "desk_status_secondary_label", None)
+        if frame is None or title_label is None or primary_label is None or secondary_label is None:
+            return
+
+        controller = getattr(self, "controller", None)
+        live_mode = bool(getattr(controller, "is_live_mode", lambda: False)())
+        emergency_stop = bool(getattr(controller, "is_emergency_stop_active", lambda: False)())
+        autotrading_live = bool(getattr(self, "autotrading_enabled", False))
+        scope_label = Terminal._autotrade_scope_label(self)
+        session_label = str(getattr(self, "bound_session_label", "") or getattr(self, "bound_session_id", "") or "").strip()
+        account_label = str(getattr(controller, "current_account_label", lambda: "Account not set")() or "").strip() or "Account not set"
+        exchange_label = (Terminal._active_exchange_name(self) or "broker").upper()
+        mode_label = "LIVE" if live_mode else "PAPER"
+        news_label = "on" if bool(getattr(controller, "news_enabled", False)) else "off"
+        model_label = str(getattr(controller, "openai_model", "") or "").strip() or "not set"
+        model_display = Terminal._elide_text(self, model_label, max_length=18)
+        alerts_summary = Terminal._desk_notification_summary(self)
+
+        if emergency_stop:
+            desk_title = "DESK LOCKDOWN"
+            tone = "alert"
+        elif live_mode and autotrading_live:
+            desk_title = "LIVE EXECUTION"
+            tone = "live"
+        else:
+            desk_title = "DESK STATUS"
+            tone = "idle"
+
+        primary_segments = []
+        if session_label:
+            primary_segments.append(Terminal._elide_text(self, session_label, max_length=18))
+        primary_segments.append(f"{mode_label} {exchange_label}")
+        primary_segments.append(Terminal._elide_text(self, account_label, max_length=22))
+        primary_text = " | ".join(primary_segments)
+
+        ai_summary = f"AI live on {scope_label}" if autotrading_live else f"AI idle on {scope_label}"
+        guard_summary = "Kill switch on" if emergency_stop else "Kill switch clear"
+        secondary_text = " | ".join(
+            [
+                ai_summary,
+                guard_summary,
+                alerts_summary,
+                f"News {news_label}",
+                f"Model {model_display}",
+            ]
+        )
+
+        title_label.setText(desk_title)
+        primary_label.setText(primary_text)
+        secondary_label.setText(secondary_text)
+        frame.setStyleSheet(Terminal._desk_status_frame_style(self, tone=tone))
+        frame.setToolTip(
+            "\n".join(
+                [
+                    f"Session: {session_label or 'Main desk'}",
+                    f"Mode: {mode_label}",
+                    f"Broker: {exchange_label}",
+                    f"Account: {account_label}",
+                    f"AI scope: {scope_label}",
+                    f"AI trading: {'enabled' if autotrading_live else 'disabled'}",
+                    f"Emergency stop: {'active' if emergency_stop else 'clear'}",
+                    alerts_summary,
+                    f"News feed: {news_label}",
+                    f"OpenAI model: {model_label}",
+                ]
+            )
+        )
+
+    def _detached_tool_window_style(self):
+        return (
+            "QMainWindow { background-color: #08111d; }"
+            "QLabel { color: #dce7f8; }"
+            "QFrame#tool_window_hero { "
+            "background-color: #101a2d; border: 1px solid #22344f; border-radius: 16px; "
+            "}"
+            "QLabel#tool_window_hero_title { color: #f4f8ff; font-size: 20px; font-weight: 800; }"
+            "QLabel#tool_window_hero_body { color: #c9d5e8; font-size: 13px; font-weight: 600; }"
+            "QLabel#tool_window_summary_card { "
+            "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
+            "border-radius: 14px; padding: 12px; font-size: 13px; font-weight: 600; "
+            "}"
+            "QLabel#tool_window_section_hint { color: #8fa7c6; padding-top: 2px; }"
+            "QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QDateTimeEdit { "
+            "background-color: #0f1726; color: #e6edf7; border: 1px solid #22344f; border-radius: 10px; "
+            "padding: 7px 10px; selection-background-color: #21456f; selection-color: #ffffff; "
+            "}"
+            "QComboBox::drop-down { border: 0; width: 22px; }"
+            "QTextBrowser { "
+            "background-color: #0f1726; color: #e6edf7; border: 1px solid #22344f; border-radius: 14px; padding: 14px; "
+            "}"
+            "QTableWidget, QTableView { "
+            "background-color: #0f1726; color: #d9e6f7; border: 1px solid #20324d; border-radius: 12px; "
+            "gridline-color: #20324d; alternate-background-color: #0c1421; "
+            "}"
+            "QHeaderView::section { "
+            "background-color: #101c2e; color: #9fb5d3; padding: 8px 10px; border: 0; "
+            "border-bottom: 1px solid #22344f; font-weight: 700; "
+            "}"
+            "QPushButton { "
+            "background-color: #162033; color: #d7dfeb; border: 1px solid #2d3a56; border-radius: 12px; "
+            "padding: 8px 14px; font-weight: 600; "
+            "}"
+            "QPushButton:hover { background-color: #1c2940; border-color: #4f638d; }"
+            "QTabWidget::pane { border: 1px solid #20324d; background-color: #0b1220; border-radius: 14px; }"
+            "QTabBar::tab { "
+            "background-color: #101a2d; color: #9fb5d3; padding: 9px 14px; margin-right: 4px; "
+            "border-top-left-radius: 10px; border-top-right-radius: 10px; font-weight: 700; "
+            "}"
+            "QTabBar::tab:selected { background-color: #163150; color: #ffffff; }"
+            "QTabBar::tab:hover:!selected { background-color: #14263e; color: #dce7f8; }"
+            "QCheckBox, QRadioButton { color: #dce7f8; spacing: 8px; }"
+            "QGroupBox { color: #f1f6ff; font-weight: 700; border: 1px solid #20324d; border-radius: 14px; margin-top: 12px; padding: 12px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; color: #8fa7c6; }"
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollBar:vertical { background: #0b1220; width: 12px; margin: 4px; border-radius: 6px; }"
+            "QScrollBar::handle:vertical { background: #22344f; min-height: 24px; border-radius: 6px; }"
+            "QScrollBar::handle:vertical:hover { background: #32527d; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical, "
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; height: 0px; }"
+        )
+
+    def _tool_window_text_browser_style(self):
+        return (
+            "QTextBrowser { "
+            "background-color: #0f1726; color: #e6edf7; border: 1px solid #22344f; "
+            "border-radius: 14px; padding: 18px; line-height: 1.45; "
+            "}"
+        )
+
+    def _tool_window_chip_button_style(self):
+        return (
+            "QPushButton { "
+            "background-color:#0f1727; color:#d7dfeb; border:1px solid #24344f; "
+            "border-radius:11px; padding:8px 12px; font-weight:700; "
+            "}"
+            "QPushButton:hover { background-color:#17304d; border-color:#4f638d; }"
+        )
+
+    def _tool_window_input_style(self):
+        return (
+            "QTextEdit { "
+            "background-color: #0f1727; color: #f4f8ff; border: 1px solid #24344f; "
+            "border-radius: 12px; padding: 12px; selection-background-color: #21456f; selection-color: #ffffff; "
+            "}"
+        )
+
+    def _build_tool_window_hero(self, title, body, meta=None):
+        hero = QFrame()
+        hero.setObjectName("tool_window_hero")
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(16, 14, 16, 14)
+        hero_layout.setSpacing(6)
+
+        title_label = QLabel(str(title or "").strip())
+        title_label.setObjectName("tool_window_hero_title")
+        hero_layout.addWidget(title_label)
+
+        body_label = QLabel(str(body or "").strip())
+        body_label.setWordWrap(True)
+        body_label.setObjectName("tool_window_hero_body")
+        hero_layout.addWidget(body_label)
+
+        meta_text = str(meta or "").strip()
+        meta_label = None
+        if meta_text:
+            meta_label = QLabel(meta_text)
+            meta_label.setObjectName("tool_window_section_hint")
+            hero_layout.addWidget(meta_label)
+
+        return hero, title_label, body_label, meta_label
+
+    def _build_tool_window_section_label(self, text):
+        label = QLabel(str(text or "").strip())
+        label.setObjectName("tool_window_section_hint")
+        return label
+
+    def _workspace_tab_style(self):
+        return (
+            "QTabWidget::pane { border: 1px solid #20324d; background-color: #0b1220; border-radius: 14px; }"
+            "QTabBar::tab { "
+            "background-color: #101a2d; color: #9fb5d3; padding: 10px 14px; margin-right: 4px; "
+            "border-top-left-radius: 10px; border-top-right-radius: 10px; font-weight: 700; min-width: 120px; "
+            "}"
+            "QTabBar::tab:selected { background-color: #163150; color: #ffffff; }"
+            "QTabBar::tab:hover:!selected { background-color: #14263e; color: #dce7f8; }"
+        )
+
+    def _dock_widget_title_style(self):
+        return (
+            "QDockWidget { color: #dce7f8; font-weight: 700; }"
+            "QDockWidget::title { "
+            "background-color: #101827; color: #f4f8ff; text-align: left; padding: 8px 12px; "
+            "border: 1px solid #22344f; border-bottom: 0; border-top-left-radius: 10px; border-top-right-radius: 10px; "
+            "}"
+            "QDockWidget::close-button, QDockWidget::float-button { "
+            "background-color: #162033; border: 1px solid #2d3a56; border-radius: 7px; padding: 1px; "
+            "}"
+            "QDockWidget::close-button:hover, QDockWidget::float-button:hover { background-color: #1d2d46; border-color: #4f638d; }"
+        )
+
+    def _apply_workspace_tab_chrome(self, tabs):
+        is_alive = getattr(self, "_is_qt_object_alive", None)
+        if tabs is None or (callable(is_alive) and not is_alive(tabs)):
+            return
+        tabs.setDocumentMode(True)
+        tabs.setUsesScrollButtons(True)
+        tabs.tabBar().setExpanding(False)
+        tabs.setStyleSheet(Terminal._workspace_tab_style(self))
+
+    def _apply_dock_widget_chrome(self, dock):
+        is_alive = getattr(self, "_is_qt_object_alive", None)
+        if dock is None or (callable(is_alive) and not is_alive(dock)):
+            return
+        dock.setStyleSheet(Terminal._dock_widget_title_style(self))
+
+    def _configure_tool_form_layout(self, form):
+        if form is None:
+            return
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    def _empty_state_html(self, title, message, hint=None):
+        escaped_title = html.escape(str(title or "").strip() or "Nothing here yet")
+        escaped_message = html.escape(str(message or "").strip() or "There is no data to show yet.")
+        escaped_hint = html.escape(str(hint or "").strip())
+        hint_block = f"<p style='margin:10px 0 0 0;color:#8fa7c6;'>{escaped_hint}</p>" if escaped_hint else ""
+        return (
+            "<div style='background:#101a2d;border:1px solid #20324d;border-radius:16px;padding:18px 20px;'>"
+            f"<div style='color:#f4f8ff;font-size:18px;font-weight:800;margin-bottom:8px;'>{escaped_title}</div>"
+            f"<div style='color:#d9e6f7;line-height:1.5;'>{escaped_message}</div>"
+            f"{hint_block}"
+            "</div>"
+        )
+
     def _update_session_badge(self):
         badge = getattr(self, "session_mode_badge", None)
         if badge is None:
@@ -1811,6 +2166,7 @@ class Terminal(QMainWindow):
         account = getattr(self.controller, "current_account_label", lambda: "Not set")()
         badge.setToolTip(f"Mode: {mode_text}\nBroker: {exchange}\nAccount: {account}")
         self._update_live_trading_bar()
+        self._update_desk_status_panel()
 
     def _update_live_trading_bar(self):
         frame = getattr(self, "live_trading_bar_frame", None)
@@ -1822,6 +2178,7 @@ class Terminal(QMainWindow):
         live_mode = bool(getattr(self.controller, "is_live_mode", lambda: False)())
         if not live_mode:
             frame.setVisible(False)
+            self._update_desk_status_panel()
             return
 
         frame.setVisible(True)
@@ -1836,6 +2193,7 @@ class Terminal(QMainWindow):
         bar.setRange(0, 0)
         bar.setTextVisible(False)
         bar.setFormat("")
+        self._update_desk_status_panel()
 
 
     def _update_license_badge(self):
@@ -1864,6 +2222,7 @@ class Terminal(QMainWindow):
             f"background-color: {background}; color: {text}; border: 1px solid {border}; "
             "border-radius: 12px; padding: 8px 12px; font-weight: 800; letter-spacing: 0.5px; }"
         )
+        self._update_desk_status_panel()
         badge.setToolTip(
             f"{status.get('plan_name', 'License')} | {status.get('summary', 'Status unavailable')}\n"
             f"{status.get('description', '')}"
@@ -1890,6 +2249,7 @@ class Terminal(QMainWindow):
         else:
             button.setText("Kill Switch")
             button.setToolTip("Stop auto trading, cancel open orders, close tracked positions, and block new entries.")
+        self._update_desk_status_panel()
 
     def _set_active_timeframe_button(self, active_tf):
         for tf, button in self.timeframe_buttons.items():
@@ -2065,6 +2425,7 @@ class Terminal(QMainWindow):
                 "color: #8fa7c6; background-color: #132033; border: 1px solid #24324a; "
                 "border-radius: 10px; padding: 5px 10px; font-weight: 700;"
             )
+            self._update_desk_status_panel()
             return
 
         phase = getattr(self, "_spinner_index", 0) % 3
@@ -2076,15 +2437,18 @@ class Terminal(QMainWindow):
             f"color: #d7ffe9; background-color: {backgrounds[phase]}; border: 1px solid {borders[phase]}; "
             "border-radius: 10px; padding: 5px 10px; font-weight: 700;"
         )
+        self._update_desk_status_panel()
 
     def _setup_ui(self):
 
         self.chart_tabs = QTabWidget()
         self.chart_tabs.setTabsClosable(True)
+        self.chart_tabs.setObjectName("terminal_chart_tabs")
 
         self.chart_tabs.tabCloseRequested.connect(self._close_chart_tab)
         self.chart_tabs.currentChanged.connect(self._on_chart_tab_changed)
         self.chart_tabs.tabBarDoubleClicked.connect(self._detach_chart_tab)
+        self._apply_workspace_tab_chrome(self.chart_tabs)
 
         self.setCentralWidget(self.chart_tabs)
 
@@ -2577,6 +2941,8 @@ class Terminal(QMainWindow):
             self._update_license_badge()
         if getattr(self, "trading_activity_label", None) is not None:
             self.trading_activity_label.setToolTip("Shows whether AI trading is currently active")
+        if getattr(self, "desk_status_frame", None) is not None:
+            self._update_desk_status_panel()
 
         self._set_active_timeframe_button(getattr(self, "current_timeframe", "1h"))
         self._update_autotrade_button()
@@ -2705,9 +3071,27 @@ class Terminal(QMainWindow):
 
         toolbar.addWidget(symbol_box)
 
-        toolbar_spacer = QWidget()
-        toolbar_spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(toolbar_spacer)
+        desk_status_box = QFrame()
+        desk_status_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        desk_status_box.setMinimumWidth(360)
+        desk_status_layout = QVBoxLayout(desk_status_box)
+        desk_status_layout.setContentsMargins(12, 8, 12, 8)
+        desk_status_layout.setSpacing(3)
+        self.desk_status_frame = desk_status_box
+
+        self.desk_status_title_label = QLabel("DESK STATUS")
+        self.desk_status_title_label.setObjectName("desk_status_title")
+        desk_status_layout.addWidget(self.desk_status_title_label)
+
+        self.desk_status_primary_label = QLabel("PAPER BROKER | Account not set")
+        self.desk_status_primary_label.setObjectName("desk_status_primary")
+        desk_status_layout.addWidget(self.desk_status_primary_label)
+
+        self.desk_status_secondary_label = QLabel("AI idle on All Symbols | Alerts off | News off | Model not set")
+        self.desk_status_secondary_label.setObjectName("desk_status_secondary")
+        desk_status_layout.addWidget(self.desk_status_secondary_label)
+
+        toolbar.addWidget(desk_status_box)
 
         utility_box = QFrame()
         utility_box.setStyleSheet(frame_style)
@@ -2833,6 +3217,7 @@ class Terminal(QMainWindow):
         self._update_session_badge()
         self._update_live_trading_bar()
         self._update_kill_switch_button()
+        self._update_desk_status_panel()
 
     # ==========================================================
     # AUTOTRADING
@@ -2845,10 +3230,12 @@ class Terminal(QMainWindow):
         self._toggle_autotrading()
 
     def _toggle_autotrading(self):
+        target_enabled = not self.autotrading_enabled
 
-        self.autotrading_enabled = not self.autotrading_enabled
-
-        if self.autotrading_enabled:
+        if target_enabled:
+            pending_enable = getattr(self, "_autotrade_enable_task", None)
+            if pending_enable is not None and not pending_enable.done():
+                return
 
             if not self.controller.trading_system:
                 self.logger.error("Trading system is not initialized yet")
@@ -2882,6 +3269,14 @@ class Terminal(QMainWindow):
                 self.autotrade_toggle.emit(False)
                 return
 
+            if bool(getattr(self.controller, "is_live_mode", lambda: False)()):
+                loop = asyncio.get_event_loop()
+                self._autotrade_enable_task = loop.create_task(
+                    self._enable_live_autotrading_async(active_symbols)
+                )
+                return
+
+            self.autotrading_enabled = True
             self._update_autotrade_button()
 
             loop = asyncio.get_event_loop()
@@ -2894,6 +3289,7 @@ class Terminal(QMainWindow):
                 )
 
         else:
+            self.autotrading_enabled = False
 
             self._update_autotrade_button()
 
@@ -2903,6 +3299,40 @@ class Terminal(QMainWindow):
             self.autotrade_toggle.emit(False)
             if hasattr(self, "system_console"):
                 self.system_console.log("AI auto trading disabled.", "INFO")
+
+    async def _enable_live_autotrading_async(self, active_symbols):
+        try:
+            controller = getattr(self, "controller", None)
+            readiness_resolver = getattr(controller, "evaluate_live_readiness_report_async", None)
+            if callable(readiness_resolver):
+                try:
+                    await readiness_resolver(
+                        symbol=self._current_chart_symbol() or getattr(self, "symbol", None),
+                        timeframe=getattr(self, "current_timeframe", "1h"),
+                    )
+                except Exception:
+                    self.logger.debug("Async live readiness warmup failed during AI enable", exc_info=True)
+
+            if getattr(self, "_ui_shutting_down", False):
+                return
+
+            self.autotrading_enabled = True
+            self._update_autotrade_button()
+
+            loop = asyncio.get_event_loop()
+            loop.create_task(self.controller.trading_system.start())
+            self.autotrade_toggle.emit(True)
+            if hasattr(self, "system_console"):
+                self.system_console.log(
+                    f"AI auto trading enabled for {len(active_symbols)} symbol(s) using scope: {self._autotrade_scope_label()}.",
+                    "INFO",
+                )
+        except asyncio.CancelledError:
+            return
+        finally:
+            current = asyncio.current_task()
+            if getattr(self, "_autotrade_enable_task", None) is current:
+                self._autotrade_enable_task = None
 
     def _stop_autotrading_for_emergency(self):
         self.autotrading_enabled = False
@@ -2972,25 +3402,45 @@ class Terminal(QMainWindow):
         except Exception:
             sessions = []
 
-        selector.blockSignals(True)
-        selector.clear()
         active_session_id = str(getattr(controller, "active_session_id", "") or "").strip()
-        if not sessions:
-            selector.addItem("No active sessions", "")
-            selector.blockSignals(False)
-            return
-
+        items = []
         selected_index = 0
         for index, session in enumerate(sessions):
             session_id = str(session.get("session_id") or "").strip()
             label = str(session.get("label") or session_id or "Session").strip()
             status = str(session.get("status") or "unknown").upper()
-            selector.addItem(f"{label} [{status}]", session_id)
+            items.append((f"{label} [{status}]", session_id))
             if session_id and session_id == active_session_id:
                 selected_index = index
+        if not items:
+            items = [("No active sessions", "")]
+
+        signature = (id(selector), active_session_id, tuple(items))
+        if (
+            signature == getattr(self, "_session_selector_signature", None)
+            and selector.count() == len(items)
+        ):
+            if selector.currentIndex() != selected_index:
+                blocked = selector.blockSignals(True)
+                selector.setCurrentIndex(selected_index)
+                selector.blockSignals(blocked)
+            return
+
+        blocked = selector.blockSignals(True)
+        selector.clear()
+        if not sessions:
+            selector.addItem("No active sessions", "")
+            selector.setCurrentIndex(0)
+            selector.blockSignals(blocked)
+            self._session_selector_signature = signature
+            return
+
+        for text, session_id in items:
+            selector.addItem(text, session_id)
 
         selector.setCurrentIndex(selected_index)
-        selector.blockSignals(False)
+        selector.blockSignals(blocked)
+        self._session_selector_signature = signature
 
     def _activate_selected_session_from_toolbar(self, *_args):
         selector = getattr(self, "session_selector", None)
@@ -5026,9 +5476,19 @@ class Terminal(QMainWindow):
             return
 
         symbol = str(payload.get("symbol") or "").strip().upper().replace("-", "/").replace("_", "/")
+        timeline_dock = getattr(self, "live_agent_timeline_dock", None)
+        if timeline_dock is not None and self._is_qt_object_alive(timeline_dock) and hasattr(self, "_refresh_live_agent_timeline_panel"):
+            self._refresh_live_agent_timeline_panel(force=True)
         timeline_window = getattr(self, "detached_tool_windows", {}).get("agent_timeline")
         if timeline_window is not None and self._is_qt_object_alive(timeline_window) and hasattr(self, "_refresh_agent_timeline_window"):
             self._refresh_agent_timeline_window(window=timeline_window)
+        trader_monitor_window = getattr(self, "detached_tool_windows", {}).get("trader_agent_monitor")
+        if (
+            trader_monitor_window is not None
+            and self._is_qt_object_alive(trader_monitor_window)
+            and hasattr(self, "_refresh_trader_agent_monitor_window")
+        ):
+            self._refresh_trader_agent_monitor_window(window=trader_monitor_window)
         window = getattr(self, "detached_tool_windows", {}).get("strategy_assignments")
         selected_symbol = ""
         if window is not None:
@@ -5128,6 +5588,7 @@ class Terminal(QMainWindow):
         self._configure_market_watch_table()
         self.symbols_table.itemChanged.connect(self._handle_market_watch_item_changed)
         dock.setWidget(self.symbols_table)
+        self._apply_dock_widget_chrome(dock)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
 
         self.tick_chart = pg.PlotWidget()
@@ -5138,19 +5599,24 @@ class Terminal(QMainWindow):
         tick_dock.setObjectName("tick_chart_dock")
         self.tick_chart_dock = tick_dock
         tick_dock.setWidget(self.tick_chart)
+        self._apply_dock_widget_chrome(tick_dock)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, tick_dock)
 
     def _create_positions_panel(self):
         create_positions_panel(self)
+        self._apply_dock_widget_chrome(getattr(self, "positions_dock", None))
 
     def _create_open_orders_panel(self):
         create_open_orders_panel(self)
+        self._apply_dock_widget_chrome(getattr(self, "open_orders_dock", None))
 
     def _create_orderbook_panel(self):
         create_orderbook_panel(self)
+        self._apply_dock_widget_chrome(getattr(self, "orderbook_dock", None))
 
     def _create_trade_log_panel(self):
         create_trade_log_panel(self)
+        self._apply_dock_widget_chrome(getattr(self, "trade_log_dock", None))
 
     def _create_equity_panel(self):
 
@@ -5172,6 +5638,7 @@ class Terminal(QMainWindow):
         container.setLayout(layout)
 
         dock.setWidget(container)
+        self._apply_dock_widget_chrome(dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
@@ -5242,6 +5709,7 @@ class Terminal(QMainWindow):
         container.setLayout(layout)
         dock.setWidget(container)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+        self._apply_dock_widget_chrome(dock)
 
     def _build_performance_metric_grid(self, metric_names, columns=2):
         grid = QGridLayout()
@@ -5390,6 +5858,7 @@ class Terminal(QMainWindow):
 
     def _create_strategy_comparison(self):
         create_strategy_scorecard_panel(self)
+        self._apply_dock_widget_chrome(getattr(self, "strategy_scorecard_dock", None))
 
     # ==========================================================
     # BACKTEST
@@ -5486,8 +5955,16 @@ class Terminal(QMainWindow):
                 self.refresh_timer.stop()
             if hasattr(self, "orderbook_timer") and self.orderbook_timer is not None:
                 self.orderbook_timer.stop()
+            if hasattr(self, "signal_scan_timer") and self.signal_scan_timer is not None:
+                self.signal_scan_timer.stop()
             if hasattr(self, "spinner_timer") and self.spinner_timer is not None:
                 self.spinner_timer.stop()
+            passive_task = getattr(self, "_passive_signal_scan_task", None)
+            if passive_task is not None and not passive_task.done():
+                passive_task.cancel()
+            autotrade_task = getattr(self, "_autotrade_enable_task", None)
+            if autotrade_task is not None and not autotrade_task.done():
+                autotrade_task.cancel()
         except Exception:
             pass
 
@@ -5585,6 +6062,7 @@ class Terminal(QMainWindow):
             "trade_log_dock",
             "risk_heatmap_dock",
             "ai_signal_dock",
+            "live_agent_timeline_dock",
             "strategy_scorecard_dock",
             "strategy_debug_dock",
             "session_tabs_dock",
@@ -5618,6 +6096,7 @@ class Terminal(QMainWindow):
             "orderbook_dock": Qt.DockWidgetArea.RightDockWidgetArea,
             "risk_heatmap_dock": Qt.DockWidgetArea.RightDockWidgetArea,
             "ai_signal_dock": Qt.DockWidgetArea.RightDockWidgetArea,
+            "live_agent_timeline_dock": Qt.DockWidgetArea.RightDockWidgetArea,
             "strategy_scorecard_dock": Qt.DockWidgetArea.RightDockWidgetArea,
             "strategy_debug_dock": Qt.DockWidgetArea.RightDockWidgetArea,
             "session_tabs_dock": Qt.DockWidgetArea.RightDockWidgetArea,
@@ -5675,6 +6154,7 @@ class Terminal(QMainWindow):
             "orderbook_dock": Qt.DockWidgetArea.RightDockWidgetArea,
             "risk_heatmap_dock": Qt.DockWidgetArea.RightDockWidgetArea,
             "ai_signal_dock": Qt.DockWidgetArea.RightDockWidgetArea,
+            "live_agent_timeline_dock": Qt.DockWidgetArea.RightDockWidgetArea,
             "strategy_scorecard_dock": Qt.DockWidgetArea.RightDockWidgetArea,
             "strategy_debug_dock": Qt.DockWidgetArea.RightDockWidgetArea,
             "session_tabs_dock": Qt.DockWidgetArea.RightDockWidgetArea,
@@ -5717,6 +6197,9 @@ class Terminal(QMainWindow):
 
     def _open_system_status_dock(self):
         self._show_workspace_dock(getattr(self, "system_status_dock", None))
+
+    def _open_live_agent_timeline_dock(self):
+        self._show_workspace_dock(getattr(self, "live_agent_timeline_dock", None))
 
     def _apply_candle_colors_to_all_charts(self):
         for chart in self._iter_chart_widgets():
@@ -6021,6 +6504,7 @@ class Terminal(QMainWindow):
 
     def _create_strategy_debug_panel(self):
         create_strategy_debug_panel(self)
+        self._apply_dock_widget_chrome(getattr(self, "strategy_debug_dock", None))
 
     def _handle_strategy_debug(self, debug):
         handle_strategy_debug(self, debug)
@@ -6122,9 +6606,11 @@ class Terminal(QMainWindow):
         self._create_system_status_panel()
         self._create_risk_heatmap()
         self._create_ai_signal_panel()
+        self._create_live_agent_timeline_panel()
 
     def _create_system_console_panel(self):
         create_system_console_panel(self)
+        self._apply_dock_widget_chrome(getattr(self, "system_console_dock", None))
 
     def _create_session_tabs_panel(self):
         dock = QDockWidget("Sessions", self)
@@ -6133,10 +6619,12 @@ class Terminal(QMainWindow):
 
         tabs = QTabWidget()
         tabs.setObjectName("session_tabs_widget")
+        self._apply_workspace_tab_chrome(tabs)
         dock.setWidget(tabs)
 
         self.session_tabs_dock = dock
         self.session_tabs_widget = tabs
+        self._apply_dock_widget_chrome(dock)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self._refresh_session_tabs()
 
@@ -6151,6 +6639,62 @@ class Terminal(QMainWindow):
         except Exception:
             sessions = []
 
+        aggregate = {}
+        if hasattr(controller, "aggregate_session_portfolio"):
+            try:
+                aggregate = dict(controller.aggregate_session_portfolio() or {})
+            except Exception:
+                aggregate = {}
+
+        active_session_id = str(getattr(controller, "active_session_id", "") or "").strip()
+        selected_index = 1 if sessions else 0
+        session_signature = []
+        for index, session in enumerate(sessions):
+            session_id = str(session.get("session_id") or "").strip()
+            label = str(session.get("label") or session_id or "Session").strip()
+            status = str(session.get("status") or "unknown").upper()
+            mode = str(session.get("mode") or "paper").upper()
+            if session_id and session_id == active_session_id:
+                selected_index = index + 1
+            session_signature.append(
+                (
+                    session_id,
+                    label,
+                    status,
+                    mode,
+                    str(session.get("account_label") or "Not set"),
+                    float(session.get("equity") or 0.0),
+                    float(session.get("drawdown_pct") or 0.0),
+                    float(session.get("gross_exposure") or 0.0),
+                    int(session.get("symbols_count") or 0),
+                    int(session.get("positions_count") or 0),
+                    int(session.get("open_orders_count") or 0),
+                    int(session.get("trade_count") or 0),
+                    str(session.get("strategy") or "Trend Following"),
+                )
+            )
+        signature = (
+            id(tabs),
+            active_session_id,
+            (
+                int(aggregate.get("session_count") or len(sessions)),
+                int(aggregate.get("running_sessions") or 0),
+                int(aggregate.get("risk_blocked_sessions") or 0),
+                float(aggregate.get("total_equity") or 0.0),
+                float(aggregate.get("total_gross_exposure") or 0.0),
+                float(aggregate.get("total_unrealized_pnl") or 0.0),
+            ),
+            tuple(session_signature),
+        )
+        expected_tabs = 1 if not sessions else len(sessions) + 1
+        if (
+            signature == getattr(self, "_session_tabs_signature", None)
+            and tabs.count() == expected_tabs
+        ):
+            if tabs.currentIndex() != selected_index:
+                tabs.setCurrentIndex(selected_index)
+            return
+
         while tabs.count():
             widget = tabs.widget(0)
             tabs.removeTab(0)
@@ -6159,16 +6703,20 @@ class Terminal(QMainWindow):
 
         if not sessions:
             placeholder = QTextBrowser()
-            placeholder.setHtml("<p>No active sessions yet.</p>")
+            placeholder.setStyleSheet(Terminal._tool_window_text_browser_style(self))
+            placeholder.setHtml(
+                Terminal._empty_state_html(
+                    self,
+                    "No Active Sessions",
+                    "Create or activate a trading session to manage accounts, orders, and runtime state from one desk.",
+                    hint="The portfolio aggregator and individual session tabs will appear here automatically.",
+                )
+            )
             tabs.addTab(placeholder, "Sessions")
+            tabs.setCurrentIndex(0)
+            self._session_tabs_signature = signature
             return
 
-        aggregate = {}
-        if hasattr(controller, "aggregate_session_portfolio"):
-            try:
-                aggregate = dict(controller.aggregate_session_portfolio() or {})
-            except Exception:
-                aggregate = {}
         portfolio_viewer = QTextBrowser()
         portfolio_viewer.setHtml(
             "<h3>Portfolio Aggregator</h3>"
@@ -6189,8 +6737,6 @@ class Terminal(QMainWindow):
         )
         tabs.addTab(portfolio_viewer, "Portfolio")
 
-        active_session_id = str(getattr(controller, "active_session_id", "") or "").strip()
-        selected_index = 1 if tabs.count() else 0
         for index, session in enumerate(sessions):
             viewer = QTextBrowser()
             label = str(session.get("label") or session.get("session_id") or "Session").strip()
@@ -6228,15 +6774,59 @@ class Terminal(QMainWindow):
                 )
             )
             tabs.addTab(viewer, label)
-            if str(session.get("session_id") or "").strip() == active_session_id:
-                selected_index = index + 1
         tabs.setCurrentIndex(selected_index)
+        self._session_tabs_signature = signature
 
     def _current_chart_symbol(self):
         chart = self._current_chart_widget()
         if chart is not None:
             return chart.symbol
         return getattr(self, "symbol", None)
+
+    def _defer_controller_coroutine(self, coro_factory, task_name):
+        if self._ui_shutting_down:
+            return
+
+        def _start():
+            if self._ui_shutting_down:
+                return
+            try:
+                coro = coro_factory()
+            except Exception:
+                logger = getattr(self, "logger", None)
+                if logger is not None:
+                    logger.debug("Deferred controller coroutine factory failed for %s", task_name, exc_info=True)
+                return
+
+            create_task = getattr(getattr(self, "controller", None), "_create_task", None)
+            try:
+                if callable(create_task):
+                    create_task(coro, task_name)
+                else:
+                    asyncio.get_event_loop().create_task(coro)
+            except Exception:
+                close = getattr(coro, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+                logger = getattr(self, "logger", None)
+                if logger is not None:
+                    logger.debug("Deferred controller coroutine scheduling failed for %s", task_name, exc_info=True)
+
+        defer_start = False
+        if QApplication.instance() is not None:
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            defer_start = running_loop is not None and str(type(running_loop).__module__ or "").startswith("qasync")
+
+        if not defer_start:
+            _start()
+            return
+        QTimer.singleShot(0, _start)
 
     def _request_active_orderbook(self):
         if self._ui_shutting_down:
@@ -6247,13 +6837,166 @@ class Terminal(QMainWindow):
             return
 
         if hasattr(self.controller, "request_orderbook"):
-            asyncio.get_event_loop().create_task(
-                self.controller.request_orderbook(symbol=symbol, limit=20)
+            self._defer_controller_coroutine(
+                lambda symbol=symbol: self.controller.request_orderbook(symbol=symbol, limit=20),
+                f"request_orderbook:{symbol}",
             )
         if hasattr(self.controller, "request_recent_trades"):
-            asyncio.get_event_loop().create_task(
-                self.controller.request_recent_trades(symbol=symbol, limit=40)
+            self._defer_controller_coroutine(
+                lambda symbol=symbol: self.controller.request_recent_trades(symbol=symbol, limit=40),
+                f"request_recent_trades:{symbol}",
             )
+
+    def _passive_signal_scan_symbols(self):
+        if getattr(self, "_ui_shutting_down", False) or bool(getattr(self, "autotrading_enabled", False)):
+            return []
+        if not self._session_is_current():
+            return []
+
+        controller = getattr(self, "controller", None)
+        trading_system = getattr(controller, "trading_system", None) if controller is not None else None
+        if controller is None or trading_system is None or not hasattr(trading_system, "process_symbol"):
+            return []
+
+        max_symbols = max(1, int(getattr(self, "PASSIVE_SIGNAL_SCAN_MAX_SYMBOLS", 6) or 6))
+        scope = str(getattr(self, "autotrade_scope_value", "all") or "all").strip().lower() or "all"
+        current_symbol = self._normalized_symbol(self._current_chart_symbol() or getattr(self, "symbol", ""))
+        active_symbol_resolver = getattr(controller, "get_active_autotrade_symbols", None)
+        symbol_enabled_resolver = getattr(controller, "is_symbol_enabled_for_autotrade", None)
+        fallback_supported = {
+            self._normalized_symbol(symbol)
+            for symbol in list(getattr(controller, "symbols", []) or [])
+            if self._normalized_symbol(symbol)
+        }
+
+        resolved = []
+
+        def _append(symbol):
+            normalized = self._normalized_symbol(symbol)
+            if not normalized or normalized in resolved:
+                return
+            if callable(symbol_enabled_resolver):
+                try:
+                    if not bool(symbol_enabled_resolver(normalized)):
+                        return
+                except Exception:
+                    pass
+            elif fallback_supported and normalized not in fallback_supported:
+                return
+            resolved.append(normalized)
+
+        resolved_from_scope = []
+        if callable(active_symbol_resolver):
+            try:
+                resolved_from_scope = list(active_symbol_resolver() or [])
+            except Exception:
+                resolved_from_scope = []
+
+        if scope == "selected":
+            _append(current_symbol)
+            if not resolved:
+                for symbol in resolved_from_scope:
+                    _append(symbol)
+                    if resolved:
+                        break
+            return resolved[:1]
+
+        for symbol in resolved_from_scope:
+            _append(symbol)
+
+        if current_symbol and current_symbol in resolved:
+            resolved.remove(current_symbol)
+            resolved.insert(0, current_symbol)
+        elif not resolved:
+            _append(current_symbol)
+
+        if not resolved:
+            for symbol in list(getattr(controller, "symbols", []) or [])[:max_symbols]:
+                _append(symbol)
+
+        return resolved[:max_symbols]
+
+    async def _run_passive_signal_scan(self):
+        if getattr(self, "_ui_shutting_down", False) or bool(getattr(self, "autotrading_enabled", False)):
+            return
+        if not self._session_is_current():
+            return
+
+        controller = getattr(self, "controller", None)
+        trading_system = getattr(controller, "trading_system", None) if controller is not None else None
+        if controller is None or trading_system is None or not hasattr(trading_system, "process_symbol"):
+            return
+
+        symbols = list(self._passive_signal_scan_symbols() or [])
+        if not symbols:
+            return
+
+        default_timeframe = str(getattr(self, "current_timeframe", "") or getattr(controller, "time_frame", "1h") or "1h").strip() or "1h"
+        target_limit = getattr(controller, "limit", None)
+        timeframe_resolver = getattr(trading_system, "_assigned_timeframe_for_symbol", None)
+
+        for symbol in symbols:
+            if getattr(self, "_ui_shutting_down", False) or bool(getattr(self, "autotrading_enabled", False)):
+                return
+            try:
+                timeframe_value = default_timeframe
+                if callable(timeframe_resolver):
+                    try:
+                        timeframe_value = str(
+                            timeframe_resolver(symbol, fallback=default_timeframe) or default_timeframe
+                        ).strip() or default_timeframe
+                    except TypeError:
+                        timeframe_value = str(timeframe_resolver(symbol) or default_timeframe).strip() or default_timeframe
+                result = trading_system.process_symbol(
+                    symbol,
+                    timeframe=timeframe_value,
+                    limit=target_limit,
+                    publish_debug=True,
+                    allow_execution=False,
+                )
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                logger = getattr(self, "logger", None)
+                if logger is not None:
+                    logger.debug("Passive signal scan failed for %s: %s", symbol, exc, exc_info=True)
+
+    def _schedule_passive_signal_scan(self):
+        if getattr(self, "_ui_shutting_down", False) or bool(getattr(self, "autotrading_enabled", False)):
+            return
+        if not self._session_is_current():
+            return
+        if not self._passive_signal_scan_symbols():
+            return
+
+        task = getattr(self, "_passive_signal_scan_task", None)
+        if task is not None and not task.done():
+            return
+
+        self._last_passive_signal_scan_at = time.monotonic()
+        try:
+            task = asyncio.get_event_loop().create_task(self._run_passive_signal_scan())
+        except Exception as exc:
+            logger = getattr(self, "logger", None)
+            if logger is not None:
+                logger.debug("Unable to schedule passive signal scan: %s", exc)
+            return
+
+        self._passive_signal_scan_task = task
+
+        def _done(completed):
+            if getattr(self, "_passive_signal_scan_task", None) is completed:
+                self._passive_signal_scan_task = None
+            try:
+                exception = completed.exception()
+            except asyncio.CancelledError:
+                return
+            if exception is not None:
+                logger = getattr(self, "logger", None)
+                if logger is not None:
+                    logger.debug("Passive signal scan task failed", exc_info=(type(exception), exception, exception.__traceback__))
+
+        task.add_done_callback(_done)
 
     def _setup_spinner(self):
 
@@ -6487,10 +7230,12 @@ class Terminal(QMainWindow):
 
         parent = self if isinstance(self, QWidget) else None
         window = QMainWindow(parent)
+        window.setObjectName(f"tool_window_{key}")
         window.setWindowFlag(Qt.WindowType.Window, True)
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         window.setWindowTitle(title)
         window.resize(width, height)
+        window.setStyleSheet(Terminal._detached_tool_window_style(self))
         window.destroyed.connect(
             lambda *_: self.detached_tool_windows.pop(key, None)
         )
@@ -6545,11 +7290,21 @@ class Terminal(QMainWindow):
         table.setCornerButtonEnabled(False)
         table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         table.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, False)
+        table.setShowGrid(True)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         if table.viewport() is not None:
             table.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, False)
         table.setStyleSheet(
-            "QTableWidget { background-color: #0f1726; color: #d9e6f7; gridline-color: #20324d; }"
+            "QTableWidget { "
+            "background-color: #0f1726; color: #d9e6f7; gridline-color: #20324d; "
+            "border: 1px solid #20324d; border-radius: 12px; alternate-background-color: #0c1421; "
+            "}"
             "QTableWidget::item:selected { background-color: #1c3150; color: #ffffff; }"
+            "QHeaderView::section { "
+            "background-color: #101c2e; color: #9fb5d3; padding: 8px 10px; border: 0; "
+            "border-bottom: 1px solid #22344f; font-weight: 700; "
+            "}"
         )
 
     def _monitor_table_is_busy(self, table):
@@ -9376,14 +10131,71 @@ class Terminal(QMainWindow):
         summary = getattr(window, "_health_summary", None)
         checks_table = getattr(window, "_health_checks_table", None)
         capabilities_browser = getattr(window, "_capabilities_browser", None)
+        readiness_browser = getattr(window, "_health_readiness_browser", None)
+        data_health_browser = getattr(window, "_health_data_health_browser", None)
+        decision_browser = getattr(window, "_health_decision_browser", None)
+        strategy_browser = getattr(window, "_health_strategy_browser", None)
         if summary is None or checks_table is None or capabilities_browser is None:
             return
 
         report = controller.get_health_check_report() if hasattr(controller, "get_health_check_report") else []
+        monitor_symbol = self._current_chart_symbol() or getattr(self, "symbol", None)
+        timeframe_value = str(getattr(self, "current_timeframe", "") or getattr(controller, "time_frame", "1h") or "1h").strip() or "1h"
+        readiness_report = {}
+        if hasattr(controller, "get_live_readiness_report"):
+            try:
+                readiness_report = dict(
+                    controller.get_live_readiness_report(
+                        symbol=monitor_symbol,
+                        timeframe=timeframe_value,
+                    )
+                    or {}
+                )
+            except Exception:
+                readiness_report = {}
+        data_health = dict(readiness_report.get("market_data") or {})
+        if not data_health and hasattr(controller, "get_market_data_health_snapshot"):
+            try:
+                data_health = dict(
+                    controller.get_market_data_health_snapshot(
+                        symbol=monitor_symbol,
+                        timeframe=timeframe_value,
+                    )
+                    or {}
+                )
+            except Exception:
+                data_health = {}
+        capability_profile = {}
+        if hasattr(controller, "get_broker_capability_profile"):
+            try:
+                capability_profile = dict(controller.get_broker_capability_profile() or {})
+            except Exception:
+                capability_profile = {}
+        decision_timeline = {}
+        if hasattr(controller, "decision_timeline_snapshot"):
+            try:
+                decision_timeline = dict(controller.decision_timeline_snapshot(symbol=monitor_symbol, limit=8) or {})
+            except Exception:
+                decision_timeline = {}
+        feedback_summary = {}
+        if hasattr(controller, "strategy_feedback_summary"):
+            try:
+                feedback_summary = dict(controller.strategy_feedback_summary(limit=200) or {})
+            except Exception:
+                feedback_summary = {}
+        portfolio_symbol = str(readiness_report.get("symbol") or monitor_symbol or "").strip()
+        portfolio_rows = []
+        if portfolio_symbol and hasattr(controller, "strategy_portfolio_profile_for_symbol"):
+            try:
+                portfolio_rows = list(controller.strategy_portfolio_profile_for_symbol(portfolio_symbol) or [])
+            except Exception:
+                portfolio_rows = []
+
         summary.setText(
             f"Startup health: {getattr(controller, 'get_health_check_summary', lambda: 'Not run')()} | "
             f"Mode: {'LIVE' if getattr(controller, 'is_live_mode', lambda: False)() else 'PAPER'} | "
-            f"Account: {getattr(controller, 'current_account_label', lambda: 'Not set')()}"
+            f"Account: {getattr(controller, 'current_account_label', lambda: 'Not set')()} | "
+            f"Readiness: {str(readiness_report.get('summary') or 'Not checked').strip() or 'Not checked'}"
         )
 
         checks_table.setRowCount(len(report))
@@ -9396,10 +10208,97 @@ class Terminal(QMainWindow):
 
         capabilities = controller.get_broker_capabilities() if hasattr(controller, "get_broker_capabilities") else {}
         capability_lines = [
-            f"<li><b>{html.escape(str(key).replace('_', ' ').title())}:</b> {'Yes' if value else 'No'}</li>"
-            for key, value in capabilities.items()
+            "Broker profile",
+            f"Summary: {str(capability_profile.get('summary') or '-').strip() or '-'}",
+            f"Market data provider: {str(capability_profile.get('market_data_provider') or '-').strip() or '-'}",
+            f"Swap provider: {str(capability_profile.get('swap_provider') or '-').strip() or '-'}",
+            f"Live order ready: {'Yes' if capability_profile.get('live_order_ready') else 'No'}",
+            "",
+            "Capabilities",
         ]
-        capabilities_browser.setHtml("<h3>Broker Capabilities</h3><ul>" + "".join(capability_lines) + "</ul>")
+        for key, value in capabilities.items():
+            label = str(key).replace("_", " ").title()
+            if isinstance(value, list):
+                rendered = ", ".join(str(item) for item in value) if value else "-"
+            else:
+                rendered = "Yes" if value else "No"
+            capability_lines.append(f"{label}: {rendered}")
+        capabilities_browser.setPlainText("\n".join(capability_lines))
+
+        if readiness_browser is not None:
+            readiness_lines = [str(readiness_report.get("summary") or "Readiness data is not available yet.").strip()]
+            for item in list(readiness_report.get("checks") or []):
+                readiness_lines.append(
+                    f"[{str(item.get('status') or '').upper() or 'INFO'}] "
+                    f"{str(item.get('name') or '').strip()}: {str(item.get('detail') or '').strip()}"
+                )
+            readiness_browser.setPlainText("\n".join(readiness_lines))
+
+        if data_health_browser is not None:
+            quote = dict(data_health.get("quote") or {})
+            candles = dict(data_health.get("candles") or {})
+            orderbook = dict(data_health.get("orderbook") or {})
+            data_lines = [
+                str(data_health.get("summary") or "Market data health is not available yet.").strip(),
+                f"Stream status: {str(data_health.get('stream_status') or '-').strip() or '-'}",
+                f"Quote feed: {str(quote.get('age_label') or 'unknown').strip() or 'unknown'} old",
+                f"Candle feed: {str(candles.get('age_label') or 'unknown').strip() or 'unknown'} old for {str(candles.get('timeframe') or timeframe_value).strip() or timeframe_value}",
+                "Orderbook feed: not supported" if orderbook.get("supported") is False else (
+                    f"Orderbook feed: {str(orderbook.get('age_label') or 'unknown').strip() or 'unknown'} old"
+                ),
+            ]
+            data_health_browser.setPlainText("\n".join(data_lines))
+
+        if decision_browser is not None:
+            decision_lines = [str(decision_timeline.get("summary") or "No decision timeline is available yet.").strip()]
+            for item in list(decision_timeline.get("steps") or [])[-8:]:
+                timestamp_label = str(item.get("timestamp_label") or "").strip()
+                agent_name = str(item.get("agent_name") or item.get("stage") or "runtime").strip()
+                status = str(item.get("status") or "pending").strip().upper()
+                reason = str(item.get("reason") or "").strip()
+                line = f"{timestamp_label or '-'} | {agent_name} | {status}"
+                if reason:
+                    line = f"{line} | {reason}"
+                decision_lines.append(line)
+            decision_browser.setPlainText("\n".join(decision_lines))
+
+        if strategy_browser is not None:
+            strategy_lines = [
+                str(feedback_summary.get("summary") or "No live strategy feedback is available yet.").strip()
+            ]
+            if portfolio_rows:
+                strategy_lines.append("")
+                strategy_lines.append(f"Managed portfolio for {portfolio_symbol}:")
+                for row in list(portfolio_rows or [])[:6]:
+                    strategy_lines.append(
+                        (
+                            f"{float(row.get('portfolio_weight', 0.0) or 0.0) * 100:.1f}% "
+                            f"{str(row.get('strategy_name') or '-').strip()} "
+                            f"{str(row.get('timeframe') or timeframe_value).strip()} | "
+                            f"adaptive {float(row.get('adaptive_weight', 1.0) or 1.0):.2f} | "
+                            f"live {float(row.get('feedback_multiplier', 1.0) or 1.0):.2f}x"
+                        )
+                    )
+                    strategy_lines.append(str(row.get("management_reason") or "").strip())
+            improving = list(feedback_summary.get("improving") or [])
+            degrading = list(feedback_summary.get("degrading") or [])
+            if improving:
+                strategy_lines.append("")
+                strategy_lines.append("Improving profiles:")
+                for row in improving[:3]:
+                    strategy_lines.append(
+                        f"{str(row.get('strategy_name') or '-').strip()} {str(row.get('symbol') or '-').strip()} "
+                        f"{str(row.get('timeframe') or '-').strip()} | {float(row.get('feedback_multiplier', 1.0) or 1.0):.2f}x"
+                    )
+            if degrading:
+                strategy_lines.append("")
+                strategy_lines.append("Needs attention:")
+                for row in degrading[:3]:
+                    strategy_lines.append(
+                        f"{str(row.get('strategy_name') or '-').strip()} {str(row.get('symbol') or '-').strip()} "
+                        f"{str(row.get('timeframe') or '-').strip()} | {float(row.get('feedback_multiplier', 1.0) or 1.0):.2f}x"
+                    )
+            strategy_browser.setPlainText("\n".join(strategy_lines))
 
     def _export_diagnostics_bundle(self):
         default_dir = str(self.settings.value("diagnostics/export_dir", "logs") or "logs")
@@ -9446,19 +10345,24 @@ class Terminal(QMainWindow):
         if getattr(window, "_health_checks_table", None) is None:
             container = QWidget()
             layout = QVBoxLayout(container)
-            layout.setContentsMargins(14, 14, 14, 14)
-            layout.setSpacing(10)
+            layout.setContentsMargins(16, 16, 16, 16)
+            layout.setSpacing(12)
+
+            hero, _, _, _ = self._build_tool_window_hero(
+                "System Health",
+                "Monitor startup checks, live readiness, broker capabilities, and the latest decision path from one control surface.",
+                meta="Diagnostics | Readiness | Broker profile | Strategy feedback",
+            )
+            layout.addWidget(hero)
 
             summary = QLabel("Running startup health checks.")
             summary.setWordWrap(True)
-            summary.setStyleSheet(
-                "color: #d9e6f7; background-color: #101a2d; border: 1px solid #20324d; "
-                "border-radius: 12px; padding: 12px; font-size: 13px; font-weight: 600;"
-            )
+            summary.setObjectName("tool_window_summary_card")
             layout.addWidget(summary)
 
             controls = QHBoxLayout()
             rerun_btn = QPushButton("Run Checks")
+            rerun_btn.setStyleSheet(self._action_button_style())
             rerun_btn.clicked.connect(
                 lambda: (
                     self.controller._create_task(self.controller.run_startup_health_check(), "manual_health_check")
@@ -9467,8 +10371,10 @@ class Terminal(QMainWindow):
                 )
             )
             export_btn = QPushButton("Export Diagnostics")
+            export_btn.setStyleSheet(self._action_button_style())
             export_btn.clicked.connect(self._export_diagnostics_bundle)
             logs_btn = QPushButton("Open Logs")
+            logs_btn.setStyleSheet(self._action_button_style())
             logs_btn.clicked.connect(self._open_logs)
             controls.addWidget(rerun_btn)
             controls.addWidget(export_btn)
@@ -9476,16 +10382,58 @@ class Terminal(QMainWindow):
             controls.addStretch()
             layout.addLayout(controls)
 
+            tabs = QTabWidget()
+            self._apply_workspace_tab_chrome(tabs)
+            layout.addWidget(tabs)
+
             checks = QTableWidget()
             checks.setColumnCount(3)
             checks.setHorizontalHeaderLabels(["Check", "Status", "Detail"])
-            layout.addWidget(checks)
+            self._configure_monitor_table(checks)
+            checks_page = QWidget()
+            checks_layout = QVBoxLayout(checks_page)
+            checks_layout.setContentsMargins(0, 0, 0, 0)
+            checks_layout.addWidget(checks)
+            tabs.addTab(checks_page, "Startup Checks")
+
+            def _section_title(text):
+                return self._build_tool_window_section_label(text)
+
+            def _section_browser():
+                browser = QTextBrowser()
+                browser.setMinimumHeight(120)
+                browser.setStyleSheet(self._tool_window_text_browser_style())
+                return browser
+
+            mission_page = QWidget()
+            mission_layout = QVBoxLayout(mission_page)
+            mission_layout.setContentsMargins(0, 0, 0, 0)
+            mission_layout.setSpacing(10)
+
+            readiness_browser = _section_browser()
+            mission_layout.addWidget(_section_title("Live Readiness"))
+            mission_layout.addWidget(readiness_browser)
+
+            data_health_browser = _section_browser()
+            mission_layout.addWidget(_section_title("Market Data Health"))
+            mission_layout.addWidget(data_health_browser)
+
+            decision_browser = _section_browser()
+            mission_layout.addWidget(_section_title("Decision Timeline"))
+            mission_layout.addWidget(decision_browser)
+
+            strategy_browser = _section_browser()
+            mission_layout.addWidget(_section_title("Managed Strategy Portfolio"))
+            mission_layout.addWidget(strategy_browser)
+            tabs.addTab(mission_page, "Mission Control")
 
             capabilities_browser = QTextBrowser()
-            capabilities_browser.setStyleSheet(
-                "QTextBrowser { background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; border-radius: 12px; padding: 12px; }"
-            )
-            layout.addWidget(capabilities_browser)
+            capabilities_browser.setStyleSheet(self._tool_window_text_browser_style())
+            capabilities_page = QWidget()
+            capabilities_layout = QVBoxLayout(capabilities_page)
+            capabilities_layout.setContentsMargins(0, 0, 0, 0)
+            capabilities_layout.addWidget(capabilities_browser)
+            tabs.addTab(capabilities_page, "Broker Profile")
 
             window.setCentralWidget(container)
             window._health_summary = summary
@@ -9493,6 +10441,11 @@ class Terminal(QMainWindow):
             window._health_export_btn = export_btn
             window._health_checks_table = checks
             window._capabilities_browser = capabilities_browser
+            window._health_tabs = tabs
+            window._health_readiness_browser = readiness_browser
+            window._health_data_health_browser = data_health_browser
+            window._health_decision_browser = decision_browser
+            window._health_strategy_browser = strategy_browser
 
             sync_timer = QTimer(window)
             sync_timer.timeout.connect(lambda: self._refresh_health_window(window))
@@ -9682,11 +10635,29 @@ class Terminal(QMainWindow):
                     self.status_labels.pop(field, None)
                 except Exception:
                     pass
+            cache = getattr(self, "_status_value_cache", None)
+            if isinstance(cache, dict):
+                cache.pop(field, None)
             return
 
         display = self._elide_text(value)
+        resolved_tooltip = tooltip or str(value)
+        cache = getattr(self, "_status_value_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._status_value_cache = cache
+        cached = cache.get(field)
+        if (
+            isinstance(cached, tuple)
+            and len(cached) == 3
+            and cached[0] is label
+            and cached[1] == display
+            and cached[2] == resolved_tooltip
+        ):
+            return
         label.setText(display)
-        label.setToolTip(tooltip or str(value))
+        label.setToolTip(resolved_tooltip)
+        cache[field] = (label, display, resolved_tooltip)
 
     def _system_status_exchange_display(self):
         broker = getattr(self.controller, "broker", None)
@@ -9735,6 +10706,58 @@ class Terminal(QMainWindow):
             used_summary, used_tooltip = self._compact_balance_text(
                 used if isinstance(used, dict) else {"USDT": used}
             )
+            monitor_symbol = self._current_chart_symbol() or getattr(self, "symbol", None)
+            timeframe_value = str(getattr(self, "current_timeframe", "") or getattr(controller, "time_frame", "1h") or "1h").strip() or "1h"
+
+            capability_profile = {}
+            if hasattr(controller, "get_broker_capability_profile"):
+                try:
+                    capability_profile = dict(controller.get_broker_capability_profile() or {})
+                except Exception:
+                    capability_profile = {}
+
+            readiness_report = {}
+            if hasattr(controller, "get_live_readiness_report"):
+                try:
+                    readiness_report = dict(
+                        controller.get_live_readiness_report(
+                            symbol=monitor_symbol,
+                            timeframe=timeframe_value,
+                        )
+                        or {}
+                    )
+                except Exception:
+                    readiness_report = {}
+
+            market_data_health = dict(readiness_report.get("market_data") or {})
+            if not market_data_health and hasattr(controller, "get_market_data_health_snapshot"):
+                try:
+                    market_data_health = dict(
+                        controller.get_market_data_health_snapshot(
+                            symbol=monitor_symbol,
+                            timeframe=timeframe_value,
+                        )
+                        or {}
+                    )
+                except Exception:
+                    market_data_health = {}
+
+            def _format_feed_status(snapshot):
+                payload = dict(snapshot or {})
+                if payload.get("supported") is False:
+                    return "N/A", "This feed is not supported by the active broker profile."
+                freshness = payload.get("fresh")
+                if freshness is True:
+                    status_text = "Fresh"
+                elif freshness is False:
+                    status_text = "Stale"
+                else:
+                    status_text = "Unknown"
+                age_label = str(payload.get("age_label") or "unknown").strip() or "unknown"
+                threshold_label = str(payload.get("threshold_label") or "n/a").strip() or "n/a"
+                display = f"{status_text} ({age_label})"
+                tooltip = f"Status: {status_text}\nAge: {age_label}\nThreshold: {threshold_label}"
+                return display, tooltip
 
             self._set_status_value("Exchange", exchange_display, exchange_tooltip)
             self._set_status_value("Mode", "LIVE" if getattr(controller, "is_live_mode", lambda: False)() else "PAPER")
@@ -9761,6 +10784,8 @@ class Terminal(QMainWindow):
                 news_mode_parts.append("auto")
             news_mode = " / ".join(news_mode_parts) if news_mode_parts else "OFF"
             self._set_status_value("Trade Venue", trade_venue)
+            self._set_status_value("Data Provider", capability_profile.get("market_data_provider", "-"))
+            self._set_status_value("Swap Provider", capability_profile.get("swap_provider", "-") or "-")
             self._set_status_value("News Mode", news_mode)
 
             self._set_status_value("Symbols Loaded", symbols_loaded)
@@ -9795,6 +10820,20 @@ class Terminal(QMainWindow):
             self._set_status_value("Behavior Guard", behavior_status.get("summary", "Not active"))
             self._set_status_value("Guard Reason", behavior_status.get("reason", "No active behavior restrictions"))
             self._set_status_value("Health Check", getattr(controller, "get_health_check_summary", lambda: "Not run")())
+            readiness_tooltip_lines = []
+            readiness_display = str(readiness_report.get("summary") or "Not checked").strip() or "Not checked"
+            for reason in list(readiness_report.get("blocking_reasons") or [])[:4]:
+                readiness_tooltip_lines.append(f"BLOCK: {reason}")
+            for reason in list(readiness_report.get("warning_reasons") or [])[:4]:
+                readiness_tooltip_lines.append(f"WARN: {reason}")
+            readiness_tooltip = "\n".join(readiness_tooltip_lines) or readiness_display
+            self._set_status_value("Readiness", readiness_display, readiness_tooltip)
+            quote_display, quote_tooltip = _format_feed_status((market_data_health or {}).get("quote"))
+            candle_display, candle_tooltip = _format_feed_status((market_data_health or {}).get("candles"))
+            orderbook_display, orderbook_tooltip = _format_feed_status((market_data_health or {}).get("orderbook"))
+            self._set_status_value("Quote Health", quote_display, quote_tooltip)
+            self._set_status_value("Candle Health", candle_display, candle_tooltip)
+            self._set_status_value("Orderbook Health", orderbook_display, orderbook_tooltip)
             self._set_status_value("Pipeline", getattr(controller, "get_pipeline_status_summary", lambda: "Idle")())
 
             self._set_status_value("Timeframe", self.current_timeframe)
@@ -9811,6 +10850,7 @@ class Terminal(QMainWindow):
             self._schedule_positions_refresh()
             self._schedule_open_orders_refresh()
             self._refresh_strategy_comparison_panel()
+            self._refresh_live_agent_timeline_panel()
 
         except Exception as e:
 
@@ -9834,9 +10874,15 @@ class Terminal(QMainWindow):
 
     def _create_system_status_panel(self):
         create_system_status_panel(self)
+        self._apply_dock_widget_chrome(getattr(self, "system_status_dock", None))
 
     def _create_ai_signal_panel(self):
         create_ai_signal_panel(self)
+        self._apply_dock_widget_chrome(getattr(self, "ai_signal_dock", None))
+
+    def _create_live_agent_timeline_panel(self):
+        create_live_agent_timeline_panel(self)
+        self._apply_dock_widget_chrome(getattr(self, "live_agent_timeline_dock", None))
 
     def _ai_monitor_rows(self):
         def _sort_key(item):
@@ -9889,6 +10935,316 @@ class Terminal(QMainWindow):
             table.setUpdatesEnabled(True)
             table.blockSignals(blocked)
 
+    def _live_agent_timeline_target_symbol(self):
+        controller = getattr(self, "controller", None)
+        available_symbols = [
+            self._normalized_symbol(symbol)
+            for symbol in list(getattr(controller, "symbols", []) or [])
+            if self._normalized_symbol(symbol)
+        ]
+        available_set = set(available_symbols)
+
+        current_symbol = self._normalized_symbol(self._current_chart_symbol() or getattr(self, "symbol", ""))
+        if current_symbol and (not available_set or current_symbol in available_set):
+            return current_symbol
+
+        feed_resolver = getattr(controller, "live_agent_runtime_feed", None) if controller is not None else None
+        if callable(feed_resolver):
+            try:
+                feed_rows = list(feed_resolver(limit=60) or [])
+            except Exception:
+                feed_rows = []
+            for row in feed_rows:
+                candidate = self._normalized_symbol((row or {}).get("symbol"))
+                if candidate and (not available_set or candidate in available_set):
+                    return candidate
+
+        if available_symbols:
+            return available_symbols[0]
+        return current_symbol
+
+    def _agent_runtime_status_label(self, row):
+        payload = dict((row or {}).get("payload") or {}) if isinstance((row or {}).get("payload"), dict) else {}
+        event_type = str((row or {}).get("event_type") or "").strip().lower()
+        approved = (row or {}).get("approved")
+        if approved is None:
+            approved = payload.get("approved")
+        stage = str((row or {}).get("stage") or "").strip().lower()
+
+        if event_type == "risk_alert" or approved is False:
+            return "Rejected"
+        if event_type == "order_filled":
+            return "Filled"
+        if event_type == "execution_plan":
+            return "Execution"
+        if event_type == "risk_approved" or approved is True:
+            return "Approved"
+        if event_type == "signal" or stage in {"signal", "selected"}:
+            return "Signal"
+        if stage:
+            return stage.replace("_", " ").title()
+        if event_type:
+            return event_type.replace("_", " ").title()
+        return "Runtime"
+
+    def _agent_runtime_health_snapshot(self, rows, now_ts=None):
+        runtime_rows = [dict(row) for row in list(rows or [])]
+        now_value = float(now_ts or time.time())
+        latest_timestamp = None
+        latest_symbols = []
+        grouped = {}
+        counts = {
+            "signals": 0,
+            "approved": 0,
+            "rejected": 0,
+            "execution": 0,
+            "filled": 0,
+        }
+        recent_event_count = 0
+
+        for row in runtime_rows:
+            symbol = str((row or {}).get("symbol") or "").strip().upper().replace("-", "/").replace("_", "/")
+            if symbol:
+                grouped.setdefault(symbol, []).append(dict(row))
+                if symbol not in latest_symbols:
+                    latest_symbols.append(symbol)
+
+            timestamp_value = (row or {}).get("timestamp")
+            timestamp_float = _coerce_timestamp_seconds(timestamp_value)
+            if timestamp_float is not None:
+                latest_timestamp = timestamp_float if latest_timestamp is None else max(latest_timestamp, timestamp_float)
+                if (now_value - timestamp_float) <= 60.0:
+                    recent_event_count += 1
+
+            status_label = self._agent_runtime_status_label(row)
+            if status_label == "Signal":
+                counts["signals"] += 1
+            elif status_label == "Approved":
+                counts["approved"] += 1
+            elif status_label == "Rejected":
+                counts["rejected"] += 1
+            elif status_label == "Execution":
+                counts["execution"] += 1
+            elif status_label == "Filled":
+                counts["filled"] += 1
+
+        anomalies = []
+        for symbol, symbol_rows in grouped.items():
+            rejected_count = sum(1 for row in symbol_rows if self._agent_runtime_status_label(row) == "Rejected")
+            if rejected_count >= 2:
+                anomalies.append(f"{symbol}: repeated rejections ({rejected_count})")
+
+            symbol_latest = None
+            filled_ids = set()
+            execution_ids = []
+            for row in symbol_rows:
+                timestamp_float = _coerce_timestamp_seconds((row or {}).get("timestamp"))
+                if timestamp_float is not None:
+                    symbol_latest = timestamp_float if symbol_latest is None else max(symbol_latest, timestamp_float)
+                event_type = str((row or {}).get("event_type") or "").strip().lower()
+                decision_id = str((row or {}).get("decision_id") or "").strip()
+                if event_type == "order_filled" and decision_id:
+                    filled_ids.add(decision_id)
+                if event_type == "execution_plan":
+                    execution_ids.append(decision_id)
+
+            if symbol_latest is not None and (now_value - symbol_latest) > 300.0:
+                anomalies.append(f"{symbol}: stale decision flow")
+            if execution_ids and any((not decision_id) or (decision_id not in filled_ids) for decision_id in execution_ids):
+                anomalies.append(f"{symbol}: execution plan without fill")
+
+        if latest_timestamp is None:
+            health = "IDLE"
+            last_event_age = None
+        else:
+            last_event_age = max(0.0, now_value - latest_timestamp)
+            if last_event_age > 300.0:
+                health = "STALE"
+            elif anomalies:
+                health = "DEGRADED"
+            elif counts["approved"] > 0 or counts["execution"] > 0 or counts["filled"] > 0:
+                health = "HEALTHY"
+            else:
+                health = "WATCHING"
+
+        def _age_text(seconds_value):
+            if seconds_value is None:
+                return "none yet"
+            if seconds_value < 60.0:
+                return f"{int(seconds_value)}s ago"
+            if seconds_value < 3600.0:
+                return f"{int(seconds_value // 60)}m ago"
+            return f"{int(seconds_value // 3600)}h ago"
+
+        latest_symbol_states = []
+        for symbol, symbol_rows in list(grouped.items())[:5]:
+            latest_row = symbol_rows[0]
+            message = str(
+                latest_row.get("message")
+                or latest_row.get("reason")
+                or latest_row.get("stage")
+                or "No detail recorded."
+            ).strip()
+            latest_symbol_states.append(
+                {
+                    "symbol": symbol,
+                    "status": self._agent_runtime_status_label(latest_row),
+                    "message": message,
+                }
+            )
+
+        return {
+            "health": health,
+            "last_event_age": last_event_age,
+            "last_event_age_text": _age_text(last_event_age),
+            "counts": counts,
+            "recent_event_count": recent_event_count,
+            "active_symbol_count": len(grouped),
+            "latest_symbols": latest_symbols[:4],
+            "anomalies": anomalies[:5],
+            "latest_symbol_states": latest_symbol_states,
+            "event_count": len(runtime_rows),
+        }
+
+    def _refresh_live_agent_timeline_panel(self, force=False):
+        dock = getattr(self, "live_agent_timeline_dock", None)
+        summary = getattr(self, "live_agent_timeline_summary", None)
+        browser = getattr(self, "live_agent_timeline_browser", None)
+        if not self._is_qt_object_alive(summary) or not self._is_qt_object_alive(browser):
+            return
+        if (not force) and self._is_qt_object_alive(dock) and (not dock.isVisible()):
+            return
+
+        controller = getattr(self, "controller", None)
+        symbol = self._live_agent_timeline_target_symbol()
+        snapshot = {}
+        snapshot_resolver = getattr(controller, "decision_timeline_snapshot", None) if controller is not None else None
+        if callable(snapshot_resolver):
+            try:
+                snapshot = dict(snapshot_resolver(symbol=symbol or None, limit=12) or {})
+            except TypeError:
+                snapshot = dict(snapshot_resolver(symbol) or {})
+            except Exception:
+                snapshot = {}
+
+        resolved_symbol = self._normalized_symbol((snapshot or {}).get("symbol") or symbol or "")
+        runtime_rows = []
+        global_runtime_rows = []
+        feed_resolver = getattr(controller, "live_agent_runtime_feed", None) if controller is not None else None
+        if callable(feed_resolver):
+            try:
+                runtime_rows = list(feed_resolver(limit=60, symbol=resolved_symbol or None) or [])
+            except TypeError:
+                runtime_rows = list(feed_resolver(60, resolved_symbol or None) or [])
+            except Exception:
+                runtime_rows = []
+            try:
+                global_runtime_rows = list(feed_resolver(limit=200) or [])
+            except TypeError:
+                global_runtime_rows = list(feed_resolver(200) or [])
+            except Exception:
+                global_runtime_rows = list(runtime_rows)
+
+        steps = list((snapshot or {}).get("steps") or [])
+        health_snapshot = self._agent_runtime_health_snapshot(global_runtime_rows)
+        summary_text = str((snapshot or {}).get("summary") or "").strip()
+        if not summary_text:
+            if resolved_symbol:
+                summary_text = f"{resolved_symbol}: no agent decision chain has been recorded yet."
+            else:
+                summary_text = "No agent runtime decisions have been recorded in this session yet."
+
+        anomaly_text = ", ".join(list(health_snapshot.get("anomalies") or [])[:2]) or "none"
+        counts = dict(health_snapshot.get("counts") or {})
+        summary_lines = [
+            f"Health: {health_snapshot.get('health') or 'IDLE'} | Last event: {health_snapshot.get('last_event_age_text') or 'none yet'}",
+            f"Signals: {int(counts.get('signals', 0) or 0)} | Approved: {int(counts.get('approved', 0) or 0)} | Rejected: {int(counts.get('rejected', 0) or 0)} | Execution: {int(counts.get('execution', 0) or 0)} | Filled: {int(counts.get('filled', 0) or 0)}",
+            f"Active symbols: {int(health_snapshot.get('active_symbol_count', 0) or 0)} | Events last minute: {int(health_snapshot.get('recent_event_count', 0) or 0)}",
+            f"Anomalies: {anomaly_text}",
+        ]
+        if resolved_symbol:
+            summary_lines.append(f"Focus symbol: {resolved_symbol}")
+        summary_lines.append(f"Decision steps: {len(steps)}")
+        summary_lines.append(f"Runtime events: {len(runtime_rows)}")
+        summary_lines.append(summary_text)
+        rendered_summary = "\n".join(summary_lines)
+
+        detail_lines = ["Agent Health Check"]
+        detail_lines.append(
+            f"Status: {health_snapshot.get('health') or 'IDLE'} | Last event: {health_snapshot.get('last_event_age_text') or 'none yet'}"
+        )
+        detail_lines.append(
+            "Counts: "
+            f"signals={int(counts.get('signals', 0) or 0)}, "
+            f"approved={int(counts.get('approved', 0) or 0)}, "
+            f"rejected={int(counts.get('rejected', 0) or 0)}, "
+            f"execution={int(counts.get('execution', 0) or 0)}, "
+            f"filled={int(counts.get('filled', 0) or 0)}"
+        )
+        latest_symbols = ", ".join(list(health_snapshot.get("latest_symbols") or [])) or "none"
+        detail_lines.append(f"Symbols active: {latest_symbols}")
+        anomalies = list(health_snapshot.get("anomalies") or [])
+        detail_lines.append(f"Anomalies: {', '.join(anomalies) if anomalies else 'none'}")
+        latest_symbol_states = list(health_snapshot.get("latest_symbol_states") or [])
+        if latest_symbol_states:
+            detail_lines.append("")
+            detail_lines.append("Latest Symbol States")
+            for item in latest_symbol_states:
+                detail_lines.append(
+                    f"- {item.get('symbol')}: {item.get('status')} | {item.get('message')}"
+                )
+        detail_lines.append("")
+        if steps:
+            detail_lines.append("Focus Symbol Decision Chain")
+            for index, step in enumerate(steps, start=1):
+                timestamp_label = str(step.get("timestamp_label") or "-").strip() or "-"
+                agent_name = str(step.get("agent_name") or "Agent").strip() or "Agent"
+                stage = str(step.get("stage") or "").strip()
+                status = str(step.get("status") or "pending").strip().upper() or "PENDING"
+                strategy_name = str(step.get("strategy_name") or "").strip()
+                timeframe = str(step.get("timeframe") or "").strip()
+                side = str(step.get("side") or "").strip().upper()
+                reason = str(step.get("reason") or "").strip()
+
+                headline = f"{index}. {timestamp_label} | {agent_name} | {status}"
+                if stage:
+                    headline = f"{headline} | {stage}"
+                detail_lines.append(headline)
+
+                context_parts = []
+                if side:
+                    context_parts.append(f"Side: {side}")
+                if strategy_name:
+                    context_parts.append(f"Strategy: {strategy_name}")
+                if timeframe:
+                    context_parts.append(f"Timeframe: {timeframe}")
+                if context_parts:
+                    detail_lines.append("   " + " | ".join(context_parts))
+                if reason:
+                    detail_lines.append("   " + reason)
+                detail_lines.append("")
+        elif runtime_rows:
+            detail_lines.append("Focus Symbol Runtime Events")
+            detail_lines.append("No decision chain is available yet. Latest runtime events:")
+            detail_lines.append("")
+            for row in runtime_rows[:10]:
+                timestamp_label = str(row.get("timestamp_label") or "-").strip() or "-"
+                actor = str(row.get("agent_name") or row.get("event_type") or row.get("kind") or "runtime").strip()
+                message = str(row.get("message") or row.get("reason") or "").strip() or "No detail recorded."
+                detail_lines.append(f"{timestamp_label} | {actor} | {message}")
+        else:
+            detail_lines.append("Focus Symbol Runtime")
+            detail_lines.append("Select or scan a symbol to start building an agent decision chain.")
+
+        rendered_detail = "\n".join(detail_lines).strip()
+        cache_key = (rendered_summary, rendered_detail)
+        if getattr(self, "_live_agent_timeline_cache", None) == cache_key:
+            return
+
+        summary.setText(rendered_summary)
+        browser.setPlainText(rendered_detail)
+        self._live_agent_timeline_cache = cache_key
+
     def _update_ai_signal(self, data):
         if self._ui_shutting_down:
             return
@@ -9924,6 +11280,7 @@ class Terminal(QMainWindow):
             strategy="AI Monitor",
             timestamp=record["timestamp"],
         )
+        self._log_ai_signal_update(record)
 
         now = time.monotonic()
         if (now - float(getattr(self, "_last_ai_table_refresh_at", 0.0) or 0.0)) < float(self.AI_TABLE_REFRESH_MIN_SECONDS or 0.5):
@@ -9939,6 +11296,71 @@ class Terminal(QMainWindow):
         monitor_window = (getattr(self, "detached_tool_windows", {}) or {}).get("ml_monitor")
         if self._is_qt_object_alive(monitor_window) and bool(monitor_window.isVisible()):
             self._refresh_ai_monitor_table(getattr(monitor_window, "_monitor_table", None))
+
+    def _log_ai_signal_update(self, record):
+        if not isinstance(record, dict):
+            return
+
+        system_console = getattr(self, "system_console", None)
+        if system_console is None or not hasattr(system_console, "log"):
+            return
+
+        symbol = str(record.get("symbol", "") or "").strip().upper()
+        if not symbol:
+            return
+
+        try:
+            confidence = float(record.get("confidence", 0.0) or 0.0)
+        except Exception:
+            confidence = 0.0
+
+        signal_text = str(record.get("signal", "") or "HOLD").strip().upper() or "HOLD"
+        regime = str(record.get("regime", "") or "").strip().upper()
+        decision = str(record.get("decision", "") or "").strip().upper()
+        provider = str(record.get("provider", "") or "").strip()
+        mode = str(record.get("mode", "") or "").strip()
+        reason = " ".join(str(record.get("reason", "") or "").split()).strip()
+
+        signature = (
+            signal_text,
+            decision,
+            round(confidence, 2),
+            regime,
+            provider.lower(),
+            mode.lower(),
+            reason[:160],
+        )
+        log_state = getattr(self, "_ai_signal_log_state", None)
+        if not isinstance(log_state, dict):
+            log_state = {}
+            self._ai_signal_log_state = log_state
+
+        previous = dict(log_state.get(symbol, {}) or {})
+        now = time.monotonic()
+        if previous.get("signature") == signature:
+            last_logged = float(previous.get("logged_at", 0.0) or 0.0)
+            if (now - last_logged) < float(getattr(self, "AI_SIGNAL_LOG_MIN_SECONDS", 30.0) or 30.0):
+                return
+
+        message_parts = [f"Signal monitor {symbol}: {signal_text}", f"conf {confidence:.2f}"]
+        if regime:
+            message_parts.append(f"regime {regime}")
+        if provider:
+            message_parts.append(provider)
+        if mode:
+            message_parts.append(mode)
+        message = " | ".join(message_parts)
+        if reason:
+            message = f"{message} | {reason[:180]}"
+
+        level = "WARN" if decision in {"REJECT", "BLOCK", "CANCEL"} else "INFO"
+        try:
+            system_console.log(message, level)
+        except Exception:
+            self.logger.debug("Unable to log AI signal monitor update", exc_info=True)
+            return
+
+        log_state[symbol] = {"signature": signature, "logged_at": now}
 
     def _recommendation_sort_key(self, item):
         timestamp_text = str(item.get("timestamp", "") or "")
@@ -9988,7 +11410,7 @@ class Terminal(QMainWindow):
 
     def _recommendation_summary_text(self, rows):
         if not rows:
-            return "No recommendations yet. Start market monitoring or AI trading to collect explainable trade ideas."
+            return "No recommendations on deck yet. Start market monitoring or AI trading to build an explainable idea queue."
 
         buy_count = sum(1 for item in rows if str(item.get("signal", "")).upper() == "BUY")
         sell_count = sum(1 for item in rows if str(item.get("signal", "")).upper() == "SELL")
@@ -10002,9 +11424,11 @@ class Terminal(QMainWindow):
 
     def _recommendation_details_html(self, record):
         if not isinstance(record, dict):
-            return (
-                "<h3>Why this symbol is recommended</h3>"
-                "<p>No recommendation selected yet.</p>"
+            return Terminal._empty_state_html(
+                self,
+                "Recommendation Detail",
+                "Select a symbol from the recommendation list to review the signal, confidence, regime, and strategy rationale.",
+                hint="This panel updates as live strategy and agent runtime output arrives.",
             )
 
         symbol = html.escape(str(record.get("symbol", "-") or "-"))
@@ -10677,21 +12101,26 @@ class Terminal(QMainWindow):
             layout.setContentsMargins(16, 16, 16, 16)
             layout.setSpacing(12)
 
+            hero, _, _, _ = self._build_tool_window_hero(
+                "Sopotek Pilot",
+                "Ask about the app, market context, balances, profitability, recommendations, behavior guard, screenshots, broker positions, and explicit trade commands.",
+                meta="Portfolio copilot | Voice control | Trade confirmation workflow",
+            )
+            layout.addWidget(hero)
+
             intro = QLabel(
                 "Use Sopotek Pilot to ask about the app, market context, balances, equity, profitability, performance, recommendations, behavior guard, news, Telegram management, screenshots, broker position analysis, and explicit trade commands. Type 'show commands' at any time for the control list."
             )
             intro.setWordWrap(True)
-            intro.setStyleSheet("color: #c9d5e8; font-weight: 600; padding: 4px 0 10px 0;")
+            intro.setObjectName("tool_window_section_hint")
             layout.addWidget(intro)
 
             status = QLabel("Ready. Ask about the app, market, balances, broker positions, screenshots, or type 'show commands' for app controls.")
             status.setWordWrap(True)
-            status.setStyleSheet(
-                "background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; "
-                "border-radius: 10px; padding: 10px 12px; font-weight: 600;"
-            )
+            status.setObjectName("tool_window_summary_card")
             layout.addWidget(status)
 
+            layout.addWidget(self._build_tool_window_section_label("Quick Prompts"))
             prompt_scroll = QScrollArea()
             prompt_scroll.setWidgetResizable(True)
             prompt_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -10705,10 +12134,7 @@ class Terminal(QMainWindow):
             prompt_row.setSpacing(8)
             for prompt in self._market_chat_quick_prompts():
                 btn = QPushButton(prompt)
-                btn.setStyleSheet(
-                    "QPushButton { background-color:#0f1727; color:#d7dfeb; border:1px solid #24344f; border-radius:10px; padding:8px 10px; }"
-                    "QPushButton:hover { background-color:#17304d; }"
-                )
+                btn.setStyleSheet(self._tool_window_chip_button_style())
                 btn.clicked.connect(lambda checked=False, text=prompt: self._submit_market_chat_prompt(text, window))
                 prompt_row.addWidget(btn)
             prompt_row.addStretch(1)
@@ -10718,10 +12144,7 @@ class Terminal(QMainWindow):
             transcript = QTextBrowser()
             transcript.setOpenExternalLinks(False)
             transcript.setMinimumHeight(280)
-            transcript.setStyleSheet(
-                "QTextBrowser { background-color: #0b1220; color: #e6edf7; border: 1px solid #20324d; "
-                "border-radius: 10px; padding: 12px; }"
-            )
+            transcript.setStyleSheet(self._tool_window_text_browser_style())
             layout.addWidget(transcript, 1)
 
             input_box = QTextEdit()
@@ -10730,17 +12153,25 @@ class Terminal(QMainWindow):
             )
             input_box.setMinimumHeight(96)
             input_box.setMaximumHeight(110)
-            input_box.setStyleSheet(
-                "QTextEdit { background-color: #0f1727; color: #f4f8ff; border: 1px solid #24344f; border-radius: 10px; padding: 10px; }"
-            )
+            input_box.setStyleSheet(self._tool_window_input_style())
             layout.addWidget(input_box)
+
+            controls_frame = QFrame()
+            controls_frame.setObjectName("tool_window_hero")
+            controls_frame_layout = QVBoxLayout(controls_frame)
+            controls_frame_layout.setContentsMargins(14, 12, 14, 12)
+            controls_frame_layout.setSpacing(10)
+            controls_frame_layout.addWidget(self._build_tool_window_section_label("Voice And Command Controls"))
 
             controls = QGridLayout()
             controls.setHorizontalSpacing(8)
             controls.setVerticalSpacing(8)
             listen_btn = QPushButton("Listen")
+            listen_btn.setStyleSheet(self._action_button_style())
             speak_btn = QPushButton("Speak Reply")
+            speak_btn.setStyleSheet(self._action_button_style())
             auto_speak_btn = QPushButton("Auto Speak")
+            auto_speak_btn.setStyleSheet(self._action_button_style())
             auto_speak_btn.setCheckable(True)
             auto_speak_enabled = str(
                 self.settings.value("market_chat/auto_speak", "false") or "false"
@@ -10753,8 +12184,11 @@ class Terminal(QMainWindow):
             voice_picker = QComboBox()
             voice_picker.setMinimumWidth(230)
             refresh_voices_btn = QPushButton("Refresh Voices")
+            refresh_voices_btn.setStyleSheet(self._action_button_style())
             send_btn = QPushButton("Send")
+            send_btn.setStyleSheet(self._action_button_style())
             clear_btn = QPushButton("Clear Chat")
+            clear_btn.setStyleSheet(self._action_button_style())
             listen_btn.clicked.connect(lambda: self._listen_market_chat(window))
             speak_btn.clicked.connect(lambda: self._speak_market_chat_reply(window))
             auto_speak_btn.toggled.connect(lambda checked: self._set_market_chat_auto_speak(checked, window))
@@ -10779,12 +12213,13 @@ class Terminal(QMainWindow):
             controls.setColumnStretch(1, 1)
             controls.setColumnStretch(3, 1)
             controls.setColumnStretch(4, 1)
-            layout.addLayout(controls)
+            controls_frame_layout.addLayout(controls)
 
             voice_meta = QLabel("")
             voice_meta.setWordWrap(True)
-            voice_meta.setStyleSheet("color: #8fa7c6; padding: 2px 0 8px 0;")
-            layout.addWidget(voice_meta)
+            voice_meta.setObjectName("tool_window_section_hint")
+            controls_frame_layout.addWidget(voice_meta)
+            layout.addWidget(controls_frame)
 
             confirm_panel = QFrame()
             confirm_panel.setVisible(False)
@@ -10936,21 +12371,39 @@ class Terminal(QMainWindow):
         if getattr(window, "_recommendations_table", None) is None:
             container = QWidget()
             layout = QVBoxLayout(container)
+            layout.setContentsMargins(16, 16, 16, 16)
+            layout.setSpacing(12)
+
+            hero, _, _, _ = self._build_tool_window_hero(
+                "Trade Recommendations",
+                "Review the symbols currently favored by the strategy engine and AI monitor, then open any idea to inspect the rationale before acting.",
+                meta="Signal queue | Confidence ranking | Regime context | Explainability",
+            )
+            layout.addWidget(hero)
 
             intro = QLabel(
                 "Review the symbols currently recommended by the strategy engine and AI monitor, with the reason behind each trade idea."
             )
             intro.setWordWrap(True)
-            intro.setStyleSheet("color: #c9d5e8; font-weight: 600; padding: 4px 0 10px 0;")
+            intro.setObjectName("tool_window_section_hint")
             layout.addWidget(intro)
 
             summary = QLabel()
             summary.setWordWrap(True)
-            summary.setStyleSheet(
-                "background-color: #101a2d; color: #d8e6ff; border: 1px solid #20324d; "
-                "border-radius: 10px; padding: 10px 12px; font-weight: 600;"
-            )
+            summary.setObjectName("tool_window_summary_card")
             layout.addWidget(summary)
+
+            actions = QHBoxLayout()
+            refresh_btn = QPushButton("Refresh Queue")
+            refresh_btn.setStyleSheet(self._action_button_style())
+            refresh_btn.clicked.connect(lambda: self._populate_recommendations_window(window))
+            pilot_btn = QPushButton("Open Sopotek Pilot")
+            pilot_btn.setStyleSheet(self._action_button_style())
+            pilot_btn.clicked.connect(self._open_market_chat_window)
+            actions.addWidget(refresh_btn)
+            actions.addWidget(pilot_btn)
+            actions.addStretch()
+            layout.addLayout(actions)
 
             table = QTableWidget()
             table.setAlternatingRowColors(True)
@@ -10961,14 +12414,13 @@ class Terminal(QMainWindow):
             layout.addWidget(table)
 
             details = QTextBrowser()
-            details.setStyleSheet(
-                "QTextBrowser { background-color: #0b1220; color: #e6edf7; border: 1px solid #20324d; "
-                "border-radius: 10px; padding: 14px; }"
-            )
+            details.setStyleSheet(self._tool_window_text_browser_style())
             layout.addWidget(details)
 
             window.setCentralWidget(container)
             window._recommendations_summary = summary
+            window._recommendations_refresh_btn = refresh_btn
+            window._recommendations_pilot_btn = pilot_btn
             window._recommendations_table = table
             window._recommendations_details = details
             window._selected_symbol = ""
@@ -11000,6 +12452,7 @@ class Terminal(QMainWindow):
         container.setLayout(layout)
 
         dock.setWidget(container)
+        self._apply_dock_widget_chrome(dock)
 
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
 
@@ -11034,6 +12487,7 @@ class Terminal(QMainWindow):
         self.exposure_chart.addItem(self.exposure_bars)
 
         dock.setWidget(self.exposure_chart)
+        self._apply_dock_widget_chrome(dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
@@ -11050,6 +12504,7 @@ class Terminal(QMainWindow):
 
 
         dock.setWidget(self.confidence_plot)
+        self._apply_dock_widget_chrome(dock)
 
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
@@ -11086,6 +12541,7 @@ class Terminal(QMainWindow):
 
     def _create_risk_heatmap(self):
         create_risk_heatmap_panel(self)
+        self._apply_dock_widget_chrome(getattr(self, "risk_heatmap_dock", None))
 
     def _risk_heatmap_positions_snapshot(self):
         return risk_heatmap_positions_snapshot(self)
@@ -14895,6 +16351,21 @@ def _hotfix_collect_settings_values(self, window=None):
         "telegram_enabled": window._settings_telegram_enabled.currentData(),
         "telegram_bot_token": window._settings_telegram_bot_token.text().strip(),
         "telegram_chat_id": window._settings_telegram_chat_id.text().strip(),
+        "trade_close_notifications_enabled": window._settings_trade_close_notifications_enabled.currentData(),
+        "trade_close_notify_telegram": bool(window._settings_trade_close_notify_telegram.isChecked()),
+        "trade_close_notify_email": bool(window._settings_trade_close_notify_email.isChecked()),
+        "trade_close_notify_sms": bool(window._settings_trade_close_notify_sms.isChecked()),
+        "trade_close_email_host": window._settings_trade_close_email_host.text().strip(),
+        "trade_close_email_port": int(window._settings_trade_close_email_port.value()),
+        "trade_close_email_username": window._settings_trade_close_email_username.text().strip(),
+        "trade_close_email_password": window._settings_trade_close_email_password.text(),
+        "trade_close_email_from": window._settings_trade_close_email_from.text().strip(),
+        "trade_close_email_to": window._settings_trade_close_email_to.text().strip(),
+        "trade_close_email_starttls": bool(window._settings_trade_close_email_starttls.isChecked()),
+        "trade_close_sms_account_sid": window._settings_trade_close_sms_account_sid.text().strip(),
+        "trade_close_sms_auth_token": window._settings_trade_close_sms_auth_token.text(),
+        "trade_close_sms_from_number": window._settings_trade_close_sms_from_number.text().strip(),
+        "trade_close_sms_to_number": window._settings_trade_close_sms_to_number.text().strip(),
         "openai_api_key": window._settings_openai_api_key.text().strip(),
         "openai_model": window._settings_openai_model.text().strip(),
         "news_enabled": window._settings_news_enabled.currentData(),
@@ -15130,6 +16601,21 @@ def _hotfix_apply_settings_values(self, values, persist=True, reload_chart=False
             telegram_enabled=bool(values.get("telegram_enabled", getattr(self.controller, "telegram_enabled", False))),
             telegram_bot_token=values.get("telegram_bot_token", getattr(self.controller, "telegram_bot_token", "")),
             telegram_chat_id=values.get("telegram_chat_id", getattr(self.controller, "telegram_chat_id", "")),
+            trade_close_notifications_enabled=bool(values.get("trade_close_notifications_enabled", getattr(self.controller, "trade_close_notifications_enabled", False))),
+            trade_close_notify_telegram=bool(values.get("trade_close_notify_telegram", getattr(self.controller, "trade_close_notify_telegram", False))),
+            trade_close_notify_email=bool(values.get("trade_close_notify_email", getattr(self.controller, "trade_close_notify_email", False))),
+            trade_close_notify_sms=bool(values.get("trade_close_notify_sms", getattr(self.controller, "trade_close_notify_sms", False))),
+            trade_close_email_host=values.get("trade_close_email_host", getattr(self.controller, "trade_close_email_host", "")),
+            trade_close_email_port=int(values.get("trade_close_email_port", getattr(self.controller, "trade_close_email_port", 587)) or 587),
+            trade_close_email_username=values.get("trade_close_email_username", getattr(self.controller, "trade_close_email_username", "")),
+            trade_close_email_password=values.get("trade_close_email_password", getattr(self.controller, "trade_close_email_password", "")),
+            trade_close_email_from=values.get("trade_close_email_from", getattr(self.controller, "trade_close_email_from", "")),
+            trade_close_email_to=values.get("trade_close_email_to", getattr(self.controller, "trade_close_email_to", "")),
+            trade_close_email_starttls=bool(values.get("trade_close_email_starttls", getattr(self.controller, "trade_close_email_starttls", True))),
+            trade_close_sms_account_sid=values.get("trade_close_sms_account_sid", getattr(self.controller, "trade_close_sms_account_sid", "")),
+            trade_close_sms_auth_token=values.get("trade_close_sms_auth_token", getattr(self.controller, "trade_close_sms_auth_token", "")),
+            trade_close_sms_from_number=values.get("trade_close_sms_from_number", getattr(self.controller, "trade_close_sms_from_number", "")),
+            trade_close_sms_to_number=values.get("trade_close_sms_to_number", getattr(self.controller, "trade_close_sms_to_number", "")),
             openai_api_key=values.get("openai_api_key", getattr(self.controller, "openai_api_key", "")),
             openai_model=values.get("openai_model", getattr(self.controller, "openai_model", "gpt-5-mini")),
             news_enabled=bool(values.get("news_enabled", getattr(self.controller, "news_enabled", True))),
@@ -15137,6 +16623,9 @@ def _hotfix_apply_settings_values(self, values, persist=True, reload_chart=False
             news_draw_on_chart=bool(values.get("news_draw_on_chart", getattr(self.controller, "news_draw_on_chart", True))),
             news_feed_url=values.get("news_feed_url", getattr(self.controller, "news_feed_url", "")),
         )
+    update_desk_status_panel = getattr(self, "_update_desk_status_panel", None)
+    if callable(update_desk_status_panel):
+        update_desk_status_panel()
 
     self.chart_background_color = chart_background_color
     self.chart_grid_color = chart_grid_color
@@ -15264,6 +16753,21 @@ def _hotfix_apply_settings_values(self, values, persist=True, reload_chart=False
         self.settings.setValue("integrations/telegram_enabled", bool(values.get("telegram_enabled", getattr(self.controller, "telegram_enabled", False))))
         self.settings.setValue("integrations/telegram_bot_token", values.get("telegram_bot_token", getattr(self.controller, "telegram_bot_token", "")))
         self.settings.setValue("integrations/telegram_chat_id", values.get("telegram_chat_id", getattr(self.controller, "telegram_chat_id", "")))
+        self.settings.setValue("integrations/trade_close_notifications_enabled", bool(values.get("trade_close_notifications_enabled", getattr(self.controller, "trade_close_notifications_enabled", False))))
+        self.settings.setValue("integrations/trade_close_notify_telegram", bool(values.get("trade_close_notify_telegram", getattr(self.controller, "trade_close_notify_telegram", False))))
+        self.settings.setValue("integrations/trade_close_notify_email", bool(values.get("trade_close_notify_email", getattr(self.controller, "trade_close_notify_email", False))))
+        self.settings.setValue("integrations/trade_close_notify_sms", bool(values.get("trade_close_notify_sms", getattr(self.controller, "trade_close_notify_sms", False))))
+        self.settings.setValue("integrations/trade_close_email_host", values.get("trade_close_email_host", getattr(self.controller, "trade_close_email_host", "")))
+        self.settings.setValue("integrations/trade_close_email_port", int(values.get("trade_close_email_port", getattr(self.controller, "trade_close_email_port", 587)) or 587))
+        self.settings.setValue("integrations/trade_close_email_username", values.get("trade_close_email_username", getattr(self.controller, "trade_close_email_username", "")))
+        self.settings.setValue("integrations/trade_close_email_password", values.get("trade_close_email_password", getattr(self.controller, "trade_close_email_password", "")))
+        self.settings.setValue("integrations/trade_close_email_from", values.get("trade_close_email_from", getattr(self.controller, "trade_close_email_from", "")))
+        self.settings.setValue("integrations/trade_close_email_to", values.get("trade_close_email_to", getattr(self.controller, "trade_close_email_to", "")))
+        self.settings.setValue("integrations/trade_close_email_starttls", bool(values.get("trade_close_email_starttls", getattr(self.controller, "trade_close_email_starttls", True))))
+        self.settings.setValue("integrations/trade_close_sms_account_sid", values.get("trade_close_sms_account_sid", getattr(self.controller, "trade_close_sms_account_sid", "")))
+        self.settings.setValue("integrations/trade_close_sms_auth_token", values.get("trade_close_sms_auth_token", getattr(self.controller, "trade_close_sms_auth_token", "")))
+        self.settings.setValue("integrations/trade_close_sms_from_number", values.get("trade_close_sms_from_number", getattr(self.controller, "trade_close_sms_from_number", "")))
+        self.settings.setValue("integrations/trade_close_sms_to_number", values.get("trade_close_sms_to_number", getattr(self.controller, "trade_close_sms_to_number", "")))
         self.settings.setValue("integrations/openai_api_key", values.get("openai_api_key", getattr(self.controller, "openai_api_key", "")))
         self.settings.setValue("integrations/openai_model", values.get("openai_model", getattr(self.controller, "openai_model", "gpt-5-mini")))
         self.settings.setValue("integrations/news_enabled", bool(values.get("news_enabled", getattr(self.controller, "news_enabled", True))))
@@ -15285,21 +16789,42 @@ def _hotfix_show_settings_window(self, initial_tab=None):
 
     if getattr(window, "_settings_container", None) is None:
         container = QWidget()
+        container.setObjectName("tool_window_root")
         layout = QVBoxLayout(container)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        hero = QFrame()
+        hero.setObjectName("tool_window_hero")
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(16, 14, 16, 14)
+        hero_layout.setSpacing(6)
+
+        title = QLabel("Terminal Settings")
+        title.setObjectName("tool_window_hero_title")
+        hero_layout.addWidget(title)
 
         intro = QLabel(
             "Configure trading defaults, chart behavior, refresh timing, and integrations here. "
             "Use the Analyze menu when you want to jump straight to portfolio controls and risk limits."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color: #c9d5e8; font-weight: 600; padding: 4px 0 10px 0;")
-        layout.addWidget(intro)
+        intro.setObjectName("tool_window_hero_body")
+        hero_layout.addWidget(intro)
+
+        hero_meta = QLabel("Execution defaults | Risk controls | Charts | Integrations")
+        hero_meta.setObjectName("tool_window_section_hint")
+        hero_layout.addWidget(hero_meta)
+        layout.addWidget(hero)
 
         tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.setUsesScrollButtons(True)
         layout.addWidget(tabs)
 
         general_tab = QWidget()
         general_form = QFormLayout(general_tab)
+        self._configure_tool_form_layout(general_form)
 
         timeframe = QComboBox()
         timeframe.addItems(["1m", "5m", "15m", "1h", "4h", "1d"])
@@ -15347,6 +16872,7 @@ def _hotfix_show_settings_window(self, initial_tab=None):
 
         storage_tab = QWidget()
         storage_form = QFormLayout(storage_tab)
+        self._configure_tool_form_layout(storage_form)
 
         database_mode = QComboBox()
         database_mode.addItem("Local SQLite", "local")
@@ -15355,7 +16881,7 @@ def _hotfix_show_settings_window(self, initial_tab=None):
         database_url = QLineEdit()
         database_hint = QLabel()
         database_hint.setWordWrap(True)
-        database_hint.setStyleSheet("color: #8fa7c6; padding-top: 2px;")
+        database_hint.setObjectName("tool_window_section_hint")
 
         storage_form.addRow("Database backend", database_mode)
         storage_form.addRow("Remote database URL", database_url)
@@ -15364,6 +16890,7 @@ def _hotfix_show_settings_window(self, initial_tab=None):
 
         display_tab = QWidget()
         display_form = QFormLayout(display_tab)
+        self._configure_tool_form_layout(display_form)
 
         bid_ask_mode = QComboBox()
         bid_ask_mode.addItem("Show", True)
@@ -15377,7 +16904,7 @@ def _hotfix_show_settings_window(self, initial_tab=None):
 
         display_hint = QLabel("MT4-style chart colors let you tune the plot background, foreground, grid, and candles.")
         display_hint.setWordWrap(True)
-        display_hint.setStyleSheet("color: #8fa7c6; padding-top: 2px;")
+        display_hint.setObjectName("tool_window_section_hint")
 
         chart_background_btn = QPushButton()
         chart_grid_btn = QPushButton()
@@ -15437,6 +16964,7 @@ def _hotfix_show_settings_window(self, initial_tab=None):
 
         risk_tab = QWidget()
         risk_form = QFormLayout(risk_tab)
+        self._configure_tool_form_layout(risk_form)
 
         risk_profile = QComboBox()
         for name in _hotfix_risk_profile_names():
@@ -15444,7 +16972,7 @@ def _hotfix_show_settings_window(self, initial_tab=None):
 
         risk_profile_description = QLabel()
         risk_profile_description.setWordWrap(True)
-        risk_profile_description.setStyleSheet("color: #8fa7c6; padding-top: 2px;")
+        risk_profile_description.setObjectName("tool_window_section_hint")
 
         max_portfolio = QDoubleSpinBox()
         max_portfolio.setDecimals(4)
@@ -15488,6 +17016,7 @@ def _hotfix_show_settings_window(self, initial_tab=None):
 
         strategy_tab = QWidget()
         strategy_form = QFormLayout(strategy_tab)
+        self._configure_tool_form_layout(strategy_form)
 
         strategy_name = QComboBox()
         self._populate_strategy_picker(strategy_name, selected_strategy=getattr(self.controller, "strategy_name", "Trend Following"))
@@ -15551,6 +17080,7 @@ def _hotfix_show_settings_window(self, initial_tab=None):
 
         integrations_tab = QWidget()
         integrations_form = QFormLayout(integrations_tab)
+        self._configure_tool_form_layout(integrations_form)
 
         telegram_enabled = QComboBox()
         telegram_enabled.addItem("Disabled", False)
@@ -15561,6 +17091,41 @@ def _hotfix_show_settings_window(self, initial_tab=None):
 
         telegram_chat_id = QLineEdit()
         telegram_chat_id.setPlaceholderText("Telegram chat ID")
+
+        trade_close_notifications_enabled = QComboBox()
+        trade_close_notifications_enabled.addItem("Disabled", False)
+        trade_close_notifications_enabled.addItem("Enabled", True)
+
+        trade_close_notify_telegram = QCheckBox("Send to Telegram")
+        trade_close_notify_email = QCheckBox("Send to email")
+        trade_close_notify_sms = QCheckBox("Send to SMS")
+
+        trade_close_email_host = QLineEdit()
+        trade_close_email_host.setPlaceholderText("smtp.gmail.com")
+        trade_close_email_port = QSpinBox()
+        trade_close_email_port.setRange(1, 65535)
+        trade_close_email_port.setValue(587)
+        trade_close_email_username = QLineEdit()
+        trade_close_email_username.setPlaceholderText("SMTP username")
+        trade_close_email_password = QLineEdit()
+        trade_close_email_password.setEchoMode(QLineEdit.EchoMode.Password)
+        trade_close_email_password.setPlaceholderText("SMTP password")
+        trade_close_email_from = QLineEdit()
+        trade_close_email_from.setPlaceholderText("sender@example.com")
+        trade_close_email_to = QLineEdit()
+        trade_close_email_to.setPlaceholderText("recipient@example.com, another@example.com")
+        trade_close_email_starttls = QCheckBox("Use STARTTLS")
+        trade_close_email_starttls.setChecked(True)
+
+        trade_close_sms_account_sid = QLineEdit()
+        trade_close_sms_account_sid.setPlaceholderText("Twilio account SID")
+        trade_close_sms_auth_token = QLineEdit()
+        trade_close_sms_auth_token.setEchoMode(QLineEdit.EchoMode.Password)
+        trade_close_sms_auth_token.setPlaceholderText("Twilio auth token")
+        trade_close_sms_from_number = QLineEdit()
+        trade_close_sms_from_number.setPlaceholderText("+15551234567")
+        trade_close_sms_to_number = QLineEdit()
+        trade_close_sms_to_number.setPlaceholderText("+15557654321")
 
         openai_api_key = QLineEdit()
         openai_api_key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -15599,6 +17164,23 @@ def _hotfix_show_settings_window(self, initial_tab=None):
         integrations_form.addRow("Telegram notifications", telegram_enabled)
         integrations_form.addRow("Telegram bot token", telegram_bot_token)
         integrations_form.addRow("Telegram chat ID", telegram_chat_id)
+        integrations_form.addRow(QLabel("<b>Trade close notifications</b>"))
+        integrations_form.addRow("Trade close alerts", trade_close_notifications_enabled)
+        integrations_form.addRow("", trade_close_notify_telegram)
+        integrations_form.addRow("", trade_close_notify_email)
+        integrations_form.addRow("", trade_close_notify_sms)
+        integrations_form.addRow("SMTP host", trade_close_email_host)
+        integrations_form.addRow("SMTP port", trade_close_email_port)
+        integrations_form.addRow("SMTP username", trade_close_email_username)
+        integrations_form.addRow("SMTP password", trade_close_email_password)
+        integrations_form.addRow("Email from", trade_close_email_from)
+        integrations_form.addRow("Email to", trade_close_email_to)
+        integrations_form.addRow("", trade_close_email_starttls)
+        integrations_form.addRow(QLabel("<b>SMS (Twilio)</b>"))
+        integrations_form.addRow("Twilio account SID", trade_close_sms_account_sid)
+        integrations_form.addRow("Twilio auth token", trade_close_sms_auth_token)
+        integrations_form.addRow("Twilio from number", trade_close_sms_from_number)
+        integrations_form.addRow("Twilio to number", trade_close_sms_to_number)
         integrations_form.addRow("OpenAI API key", openai_api_key)
         integrations_form.addRow("OpenAI model", openai_model)
         integrations_form.addRow("OpenAI test", openai_test_row)
@@ -15610,16 +17192,18 @@ def _hotfix_show_settings_window(self, initial_tab=None):
 
         summary = QLabel("-")
         summary.setWordWrap(True)
-        summary.setStyleSheet("color: #9fb0c7; padding-top: 8px;")
+        summary.setObjectName("tool_window_summary_card")
         layout.addWidget(summary)
 
         actions = QHBoxLayout()
         exposure_btn = QPushButton("Open Portfolio Exposure")
+        exposure_btn.setStyleSheet(self._action_button_style())
         exposure_btn.clicked.connect(self._show_portfolio_exposure)
         apply_btn = QPushButton("Save Settings")
         apply_btn.setStyleSheet(self._action_button_style())
         apply_btn.clicked.connect(lambda: self._apply_settings_window(window))
         close_btn = QPushButton("Close")
+        close_btn.setStyleSheet(self._action_button_style())
         close_btn.clicked.connect(window.close)
         actions.addWidget(exposure_btn)
         actions.addStretch()
@@ -15670,6 +17254,21 @@ def _hotfix_show_settings_window(self, initial_tab=None):
         window._settings_telegram_enabled = telegram_enabled
         window._settings_telegram_bot_token = telegram_bot_token
         window._settings_telegram_chat_id = telegram_chat_id
+        window._settings_trade_close_notifications_enabled = trade_close_notifications_enabled
+        window._settings_trade_close_notify_telegram = trade_close_notify_telegram
+        window._settings_trade_close_notify_email = trade_close_notify_email
+        window._settings_trade_close_notify_sms = trade_close_notify_sms
+        window._settings_trade_close_email_host = trade_close_email_host
+        window._settings_trade_close_email_port = trade_close_email_port
+        window._settings_trade_close_email_username = trade_close_email_username
+        window._settings_trade_close_email_password = trade_close_email_password
+        window._settings_trade_close_email_from = trade_close_email_from
+        window._settings_trade_close_email_to = trade_close_email_to
+        window._settings_trade_close_email_starttls = trade_close_email_starttls
+        window._settings_trade_close_sms_account_sid = trade_close_sms_account_sid
+        window._settings_trade_close_sms_auth_token = trade_close_sms_auth_token
+        window._settings_trade_close_sms_from_number = trade_close_sms_from_number
+        window._settings_trade_close_sms_to_number = trade_close_sms_to_number
         window._settings_openai_api_key = openai_api_key
         window._settings_openai_model = openai_model
         window._settings_openai_test_button = openai_test_button
@@ -15778,6 +17377,21 @@ def _hotfix_show_settings_window(self, initial_tab=None):
     window._settings_telegram_enabled.setCurrentIndex(1 if getattr(self.controller, "telegram_enabled", False) else 0)
     window._settings_telegram_bot_token.setText(str(getattr(self.controller, "telegram_bot_token", "") or ""))
     window._settings_telegram_chat_id.setText(str(getattr(self.controller, "telegram_chat_id", "") or ""))
+    window._settings_trade_close_notifications_enabled.setCurrentIndex(1 if getattr(self.controller, "trade_close_notifications_enabled", False) else 0)
+    window._settings_trade_close_notify_telegram.setChecked(bool(getattr(self.controller, "trade_close_notify_telegram", False)))
+    window._settings_trade_close_notify_email.setChecked(bool(getattr(self.controller, "trade_close_notify_email", False)))
+    window._settings_trade_close_notify_sms.setChecked(bool(getattr(self.controller, "trade_close_notify_sms", False)))
+    window._settings_trade_close_email_host.setText(str(getattr(self.controller, "trade_close_email_host", "") or ""))
+    window._settings_trade_close_email_port.setValue(int(getattr(self.controller, "trade_close_email_port", 587) or 587))
+    window._settings_trade_close_email_username.setText(str(getattr(self.controller, "trade_close_email_username", "") or ""))
+    window._settings_trade_close_email_password.setText(str(getattr(self.controller, "trade_close_email_password", "") or ""))
+    window._settings_trade_close_email_from.setText(str(getattr(self.controller, "trade_close_email_from", "") or ""))
+    window._settings_trade_close_email_to.setText(str(getattr(self.controller, "trade_close_email_to", "") or ""))
+    window._settings_trade_close_email_starttls.setChecked(bool(getattr(self.controller, "trade_close_email_starttls", True)))
+    window._settings_trade_close_sms_account_sid.setText(str(getattr(self.controller, "trade_close_sms_account_sid", "") or ""))
+    window._settings_trade_close_sms_auth_token.setText(str(getattr(self.controller, "trade_close_sms_auth_token", "") or ""))
+    window._settings_trade_close_sms_from_number.setText(str(getattr(self.controller, "trade_close_sms_from_number", "") or ""))
+    window._settings_trade_close_sms_to_number.setText(str(getattr(self.controller, "trade_close_sms_to_number", "") or ""))
     window._settings_openai_api_key.setText(str(getattr(self.controller, "openai_api_key", "") or ""))
     window._settings_openai_model.setText(str(getattr(self.controller, "openai_model", "gpt-5-mini") or "gpt-5-mini"))
     window._settings_openai_test_status.setStyleSheet("color: #9fb0c7; padding-top: 4px;")
@@ -15802,6 +17416,7 @@ def _hotfix_show_settings_window(self, initial_tab=None):
         f"history {int(window._settings_history_limit.value())} candles | "
         f"capital {window._settings_initial_capital.value():.2f} | "
         f"Telegram {'on' if window._settings_telegram_enabled.currentData() else 'off'} | "
+        f"Trade close alerts {'on' if window._settings_trade_close_notifications_enabled.currentData() else 'off'} | "
         f"News {'on' if window._settings_news_enabled.currentData() else 'off'} | "
         f"OpenAI {'set' if window._settings_openai_api_key.text().strip() else 'not set'}"
     )
@@ -15840,6 +17455,7 @@ def _hotfix_apply_settings_window(self, window=None):
                 f"Bid/ask lines: {'shown' if values['show_bid_ask_lines'] else 'hidden'} | "
                 f"News auto: {'enabled' if values['news_autotrade_enabled'] else 'disabled'} | "
                 f"Telegram: {'enabled' if values['telegram_enabled'] else 'disabled'} | "
+                f"Trade close alerts: {'enabled' if values['trade_close_notifications_enabled'] else 'disabled'} | "
                 f"OpenAI model: {values.get('openai_model') or 'gpt-5-mini'}"
             )
 
@@ -15911,6 +17527,21 @@ def _hotfix_restore_settings(self):
         "telegram_enabled": _hotfix_settings_bool(self.settings.value("integrations/telegram_enabled", getattr(self.controller, "telegram_enabled", False)), getattr(self.controller, "telegram_enabled", False)),
         "telegram_bot_token": self.settings.value("integrations/telegram_bot_token", getattr(self.controller, "telegram_bot_token", "")),
         "telegram_chat_id": self.settings.value("integrations/telegram_chat_id", getattr(self.controller, "telegram_chat_id", "")),
+        "trade_close_notifications_enabled": _hotfix_settings_bool(self.settings.value("integrations/trade_close_notifications_enabled", getattr(self.controller, "trade_close_notifications_enabled", False)), getattr(self.controller, "trade_close_notifications_enabled", False)),
+        "trade_close_notify_telegram": _hotfix_settings_bool(self.settings.value("integrations/trade_close_notify_telegram", getattr(self.controller, "trade_close_notify_telegram", False)), getattr(self.controller, "trade_close_notify_telegram", False)),
+        "trade_close_notify_email": _hotfix_settings_bool(self.settings.value("integrations/trade_close_notify_email", getattr(self.controller, "trade_close_notify_email", False)), getattr(self.controller, "trade_close_notify_email", False)),
+        "trade_close_notify_sms": _hotfix_settings_bool(self.settings.value("integrations/trade_close_notify_sms", getattr(self.controller, "trade_close_notify_sms", False)), getattr(self.controller, "trade_close_notify_sms", False)),
+        "trade_close_email_host": self.settings.value("integrations/trade_close_email_host", getattr(self.controller, "trade_close_email_host", "")),
+        "trade_close_email_port": _hotfix_settings_int(self.settings.value("integrations/trade_close_email_port", getattr(self.controller, "trade_close_email_port", 587)), 587),
+        "trade_close_email_username": self.settings.value("integrations/trade_close_email_username", getattr(self.controller, "trade_close_email_username", "")),
+        "trade_close_email_password": self.settings.value("integrations/trade_close_email_password", getattr(self.controller, "trade_close_email_password", "")),
+        "trade_close_email_from": self.settings.value("integrations/trade_close_email_from", getattr(self.controller, "trade_close_email_from", "")),
+        "trade_close_email_to": self.settings.value("integrations/trade_close_email_to", getattr(self.controller, "trade_close_email_to", "")),
+        "trade_close_email_starttls": _hotfix_settings_bool(self.settings.value("integrations/trade_close_email_starttls", getattr(self.controller, "trade_close_email_starttls", True)), getattr(self.controller, "trade_close_email_starttls", True)),
+        "trade_close_sms_account_sid": self.settings.value("integrations/trade_close_sms_account_sid", getattr(self.controller, "trade_close_sms_account_sid", "")),
+        "trade_close_sms_auth_token": self.settings.value("integrations/trade_close_sms_auth_token", getattr(self.controller, "trade_close_sms_auth_token", "")),
+        "trade_close_sms_from_number": self.settings.value("integrations/trade_close_sms_from_number", getattr(self.controller, "trade_close_sms_from_number", "")),
+        "trade_close_sms_to_number": self.settings.value("integrations/trade_close_sms_to_number", getattr(self.controller, "trade_close_sms_to_number", "")),
         "openai_api_key": self.settings.value("integrations/openai_api_key", getattr(self.controller, "openai_api_key", "")),
         "openai_model": self.settings.value("integrations/openai_model", getattr(self.controller, "openai_model", "gpt-5-mini")),
         "news_enabled": _hotfix_settings_bool(self.settings.value("integrations/news_enabled", getattr(self.controller, "news_enabled", True)), getattr(self.controller, "news_enabled", True)),
@@ -15931,9 +17562,11 @@ def _hotfix_close_event(self, event):
             self.refresh_timer.stop()
         if hasattr(self, "orderbook_timer") and self.orderbook_timer is not None:
             self.orderbook_timer.stop()
+        if hasattr(self, "signal_scan_timer") and self.signal_scan_timer is not None:
+            self.signal_scan_timer.stop()
         if hasattr(self, "spinner_timer") and self.spinner_timer is not None:
             self.spinner_timer.stop()
-        for task_name in ("_positions_refresh_task", "_open_orders_refresh_task"):
+        for task_name in ("_positions_refresh_task", "_open_orders_refresh_task", "_passive_signal_scan_task", "_autotrade_enable_task"):
             task = getattr(self, task_name, None)
             if task is not None and not task.done():
                 task.cancel()
@@ -15980,6 +17613,21 @@ def _hotfix_close_event(self, event):
         "telegram_enabled": getattr(self.controller, "telegram_enabled", False),
         "telegram_bot_token": getattr(self.controller, "telegram_bot_token", ""),
         "telegram_chat_id": getattr(self.controller, "telegram_chat_id", ""),
+        "trade_close_notifications_enabled": getattr(self.controller, "trade_close_notifications_enabled", False),
+        "trade_close_notify_telegram": getattr(self.controller, "trade_close_notify_telegram", False),
+        "trade_close_notify_email": getattr(self.controller, "trade_close_notify_email", False),
+        "trade_close_notify_sms": getattr(self.controller, "trade_close_notify_sms", False),
+        "trade_close_email_host": getattr(self.controller, "trade_close_email_host", ""),
+        "trade_close_email_port": getattr(self.controller, "trade_close_email_port", 587),
+        "trade_close_email_username": getattr(self.controller, "trade_close_email_username", ""),
+        "trade_close_email_password": getattr(self.controller, "trade_close_email_password", ""),
+        "trade_close_email_from": getattr(self.controller, "trade_close_email_from", ""),
+        "trade_close_email_to": getattr(self.controller, "trade_close_email_to", ""),
+        "trade_close_email_starttls": getattr(self.controller, "trade_close_email_starttls", True),
+        "trade_close_sms_account_sid": getattr(self.controller, "trade_close_sms_account_sid", ""),
+        "trade_close_sms_auth_token": getattr(self.controller, "trade_close_sms_auth_token", ""),
+        "trade_close_sms_from_number": getattr(self.controller, "trade_close_sms_from_number", ""),
+        "trade_close_sms_to_number": getattr(self.controller, "trade_close_sms_to_number", ""),
         "openai_api_key": getattr(self.controller, "openai_api_key", ""),
         "openai_model": getattr(self.controller, "openai_model", "gpt-5-mini"),
         "news_enabled": getattr(self.controller, "news_enabled", True),
@@ -16029,7 +17677,11 @@ async def _hotfix_refresh_markets_async(self):
             symbols = selected
 
     self.controller.symbols = list(symbols)
-    self.controller.symbols_signal.emit(str(exchange), list(self.controller.symbols))
+    emit_symbols = getattr(self.controller, "_emit_symbols_signal_deferred", None)
+    if callable(emit_symbols):
+        emit_symbols(str(exchange), list(self.controller.symbols))
+    else:
+        self.controller.symbols_signal.emit(str(exchange), list(self.controller.symbols))
 
     active_symbol = self._current_chart_symbol()
     if active_symbol and hasattr(self.controller, "request_candle_data"):

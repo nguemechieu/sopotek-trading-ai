@@ -8,6 +8,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from frontend.ui.app_controller import AppController
+from strategy.strategy import Strategy
+from strategy.strategy_registry import StrategyRegistry
 
 
 class _Settings:
@@ -211,6 +213,25 @@ def test_select_trade_symbols_keeps_full_coinbase_runtime_list_and_prioritizes_h
     assert selected[0] == "AAVE/USD"
 
 
+def test_select_trade_symbols_prioritizes_solana_usdc_pairs_and_held_assets():
+    controller = _make_controller()
+    controller.balances = {"total": {"BONK": 150000.0, "USDC": 250.0}}
+    controller.broker = SimpleNamespace(exchange_name="solana")
+
+    symbols = [
+        "RAY/SOL",
+        "BONK/SOL",
+        "JUP/USDC",
+        "BONK/USDC",
+    ]
+
+    selected = asyncio.run(controller._select_trade_symbols(symbols, "crypto", "solana"))
+    filtered = controller._filter_symbols_for_trading(symbols, "crypto", "solana")
+
+    assert filtered == ["RAY/SOL", "BONK/SOL", "JUP/USDC", "BONK/USDC"]
+    assert selected[:2] == ["BONK/USDC", "JUP/USDC"]
+
+
 def test_strategy_auto_assignment_timeframes_are_narrowed_for_coinbase():
     controller = _make_controller()
     controller.strategy_assignment_scan_timeframes = None
@@ -218,6 +239,36 @@ def test_strategy_auto_assignment_timeframes_are_narrowed_for_coinbase():
 
     assert controller._strategy_auto_assignment_timeframes(timeframe="15m") == ["15m", "1h", "4h"]
     assert controller._strategy_auto_assignment_symbol_limit() == controller.COINBASE_AUTO_ASSIGN_SYMBOL_LIMIT
+
+
+def test_ranked_autotrade_scope_prefers_best_saved_rankings_across_catalog():
+    controller = _make_controller()
+    controller.autotrade_scope = "ranked"
+    controller.broker = SimpleNamespace(exchange_name="coinbase")
+    controller.symbols = ["BTC/USD", "ETH/USD"]
+    controller.COINBASE_AUTO_ASSIGN_SYMBOL_LIMIT = 2
+
+    controller.save_ranked_strategies_for_symbol(
+        "SOL/USD",
+        [{"strategy_name": "EMA Cross", "score": 7.5, "sharpe_ratio": 1.2, "total_profit": 120.0, "win_rate": 0.58}],
+        timeframe="1h",
+        assignment_source="auto",
+    )
+    controller.save_ranked_strategies_for_symbol(
+        "ADA/USD",
+        [{"strategy_name": "MACD Trend", "score": 11.0, "sharpe_ratio": 1.8, "total_profit": 180.0, "win_rate": 0.63}],
+        timeframe="4h",
+        assignment_source="auto",
+    )
+
+    ranked = controller.get_active_autotrade_symbols(
+        available_symbols=controller.symbols,
+        catalog_symbols=["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD"],
+        broker_type="crypto",
+        exchange="coinbase",
+    )
+
+    assert ranked == ["ADA/USD", "SOL/USD"]
 
 
 def test_coinbase_derivative_selection_keeps_contract_symbols_and_broadens_scan_timeframes():
@@ -335,6 +386,112 @@ def test_auto_rank_and_assign_strategies_uses_dedicated_ranking_helper():
 
     assert result["assigned_symbols"] == ["EUR/USD"]
     assert ranking_calls == [("EUR/USD", "1h", ("Trend Following", "EMA Cross", "MACD Trend"), 160)]
+
+
+def test_strategy_names_for_auto_assignment_shortlists_full_catalog_for_solana():
+    controller = _make_controller()
+    controller.broker = SimpleNamespace(exchange_name="solana")
+
+    strategy_names = controller._strategy_names_for_auto_assignment(
+        "BONK/USDC",
+        StrategyRegistry().list(),
+    )
+
+    assert len(strategy_names) == len(Strategy.CORE_STRATEGIES)
+    assert strategy_names[:5] == [
+        "Bollinger Squeeze",
+        "Volume Spike Reversal",
+        "ATR Compression Breakout",
+        "Momentum Continuation",
+        "Donchian Trend",
+    ]
+    assert all("|" not in name for name in strategy_names)
+
+
+def test_strategy_names_for_auto_assignment_shortlists_full_catalog_for_forex():
+    controller = _make_controller()
+    controller.broker = SimpleNamespace(exchange_name="oanda")
+
+    strategy_names = controller._strategy_names_for_auto_assignment(
+        "EUR/USD",
+        StrategyRegistry().list(),
+    )
+
+    assert len(strategy_names) == len(Strategy.CORE_STRATEGIES)
+    assert strategy_names[:5] == [
+        "Donchian Trend",
+        "MACD Trend",
+        "EMA Cross",
+        "Trend Following",
+        "ATR Compression Breakout",
+    ]
+
+
+def test_filter_symbols_for_trading_excludes_crypto_symbols_for_oanda():
+    controller = _make_controller()
+    controller.broker = SimpleNamespace(exchange_name="oanda")
+    controller.config = SimpleNamespace(broker=SimpleNamespace(type="forex", exchange="oanda"))
+
+    filtered = controller._filter_symbols_for_trading(
+        ["EUR/USD", "GBP/USD", "XAU/USD", "NAS100/USD", "BTC/USDT", "ETH/USD", "SOL/USD"],
+        "forex",
+        "oanda",
+    )
+
+    assert filtered == ["EUR/USD", "GBP/USD", "XAU/USD", "NAS100/USD"]
+
+
+def test_set_autotrade_watchlist_strips_crypto_symbols_for_oanda():
+    controller = _make_controller()
+    controller.broker = SimpleNamespace(exchange_name="oanda")
+    controller.config = SimpleNamespace(broker=SimpleNamespace(type="forex", exchange="oanda"))
+    controller._sync_session_scoped_state = lambda *args, **kwargs: None
+
+    controller.set_autotrade_watchlist(["BTC/USDT", "EUR/USD", "XAU/USD", "ETH/USD"])
+
+    assert controller.autotrade_watchlist == {"EUR/USD", "XAU/USD"}
+    assert controller.settings.value("autotrade/watchlist") == "[\"EUR/USD\", \"XAU/USD\"]"
+
+
+def test_apply_strategy_market_context_bias_prefers_solana_squeeze_families_on_close_scores():
+    controller = _make_controller()
+    controller.broker = SimpleNamespace(exchange_name="solana")
+
+    biased = controller._apply_strategy_market_context_bias(
+        [
+            {"strategy_name": "Trend Following", "score": 10.0, "total_profit": 100.0, "sharpe_ratio": 1.2},
+            {"strategy_name": "Bollinger Squeeze", "score": 9.7, "total_profit": 99.0, "sharpe_ratio": 1.15},
+        ],
+        "BONK/USDC",
+    )
+
+    assert biased[0]["strategy_name"] == "Bollinger Squeeze"
+    assert biased[0]["market_profile"] == "solana"
+    assert biased[0]["market_fit_bonus"] > biased[1]["market_fit_bonus"]
+
+
+def test_auto_rank_and_assign_strategies_uses_contextual_shortlist_for_full_catalog_registry():
+    controller = _make_controller()
+    controller.symbols = ["BONK/USDC"]
+    controller.broker = SimpleNamespace(exchange_name="solana")
+    controller.candle_buffers = {"BONK/USDC": {"1h": _sample_frame()}}
+    controller.trading_system = SimpleNamespace(
+        strategy=StrategyRegistry(),
+        refresh_strategy_preferences=lambda: controller._refresh_calls.append(True),
+    )
+
+    result = asyncio.run(controller.auto_rank_and_assign_strategies(timeframe="1h"))
+
+    assert result["assigned_symbols"] == ["BONK/USDC"]
+    assert controller._ranker.calls[0][0] == "BONK/USDC"
+    assert controller._ranker.calls[0][2][:5] == (
+        "Bollinger Squeeze",
+        "Volume Spike Reversal",
+        "ATR Compression Breakout",
+        "Momentum Continuation",
+        "Donchian Trend",
+    )
+    assert len(controller._ranker.calls[0][2]) == len(Strategy.CORE_STRATEGIES)
 
 
 def test_strategy_auto_assignment_status_reports_ready_after_scan():

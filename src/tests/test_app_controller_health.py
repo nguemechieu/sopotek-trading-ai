@@ -1,12 +1,14 @@
 import asyncio
 import logging
 import sys
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from frontend.ui.app_controller import AppController
+from frontend.ui.terminal import Terminal
 from broker.paper_broker import PaperBroker
 
 
@@ -234,6 +236,179 @@ def test_cleanup_session_continues_after_step_failure():
     assert controller.ws_manager is None
 
 
+def test_terminal_disconnect_controller_signals_uses_tracked_wrappers():
+    class _SignalRecorder:
+        def __init__(self):
+            self.disconnected = []
+
+        def disconnect(self, slot):
+            self.disconnected.append(slot)
+
+    terminal = Terminal.__new__(Terminal)
+    signal_a = _SignalRecorder()
+    signal_b = _SignalRecorder()
+    wrapped_a = object()
+    wrapped_b = object()
+    terminal._controller_signal_bindings = [(signal_a, wrapped_a), (signal_b, wrapped_b)]
+
+    Terminal._disconnect_controller_signals(terminal)
+
+    assert signal_a.disconnected == [wrapped_a]
+    assert signal_b.disconnected == [wrapped_b]
+    assert terminal._controller_signal_bindings == []
+
+
+def test_terminal_safe_disconnect_suppresses_runtime_warnings():
+    class _WarningSignal:
+        def disconnect(self, _slot):
+            warnings.warn(
+                "Failed to disconnect (<bound method example>) from signal \"symbols_signal(QString,QVariantList)\".",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    terminal = Terminal.__new__(Terminal)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert Terminal._safe_disconnect(terminal, _WarningSignal(), object()) is True
+
+    assert caught == []
+
+
+def test_remove_app_event_filter_is_idempotent():
+    removed = []
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.app_controller.event_filter")
+    controller._app_event_filter_target = SimpleNamespace(
+        removeEventFilter=lambda target: removed.append(target)
+    )
+    controller._event_filter_disabled = False
+
+    AppController._remove_app_event_filter(controller)
+    AppController._remove_app_event_filter(controller)
+
+    assert removed == [controller]
+    assert controller._app_event_filter_target is None
+    assert controller._event_filter_disabled is True
+
+
+def test_current_account_label_prefers_wallet_for_solana_live_profiles():
+    wallet_address = "So11111111111111111111111111111111111111112"
+    controller = AppController.__new__(AppController)
+    controller.broker = SimpleNamespace(
+        exchange_name="solana",
+        account_id="project-123",
+        options={"wallet_address": wallet_address},
+        params={},
+    )
+    controller.config = SimpleNamespace(
+        broker=SimpleNamespace(
+            exchange="solana",
+            account_id="project-123",
+            options={"wallet_address": wallet_address},
+            params={},
+        )
+    )
+
+    assert controller.current_account_label() == "So1111...1112"
+
+
+def test_current_account_label_falls_back_to_masked_api_key_for_live_ccxt_profiles():
+    api_key = "organizations/test/apiKeys/key-1"
+    controller = AppController.__new__(AppController)
+    controller.broker = SimpleNamespace(
+        exchange_name="coinbase",
+        api_key=api_key,
+        options={},
+        params={},
+    )
+    controller.config = SimpleNamespace(
+        broker=SimpleNamespace(
+            exchange="coinbase",
+            api_key=api_key,
+            options={},
+            params={},
+        )
+    )
+
+    assert controller.current_account_label() == "orga...ey-1"
+
+
+def test_live_readiness_report_is_advisory_only():
+    controller = AppController.__new__(AppController)
+    controller.time_frame = "1h"
+    controller.health_check_report = []
+    controller.get_broker_capability_profile = lambda: {
+        "live_mode": True,
+        "exchange": "oanda",
+        "connected": False,
+        "account_label": "Not set",
+        "capabilities": {"trading": True, "orderbook": False},
+    }
+    controller._primary_runtime_symbol = lambda symbol=None: "EUR/USD"
+    controller.get_market_data_health_snapshot = lambda symbol=None, timeframe=None: {
+        "symbol": symbol or "EUR/USD",
+        "timeframe": timeframe or "1h",
+        "quote": {"fresh": False, "age_label": "unknown", "threshold_label": "20s"},
+        "candles": {"fresh": False, "age_label": "unknown", "threshold_label": "3h", "timeframe": timeframe or "1h"},
+        "orderbook": {"supported": False, "fresh": None, "age_label": "unknown", "threshold_label": ""},
+    }
+    controller.is_emergency_stop_active = lambda: False
+    controller.get_health_check_summary = lambda: "Startup health checks have not run yet."
+
+    report = AppController.get_live_readiness_report(controller, symbol="EUR/USD", timeframe="15m")
+
+    assert report["ready"] is True
+    assert report["blocking_reasons"] == []
+    assert "Readiness gate disabled" in report["summary"]
+    assert report["warning_reasons"]
+
+
+def test_bind_active_session_state_filters_implausible_pair_symbols():
+    emitted_connections = []
+    emitted_symbols = []
+
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.session_bind.filter_symbols")
+    controller.session_manager = SimpleNamespace(active_session_id=None)
+    controller.connection_signal = SimpleNamespace(emit=lambda state: emitted_connections.append(state))
+    controller.symbols_signal = SimpleNamespace(emit=lambda exchange, symbols: emitted_symbols.append((exchange, symbols)))
+    controller._handle_session_registry_changed = lambda: None
+    controller._restore_session_scoped_state = lambda session: None
+    controller._refresh_symbol_universe_tiers = lambda **kwargs: None
+    controller._stop_active_market_stream_tasks = lambda: asyncio.sleep(0)
+    controller._restart_telegram_service = lambda: asyncio.sleep(0)
+    controller._start_market_stream = lambda: asyncio.sleep(0)
+    controller._warmup_visible_candles = lambda: asyncio.sleep(0)
+    controller._create_task = lambda coro, name: None
+    controller.run_startup_health_check = lambda: asyncio.sleep(0)
+
+    fake_session = SimpleNamespace(
+        session_id="coinbase-live-001",
+        config=SimpleNamespace(broker=SimpleNamespace(type="crypto", exchange="coinbase", mode="live")),
+        broker="broker",
+        trading_system="runtime",
+        symbols=["BTC/USD", "00/USD", "ETH/USD"],
+        symbol_catalog=["BTC/USD", "00/USD", "ETH/USD", "SOL/USD"],
+        balances={"total": {"USD": 5000.0}},
+        portfolio="portfolio",
+        session_controller=None,
+        connected=True,
+        exchange="coinbase",
+    )
+
+    asyncio.run(AppController._bind_active_session_state(controller, fake_session, restart_stream=False))
+
+    assert controller.symbols == ["BTC/USD", "ETH/USD"]
+    assert controller.symbol_catalog == ["BTC/USD", "ETH/USD", "SOL/USD"]
+    assert "00/USD" not in controller.symbol_catalog
+    assert fake_session.symbols == ["BTC/USD", "ETH/USD"]
+    assert fake_session.symbol_catalog == ["BTC/USD", "ETH/USD", "SOL/USD"]
+    assert emitted_connections == ["connected"]
+    assert emitted_symbols == [("coinbase", ["BTC/USD", "ETH/USD"])]
+
+
 def test_initialize_trading_keeps_dashboard_visible(monkeypatch):
     calls = {"terminal": [], "stack_set": [], "stack_add": [], "created_tasks": []}
 
@@ -376,6 +551,37 @@ def test_setup_data_requires_remote_storage_when_env_forces_remote(monkeypatch):
     assert captured["raise_on_error"] is True
 
 
+def test_configure_storage_database_demotes_remote_mode_when_sqlite_fallback_is_used(monkeypatch):
+    import frontend.ui.app_controller as app_controller_mod
+
+    controller = AppController.__new__(AppController)
+    controller.logger = logging.getLogger("test.app_controller.storage")
+    controller.settings = SimpleNamespace(setValue=lambda *_args, **_kwargs: None)
+    controller._rebind_storage_dependencies = lambda: None
+
+    monkeypatch.setattr(app_controller_mod, "configure_database", lambda _url=None: "sqlite:////tmp/sopotek_fallback.sqlite3")
+    monkeypatch.setattr(app_controller_mod, "init_database", lambda: None)
+    monkeypatch.setattr(app_controller_mod, "get_database_url", lambda: "sqlite:////tmp/sopotek_fallback.sqlite3")
+    monkeypatch.setattr(app_controller_mod, "MarketDataRepository", lambda: object())
+    monkeypatch.setattr(app_controller_mod, "TradeRepository", lambda: object())
+    monkeypatch.setattr(app_controller_mod, "TradeAuditRepository", lambda: object())
+    monkeypatch.setattr(app_controller_mod, "EquitySnapshotRepository", lambda: object())
+    monkeypatch.setattr(app_controller_mod, "AgentDecisionRepository", lambda: object())
+
+    configured = AppController.configure_storage_database(
+        controller,
+        database_mode="remote",
+        database_url="postgresql+psycopg://sopotek:sopotek_local@postgres:5432/sopotek_trading",
+        persist=False,
+        raise_on_error=True,
+    )
+
+    assert configured == "sqlite:////tmp/sopotek_fallback.sqlite3"
+    assert controller.database_mode == "local"
+    assert controller.database_url == ""
+    assert controller.database_connection_url == "sqlite:////tmp/sopotek_fallback.sqlite3"
+
+
 def test_build_broker_for_login_routes_crypto_paper_sessions_to_paper_broker():
     controller = AppController.__new__(AppController)
     controller.logger = logging.getLogger("test.app_controller.paper_routing")
@@ -399,6 +605,17 @@ def test_build_broker_for_login_routes_crypto_paper_sessions_to_paper_broker():
     assert config.broker.params["paper_data_exchange"] == "binanceus"
     assert config.broker.params["paper_data_exchanges"][0] == "binanceus"
     assert controller.paper_data_exchange == "binanceus"
+    assert broker.exchange_name == "binanceus"
+
+
+def test_active_exchange_code_prefers_selected_exchange_for_paper_broker():
+    controller = AppController.__new__(AppController)
+    controller.broker = SimpleNamespace(exchange_name="binanceus", mode="paper")
+    controller.config = SimpleNamespace(
+        broker=SimpleNamespace(exchange="binanceus", type="crypto", mode="paper")
+    )
+
+    assert controller._active_exchange_code() == "binanceus"
 
 
 def test_friendly_initialization_error_explains_binanceus_testnet_restriction():
