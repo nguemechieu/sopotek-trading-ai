@@ -39,7 +39,7 @@ jobs:
       id-token: write
     environment:
       name: pypi
-      url: https://pypi.org/project/sopotek-trading-ai/
+      url: https://pypi.org/project/sopotek-quant-system/
 
     steps:
       - name: Retrieve release distributions
