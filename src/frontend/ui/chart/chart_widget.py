@@ -114,6 +114,7 @@ class ChartWidget(QWidget):
         axis_color: str = "#9aa4b2",
     ):
         super().__init__()
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.controller = controller
         self.symbol = symbol
         self.timeframe = timeframe
@@ -162,6 +163,15 @@ class ChartWidget(QWidget):
         self._chart_status_requested_bars = None
         self._chart_loading_frames = ["|", "/", "-", "\\"]
         self._chart_loading_index = 0
+        self._chart_tool_buttons = {}
+        self._active_chart_tool = None
+        self._chart_drawings = []
+        self._drawing_anchor = None
+        self._drawing_preview = None
+        self._selected_annotation = None
+        self._annotation_drag_state = None
+        self._suppress_next_mouse_clicked = False
+        self._trade_target_view_summary = ""
         self._chart_status_clear_timer = QtCore.QTimer(self)
         self._chart_status_clear_timer.setSingleShot(True)
         self._chart_status_clear_timer.timeout.connect(self._clear_status_notice)
@@ -263,7 +273,7 @@ class ChartWidget(QWidget):
         if self.timeframe_picker.findText(str(self.timeframe)) < 0:
             self.timeframe_picker.addItem(str(self.timeframe))
         self.timeframe_picker.setCurrentText(str(self.timeframe))
-        self.timeframe_picker.setToolTip("Select the timeframe for this chart.")
+        self.timeframe_picker.setToolTip("Select the timeframe for this chart. Hotkeys: , previous timeframe | . next timeframe.")
         self.timeframe_picker.currentTextChanged.connect(self._handle_timeframe_picker_changed)
         controls_layout.addWidget(self.timeframe_picker)
 
@@ -275,6 +285,25 @@ class ChartWidget(QWidget):
         self.overlay_toggle_button.setStyleSheet(self._chart_nav_button_style(accent=True))
         self.overlay_toggle_button.clicked.connect(lambda checked=False: self._set_chart_overlays_visible(checked))
         controls_layout.addWidget(self.overlay_toggle_button)
+
+        self.chart_tools_title = QLabel("Draw")
+        self.chart_tools_title.setStyleSheet("color: #8fa4bf; font-size: 11px; font-weight: 700; padding-left: 6px;")
+        controls_layout.addWidget(self.chart_tools_title)
+
+        self.chart_tool_buttons = []
+        for label, tool_name in self._chart_tool_definitions():
+            button = QPushButton(label)
+            button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            button.setMinimumHeight(26)
+            button.setCheckable(tool_name != "clear")
+            button.setStyleSheet(self._chart_nav_button_style())
+            button.setToolTip(self._chart_tool_tooltip(tool_name))
+            button.clicked.connect(
+                lambda checked=False, name=tool_name: self._handle_chart_tool_button(name, checked=checked)
+            )
+            controls_layout.addWidget(button)
+            self.chart_tool_buttons.append(button)
+            self._chart_tool_buttons[tool_name] = button
 
         self.chart_nav_buttons = []
         self.fit_chart_button = None
@@ -289,6 +318,7 @@ class ChartWidget(QWidget):
             button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             button.setMinimumHeight(26)
             button.setStyleSheet(self._chart_nav_button_style(accent=(label == "Fit")))
+            button.setToolTip(self._chart_nav_tooltip(label))
             button.clicked.connect(lambda _checked=False, action=callback: action())
             controls_layout.addWidget(button)
             self.chart_nav_buttons.append(button)
@@ -526,6 +556,21 @@ class ChartWidget(QWidget):
         self.trade_entry_line = self._create_trade_overlay_line("#2a7fff", "Entry {value:.6f}", "entry")
         self.trade_stop_line = self._create_trade_overlay_line("#ef5350", "SL {value:.6f}", "stop_loss")
         self.trade_take_line = self._create_trade_overlay_line("#32d296", "TP {value:.6f}", "take_profit")
+        self.trade_risk_top_curve, self.trade_risk_bottom_curve, self.trade_risk_fill = self._create_trade_band(
+            "#ef5350", 68
+        )
+        self.trade_reward_top_curve, self.trade_reward_bottom_curve, self.trade_reward_fill = self._create_trade_band(
+            "#32d296", 58
+        )
+        self.trade_target_view_label = TextItem(
+            html="",
+            anchor=(1.0, 0.0),
+            border=mkPen((76, 92, 115, 220)),
+            fill=pg.mkBrush(11, 18, 32, 234),
+        )
+        self.trade_target_view_label.setZValue(12)
+        self.trade_target_view_label.setVisible(False)
+        self.price_plot.addItem(self.trade_target_view_label)
 
         self.text_item = TextItem(
             html="",
@@ -597,7 +642,9 @@ class ChartWidget(QWidget):
 
         self.proxy = SignalProxy(self.price_plot.scene().sigMouseMoved, rateLimit=60, slot=self._mouse_moved)
         self.price_plot.scene().sigMouseClicked.connect(self._mouse_clicked)
-        self.price_plot.scene().sigMouseClicked.connect(self._mouse_clicked)
+        self.price_plot.scene().installEventFilter(self)
+        self.price_plot.viewport().installEventFilter(self)
+        self._update_chart_interaction_cursor()
 
         self.splitter.setStretchFactor(0, 12)
         self.splitter.setStretchFactor(1, 2)
@@ -764,8 +811,255 @@ class ChartWidget(QWidget):
     def _update_chart_controls_theme(self):
         self.timeframe_picker.setStyleSheet(self._timeframe_picker_style())
         self.overlay_toggle_button.setStyleSheet(self._chart_nav_button_style(accent=True))
+        self.chart_tools_title.setStyleSheet(
+            f"color: {self._rgba_css(self.axis_color, 184, '#9aa4b2')}; font-size: 11px; font-weight: 700; padding-left: 6px;"
+        )
+        for button in list(getattr(self, "chart_tool_buttons", [])):
+            button.setStyleSheet(self._chart_nav_button_style())
         for button in list(getattr(self, "chart_nav_buttons", [])):
             button.setStyleSheet(self._chart_nav_button_style(accent=(button is self.fit_chart_button)))
+
+    def _chart_tool_definitions(self):
+        return [
+            ("Long", "long_rr"),
+            ("Short", "short_rr"),
+            ("Trend", "trend"),
+            ("Info", "info"),
+            ("Ghost", "ghost"),
+            ("Arrow", "arrow"),
+            ("Clear", "clear"),
+        ]
+
+    def _handle_chart_tool_button(self, tool_name: str, checked: bool = False):
+        normalized = str(tool_name or "").strip().lower()
+        if normalized == "clear":
+            self._clear_chart_drawings()
+            self.clear_trade_overlay()
+            try:
+                self.sigTradeContextAction.emit(
+                    {
+                        "action": "clear_levels",
+                        "symbol": self.symbol,
+                        "timeframe": self.timeframe,
+                        "price": self._current_chart_reference_price() or 0.0,
+                    }
+                )
+            except Exception:
+                pass
+            button = self._chart_tool_buttons.get("clear")
+            if button is not None:
+                button.blockSignals(True)
+                button.setChecked(False)
+                button.blockSignals(False)
+            self._show_chart_interaction_notice("Chart annotations cleared.", auto_clear_ms=900)
+            return
+
+        if not checked and self._active_chart_tool == normalized:
+            self._set_active_chart_tool(None)
+            label = next((label for label, name in self._chart_tool_definitions() if name == normalized), "Tool")
+            self._show_chart_interaction_notice(f"{label} tool disarmed.", auto_clear_ms=900)
+            return
+        if checked:
+            self._set_active_chart_tool(normalized)
+            label = next((label for label, name in self._chart_tool_definitions() if name == normalized), "Tool")
+            detail = (
+                "Click a price level to drop a target view."
+                if normalized in {"long_rr", "short_rr"}
+                else "Click once to anchor and again to place the drawing."
+            )
+            self._show_chart_interaction_notice(f"{label} tool armed.", detail, auto_clear_ms=1400)
+
+    def _set_active_chart_tool(self, tool_name: str | None):
+        normalized = str(tool_name or "").strip().lower() or None
+        self._active_chart_tool = normalized
+        self._drawing_anchor = None
+        self._clear_drawing_preview()
+        for name, button in dict(getattr(self, "_chart_tool_buttons", {}) or {}).items():
+            button.blockSignals(True)
+            button.setChecked(name == normalized and button.isCheckable())
+            button.blockSignals(False)
+        self._update_chart_interaction_cursor()
+
+    def _chart_tool_tooltip(self, tool_name: str) -> str:
+        tool = str(tool_name or "").strip().lower()
+        hints = {
+            "long_rr": "Long target view. Hotkey: L",
+            "short_rr": "Short target view. Hotkey: S",
+            "trend": "Trend line. Hotkey: T",
+            "info": "Measurement/info line. Hotkey: I",
+            "ghost": "Projected ghost path. Hotkey: G",
+            "arrow": "Arrow annotation. Hotkey: A",
+            "clear": "Clear all chart drawings and trade levels. Hotkey: Esc to cancel tools, Delete to remove selected items.",
+        }
+        return hints.get(tool, "Chart tool")
+
+    def _chart_nav_tooltip(self, label: str) -> str:
+        text = str(label or "").strip()
+        hints = {
+            "<-": "Pan chart left. Hotkey: Left Arrow",
+            "->": "Pan chart right. Hotkey: Right Arrow",
+            "+": "Zoom in. Hotkeys: + or Mouse Wheel Up",
+            "-": "Zoom out. Hotkeys: - or Mouse Wheel Down",
+            "Fit": "Fit the recent visible move. Hotkey: F",
+        }
+        return hints.get(text, "Chart navigation")
+
+    def _chart_hotkey_summary(self) -> str:
+        return "L/S/T/I/G/A tools | F fit | V volume | ,/. timeframe | Wheel zoom | Shift+Wheel pan"
+
+    def _show_chart_interaction_notice(self, message: str, detail: str = "", auto_clear_ms: int = 1400):
+        self._set_chart_status(
+            "notice",
+            message,
+            detail or self._chart_hotkey_summary(),
+            auto_clear_ms=auto_clear_ms,
+        )
+
+    def _chart_tool_shortcuts(self):
+        return {
+            "l": ("long_rr", "Long"),
+            "s": ("short_rr", "Short"),
+            "t": ("trend", "Trend"),
+            "i": ("info", "Info"),
+            "g": ("ghost", "Ghost"),
+            "a": ("arrow", "Arrow"),
+        }
+
+    def _update_chart_interaction_cursor(self):
+        viewport = getattr(self.price_plot, "viewport", lambda: None)()
+        if viewport is None:
+            return
+        if self._annotation_drag_state is not None:
+            viewport.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            return
+        if self._active_chart_tool is not None or self._drawing_anchor is not None:
+            viewport.setCursor(QtCore.Qt.CursorShape.CrossCursor)
+            return
+        if self._selected_annotation is not None:
+            viewport.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+            return
+        viewport.unsetCursor()
+
+    def _cycle_timeframe(self, offset: int):
+        options = [str(option).strip().lower() for option in TIMEFRAME_OPTIONS if str(option).strip()]
+        if not options:
+            return
+        current = str(self.timeframe or options[0]).strip().lower() or options[0]
+        if current not in options:
+            options.append(current)
+        current_index = options.index(current)
+        target = options[(current_index + int(offset)) % len(options)]
+        if target == current:
+            return
+        self.set_timeframe(target, emit_signal=True)
+        self._show_chart_interaction_notice(f"Timeframe {target.upper()} selected.", auto_clear_ms=900)
+
+    def _annotation_matches(self, left, right) -> bool:
+        if left is right:
+            return True
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            return False
+        if str(left.get("kind") or "").strip().lower() != str(right.get("kind") or "").strip().lower():
+            return False
+        if left.get("kind") == "drawing":
+            return left.get("drawing") is right.get("drawing")
+        return True
+
+    def _is_selected_drawing(self, drawing) -> bool:
+        selected = getattr(self, "_selected_annotation", None)
+        return isinstance(selected, dict) and selected.get("kind") == "drawing" and selected.get("drawing") is drawing
+
+    def _trade_overlay_selected(self) -> bool:
+        selected = getattr(self, "_selected_annotation", None)
+        return isinstance(selected, dict) and selected.get("kind") == "trade_overlay"
+
+    def _select_annotation(self, annotation):
+        if annotation is not None and not isinstance(annotation, dict):
+            return
+        current = getattr(self, "_selected_annotation", None)
+        if self._annotation_matches(current, annotation):
+            return
+        self._selected_annotation = annotation
+        for drawing in list(getattr(self, "_chart_drawings", []) or []):
+            start = drawing.get("start")
+            end = drawing.get("end")
+            if start is not None and end is not None:
+                self._update_segment_drawing(drawing, start, end)
+        self._apply_trade_overlay_line_styles()
+        self._update_trade_target_view()
+        self._update_chart_interaction_cursor()
+
+    def _select_chart_drawing(self, drawing):
+        if drawing is None:
+            self._select_annotation(None)
+            return
+        self._select_annotation({"kind": "drawing", "drawing": drawing})
+
+    def _select_trade_overlay(self):
+        if self._format_numeric_value(self._trade_overlay_state.get("entry")) is None:
+            self._select_annotation(None)
+            return
+        self._select_annotation({"kind": "trade_overlay"})
+
+    def _annotation_display_name(self, annotation=None) -> str:
+        target = annotation if isinstance(annotation, dict) else getattr(self, "_selected_annotation", None)
+        if not isinstance(target, dict):
+            return "Annotation"
+        if target.get("kind") == "trade_overlay":
+            side = str(self._trade_overlay_state.get("side") or "buy").strip().lower() or "buy"
+            return "Short Target View" if side == "sell" else "Long Target View"
+        drawing = target.get("drawing")
+        tool = str(getattr(drawing, "get", lambda *_args, **_kwargs: "")("tool") or "").strip().lower()
+        label_map = {
+            "trend": "Trend Line",
+            "info": "Info Line",
+            "ghost": "Ghost Overlay",
+            "arrow": "Arrow",
+        }
+        return label_map.get(tool, "Drawing")
+
+    def _remove_chart_drawing(self, drawing):
+        if drawing is None:
+            return False
+        remaining = []
+        removed = False
+        for candidate in list(getattr(self, "_chart_drawings", []) or []):
+            if candidate is drawing:
+                self._remove_chart_items(candidate.get("items"))
+                removed = True
+                continue
+            remaining.append(candidate)
+        self._chart_drawings = remaining
+        if removed and self._is_selected_drawing(drawing):
+            self._select_annotation(None)
+        self._update_chart_interaction_cursor()
+        return removed
+
+    def _remove_selected_annotation(self):
+        selected = getattr(self, "_selected_annotation", None)
+        if not isinstance(selected, dict):
+            return False
+        if selected.get("kind") == "drawing":
+            return self._remove_chart_drawing(selected.get("drawing"))
+        if selected.get("kind") == "trade_overlay":
+            self.clear_trade_overlay()
+            self._select_annotation(None)
+            self._update_chart_interaction_cursor()
+            return True
+        return False
+
+    def _emit_trade_level_changed(self, level: str, price):
+        numeric = self._format_numeric_value(price)
+        if not level or numeric is None or numeric <= 0:
+            return
+        self.sigTradeLevelChanged.emit(
+            {
+                "symbol": self.symbol,
+                "timeframe": self.timeframe,
+                "level": str(level),
+                "price": float(numeric),
+            }
+        )
 
     def _sync_chart_controls_visibility(self):
         controls = getattr(self, "controls_container", None)
@@ -1330,9 +1624,28 @@ class ChartWidget(QWidget):
         if len(x_range) < 2:
             return
         center = (float(x_range[0]) + float(x_range[1])) / 2.0
-        span = max(float(x_range[1]) - float(x_range[0]), self._time_axis_step() * 10.0)
+        self._zoom_chart_at(center, scale)
+
+    def _zoom_chart_at(self, anchor_x, scale):
+        if self._last_x is None or len(self._last_x) == 0:
+            return
+        try:
+            x_range, _ = self.price_plot.viewRange()
+        except Exception:
+            return
+        if len(x_range) < 2:
+            return
+        left = float(x_range[0])
+        right = float(x_range[1])
+        span = max(right - left, self._time_axis_step() * 10.0)
         target_span = span * float(scale)
-        self._set_chart_x_window(center - (target_span / 2.0), center + (target_span / 2.0), fit_y=True)
+        numeric_anchor = self._format_numeric_value(anchor_x)
+        if numeric_anchor is None:
+            numeric_anchor = (left + right) / 2.0
+        ratio = 0.5 if span <= 0 else min(1.0, max(0.0, (float(numeric_anchor) - left) / span))
+        new_left = float(numeric_anchor) - (target_span * ratio)
+        new_right = float(numeric_anchor) + (target_span * (1.0 - ratio))
+        self._set_chart_x_window(new_left, new_right, fit_y=True)
 
     def _pan_chart(self, fraction):
         if self._last_x is None or len(self._last_x) == 0:
@@ -1401,6 +1714,20 @@ class ChartWidget(QWidget):
         plot.addItem(line, ignoreBounds=True)
         return line
 
+    def _create_trade_band(self, color: str, alpha: int):
+        top_curve = pg.PlotCurveItem([], [], pen=mkPen(color, width=1.1))
+        bottom_curve = pg.PlotCurveItem([], [], pen=mkPen(color, width=1.1))
+        fill = pg.FillBetweenItem(
+            top_curve,
+            bottom_curve,
+            brush=pg.mkBrush(pg.mkColor(color).red(), pg.mkColor(color).green(), pg.mkColor(color).blue(), alpha),
+        )
+        for item, z_value in ((fill, 2), (top_curve, 3), (bottom_curve, 3)):
+            item.setZValue(z_value)
+            self.price_plot.addItem(item)
+        fill.setVisible(False)
+        return top_curve, bottom_curve, fill
+
     def _create_trade_overlay_line(self, color: str, label: str, level: str):
         line = InfiniteLine(
             angle=0,
@@ -1414,6 +1741,153 @@ class ChartWidget(QWidget):
         line.sigPositionChangeFinished.connect(lambda item=line: self._handle_trade_line_moved(item))
         self.price_plot.addItem(line, ignoreBounds=True)
         return line
+
+    def _apply_trade_overlay_line_styles(self):
+        side = str(self._trade_overlay_state.get("side") or "buy").strip().lower() or "buy"
+        selected = self._trade_overlay_selected()
+        entry_color = "#32d296" if side == "buy" else "#ef5350"
+        entry_width = 1.85 if selected else 1.4
+        level_width = 1.8 if selected else 1.35
+        band_width = 1.45 if selected else 1.1
+
+        self.trade_entry_line.setPen(mkPen(entry_color, width=entry_width, style=QtCore.Qt.PenStyle.DashLine))
+        self.trade_entry_line.label.fill = pg.mkBrush(pg.mkColor(entry_color))
+        self.trade_entry_line.label.setColor(pg.mkColor("#ffffff"))
+        self.trade_stop_line.setPen(mkPen("#ef5350", width=level_width, style=QtCore.Qt.PenStyle.DashLine))
+        self.trade_take_line.setPen(mkPen("#32d296", width=level_width, style=QtCore.Qt.PenStyle.DashLine))
+        for curve in (self.trade_risk_top_curve, self.trade_risk_bottom_curve):
+            curve.setPen(mkPen("#ef5350", width=band_width))
+        for curve in (self.trade_reward_top_curve, self.trade_reward_bottom_curve):
+            curve.setPen(mkPen("#32d296", width=band_width))
+
+    def _segment_drawing_pen(self, drawing):
+        color = pg.mkColor(str(drawing.get("color") or "#9ec1ff"))
+        preview_alpha = 140 if drawing.get("preview") else 255
+        color.setAlpha(preview_alpha)
+        width = 2.4 if self._is_selected_drawing(drawing) and not drawing.get("preview") else 1.6
+        return mkPen(color, width=width, style=drawing.get("line_style"))
+
+    def _estimate_x_step(self) -> float:
+        if self._last_x is not None and len(self._last_x) >= 2:
+            diffs = np.diff(self._last_x)
+            diffs = diffs[np.isfinite(diffs)]
+            diffs = diffs[np.abs(diffs) > 0]
+            if len(diffs):
+                return float(np.median(np.abs(diffs)))
+        return float(self._timeframe_seconds() or 60.0)
+
+    def _default_trade_overlay_window(self, anchor_x=None):
+        step = max(self._estimate_x_step(), 1e-6)
+        try:
+            x_range, _ = self.price_plot.viewRange()
+            visible_span = abs(float(x_range[1]) - float(x_range[0])) if len(x_range) >= 2 else 0.0
+        except Exception:
+            visible_span = step * 24.0
+
+        numeric_anchor = self._format_numeric_value(anchor_x)
+        if numeric_anchor is None:
+            if self._last_x is not None and len(self._last_x) > 0:
+                numeric_anchor = float(self._last_x[-1])
+            else:
+                numeric_anchor = 0.0
+        x_span = max(step * 16.0, visible_span * 0.18, step * 4.0)
+        return float(numeric_anchor), float(numeric_anchor + x_span)
+
+    def _trade_overlay_window(self):
+        state = dict(getattr(self, "_trade_overlay_state", {}) or {})
+        x_start = self._format_numeric_value(state.get("x_start"))
+        x_end = self._format_numeric_value(state.get("x_end"))
+        if x_start is None or x_end is None or x_end <= x_start:
+            return self._default_trade_overlay_window(anchor_x=state.get("anchor_x"))
+        return float(x_start), float(x_end)
+
+    def _current_chart_reference_price(self):
+        state = dict(getattr(self, "_trade_overlay_state", {}) or {})
+        for key in ("entry", "take_profit", "stop_loss"):
+            price = self._format_numeric_value(state.get(key))
+            if price is not None:
+                return price
+        stats = getattr(self, "_last_candle_stats", {}) or {}
+        return self._format_numeric_value(stats.get("last_price"))
+
+    def _default_trade_levels_for_entry(self, entry_price: float, side: str = "buy"):
+        try:
+            _x_range, y_range = self.price_plot.viewRange()
+            visible_span = abs(float(y_range[1]) - float(y_range[0])) if len(y_range) >= 2 else 0.0
+        except Exception:
+            visible_span = 0.0
+        risk_distance = max(abs(float(entry_price)) * 0.0025, visible_span * 0.055, 1e-6)
+        normalized_side = str(side or "buy").strip().lower() or "buy"
+        if normalized_side == "sell":
+            return (
+                float(entry_price),
+                float(entry_price + risk_distance),
+                float(entry_price - (risk_distance * 2.0)),
+            )
+        return (
+            float(entry_price),
+            float(entry_price - risk_distance),
+            float(entry_price + (risk_distance * 2.0)),
+        )
+
+    def _update_trade_target_view(self):
+        state = dict(getattr(self, "_trade_overlay_state", {}) or {})
+        side = str(state.get("side") or "buy").strip().lower() or "buy"
+        entry = self._format_numeric_value(state.get("entry"))
+        stop_loss = self._format_numeric_value(state.get("stop_loss"))
+        take_profit = self._format_numeric_value(state.get("take_profit"))
+        selected = self._trade_overlay_selected()
+        self._trade_target_view_summary = ""
+
+        if entry is None or stop_loss is None or take_profit is None:
+            for curve in (
+                self.trade_risk_top_curve,
+                self.trade_risk_bottom_curve,
+                self.trade_reward_top_curve,
+                self.trade_reward_bottom_curve,
+            ):
+                curve.setData([], [])
+            self.trade_risk_fill.setVisible(False)
+            self.trade_reward_fill.setVisible(False)
+            self.trade_target_view_label.setVisible(False)
+            return
+
+        x_start, x_end = self._trade_overlay_window()
+        x_values = [x_start, x_end]
+        self.trade_risk_top_curve.setData(x_values, [entry, entry])
+        self.trade_risk_bottom_curve.setData(x_values, [stop_loss, stop_loss])
+        self.trade_reward_top_curve.setData(x_values, [take_profit, take_profit])
+        self.trade_reward_bottom_curve.setData(x_values, [entry, entry])
+        self.trade_risk_fill.setVisible(True)
+        self.trade_reward_fill.setVisible(True)
+
+        if side == "sell":
+            risk = stop_loss - entry
+            reward = entry - take_profit
+        else:
+            risk = entry - stop_loss
+            reward = take_profit - entry
+
+        if risk <= 0 or reward <= 0:
+            self.trade_target_view_label.setVisible(False)
+            return
+
+        ratio = reward / risk if risk else 0.0
+        self._trade_target_view_summary = f"RR {ratio:.2f} | Risk {risk:.5f} | Reward {reward:.5f}"
+        body_lines = [
+            f"Entry {entry:.6f} | SL {stop_loss:.6f} | TP {take_profit:.6f}",
+            f"Risk {risk:.5f} | Reward {reward:.5f}",
+        ]
+        self.trade_target_view_label.setHtml(
+            self._overlay_card_html(
+                "Long Target View" if side == "buy" else "Short Target View",
+                body_lines + [f"RR {ratio:.2f}"],
+                "#ffd166" if selected else "#9ec1ff",
+                body_color="#f4f8ff",
+            )
+        )
+        self.trade_target_view_label.setPos(float(x_end), float(max(entry, stop_loss, take_profit)))
+        self.trade_target_view_label.setVisible(True)
 
     def _handle_trade_line_moved(self, line):
         if self._trade_overlay_updating:
@@ -1436,22 +1910,22 @@ class ChartWidget(QWidget):
                 "price": price,
             }
         )
+        self._update_trade_target_view()
 
     def set_trade_overlay(self, entry=None, stop_loss=None, take_profit=None, side="buy"):
         self._trade_overlay_updating = True
         try:
             normalized_side = str(side or "buy").strip().lower() or "buy"
+            previous_state = dict(getattr(self, "_trade_overlay_state", {}) or {})
             self._trade_overlay_state = {
                 "side": normalized_side,
                 "entry": entry,
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
+                "anchor_x": previous_state.get("anchor_x"),
+                "x_start": previous_state.get("x_start"),
+                "x_end": previous_state.get("x_end"),
             }
-
-            entry_color = "#32d296" if normalized_side == "buy" else "#ef5350"
-            self.trade_entry_line.setPen(mkPen(entry_color, width=1.4, style=QtCore.Qt.PenStyle.DashLine))
-            self.trade_entry_line.label.fill = pg.mkBrush(pg.mkColor(entry_color))
-            self.trade_entry_line.label.setColor(pg.mkColor("#ffffff"))
 
             for line, value in (
                 (self.trade_entry_line, entry),
@@ -1471,6 +1945,8 @@ class ChartWidget(QWidget):
                     line.setVisible(False)
         finally:
             self._trade_overlay_updating = False
+        self._apply_trade_overlay_line_styles()
+        self._update_trade_target_view()
 
     def clear_trade_overlay(self):
         self.set_trade_overlay(
@@ -1479,6 +1955,8 @@ class ChartWidget(QWidget):
             take_profit=None,
             side=self._trade_overlay_state.get("side", "buy"),
         )
+        if self._trade_overlay_selected():
+            self._select_annotation(None)
 
     def _sync_view_context(self):
         context = (self.symbol, self.timeframe)
@@ -1615,6 +2093,8 @@ class ChartWidget(QWidget):
         self.text_item.setPos(x, y)
         self._update_ohlcv_for_x(x)
         self._update_news_hover(x, y)
+        if self._drawing_anchor is not None and self._drawing_preview is not None:
+            self._update_segment_drawing(self._drawing_preview, self._drawing_anchor, {"x": x, "y": y})
 
     def _update_news_hover(self, x_value, y_value):
         event = self._nearest_news_event(x_value, y_value)
@@ -1625,6 +2105,423 @@ class ChartWidget(QWidget):
         self.news_hover_item.setHtml(self._news_hover_html(event))
         self.news_hover_item.setPos(float(event["x"]), float(event["y"]))
         self.news_hover_item.setVisible(True)
+
+    def _chart_point_from_scene_pos(self, pos):
+        if pos is None or not self.price_plot.sceneBoundingRect().contains(pos):
+            return None
+        try:
+            mouse_point = self.price_plot.getPlotItem().vb.mapSceneToView(pos)
+            x_value = float(mouse_point.x())
+            y_value = float(mouse_point.y())
+        except Exception:
+            return None
+        if not np.isfinite(x_value) or not np.isfinite(y_value) or y_value <= 0:
+            return None
+        return {"x": x_value, "y": y_value}
+
+    def _remove_chart_items(self, items):
+        for item in list(items or []):
+            try:
+                self.price_plot.removeItem(item)
+            except Exception:
+                continue
+
+    def _create_segment_drawing(self, tool: str, preview: bool = False):
+        normalized_tool = str(tool or "").strip().lower()
+        color_map = {
+            "trend": "#7cb7ff",
+            "info": "#ffd166",
+            "ghost": "#90a6c1",
+            "arrow": "#ff8c42",
+        }
+        style_map = {
+            "trend": QtCore.Qt.PenStyle.SolidLine,
+            "info": QtCore.Qt.PenStyle.DashLine,
+            "ghost": QtCore.Qt.PenStyle.DashDotLine,
+            "arrow": QtCore.Qt.PenStyle.SolidLine,
+        }
+        curve = pg.PlotCurveItem([], [], pen=mkPen(color_map.get(normalized_tool, "#9ec1ff"), width=1.6))
+        curve.setZValue(8 if not preview else 7)
+        self.price_plot.addItem(curve)
+        drawing = {
+            "tool": normalized_tool,
+            "curve": curve,
+            "items": [curve],
+            "preview": bool(preview),
+            "summary": "",
+            "color": color_map.get(normalized_tool, "#9ec1ff"),
+            "line_style": style_map.get(normalized_tool),
+        }
+
+        if normalized_tool in {"info", "ghost"}:
+            label = TextItem(
+                html="",
+                anchor=(0.5, 1.0),
+                border=mkPen((76, 92, 115, 205)),
+                fill=pg.mkBrush(11, 18, 32, 230 if not preview else 188),
+            )
+            label.setVisible(False)
+            label.setZValue(10 if not preview else 9)
+            self.price_plot.addItem(label)
+            drawing["label"] = label
+            drawing["items"].append(label)
+
+        if normalized_tool == "arrow":
+            color = pg.mkColor(str(drawing.get("color") or "#ff8c42"))
+            color.setAlpha(140 if preview else 255)
+            arrow = pg.ArrowItem(
+                angle=0,
+                headLen=14,
+                tipAngle=28,
+                baseAngle=22,
+                tailLen=0,
+                brush=pg.mkBrush(color),
+                pen=mkPen(color, width=1.3),
+            )
+            arrow.setVisible(False)
+            arrow.setZValue(10 if not preview else 9)
+            self.price_plot.addItem(arrow)
+            drawing["arrow"] = arrow
+            drawing["items"].append(arrow)
+
+        return drawing
+
+    def _format_duration_label(self, seconds):
+        numeric = self._format_numeric_value(seconds)
+        if numeric is None:
+            return "-"
+        duration = abs(float(numeric))
+        if duration < 60:
+            return f"{duration:.0f}s"
+        if duration < 3600:
+            return f"{duration / 60.0:.1f}m"
+        if duration < 86400:
+            return f"{duration / 3600.0:.1f}h"
+        if duration < 604800:
+            return f"{duration / 86400.0:.1f}d"
+        return f"{duration / 604800.0:.1f}w"
+
+    def _line_measurement_details(self, start, end):
+        delta = float(end["y"]) - float(start["y"])
+        percent = (delta / float(start["y"])) * 100.0 if abs(float(start["y"])) > 1e-9 else 0.0
+        bar_count = abs(float(end["x"]) - float(start["x"])) / max(self._estimate_x_step(), 1e-6)
+        duration = self._format_duration_label(abs(float(end["x"]) - float(start["x"])))
+        prefix = "+" if delta >= 0 else ""
+        summary = f"{prefix}{self._format_metric(delta, 6)} ({percent:+.2f}%)"
+        lines = [
+            summary,
+            f"{bar_count:.1f} bars | {duration}",
+            f"{self._format_time_label(start['x'])} -> {self._format_time_label(end['x'])}",
+        ]
+        return lines, summary
+
+    def _ghost_curve_points(self, start, end):
+        x_start = float(start["x"])
+        x_end = float(end["x"])
+        y_start = float(start["y"])
+        y_end = float(end["y"])
+        delta_x = x_end - x_start
+        delta_y = y_end - y_start
+        lift = max(abs(delta_y) * 0.2, abs(y_start) * 0.0025, 1e-6)
+        control_x = x_start + (delta_x * 0.58)
+        control_y = y_start + (delta_y * 0.45) + (lift if delta_y >= 0 else -lift)
+        return [x_start, control_x, x_end], [y_start, control_y, y_end]
+
+    def _update_segment_drawing(self, drawing, start, end):
+        if not drawing or start is None or end is None:
+            return
+        normalized_tool = str(drawing.get("tool") or "").strip().lower()
+        if normalized_tool == "ghost":
+            x_values, y_values = self._ghost_curve_points(start, end)
+        else:
+            x_values = [float(start["x"]), float(end["x"])]
+            y_values = [float(start["y"]), float(end["y"])]
+        drawing["points"] = list(zip(x_values, y_values))
+        drawing["curve"].setPen(self._segment_drawing_pen(drawing))
+        drawing["curve"].setData(x_values, y_values)
+
+        label = drawing.get("label")
+        if label is not None:
+            lines, summary = self._line_measurement_details(start, end)
+            title = "Info Line" if normalized_tool == "info" else "Ghost Feed"
+            if normalized_tool == "ghost":
+                lines = [lines[0], lines[1], "Projected path overlay"]
+            title_color = "#ffd166" if normalized_tool == "info" or self._is_selected_drawing(drawing) else "#9ec1ff"
+            label.setHtml(self._overlay_card_html(title, lines, title_color))
+            label.setPos(float(end["x"]), float(end["y"]))
+            label.setVisible(True)
+            drawing["summary"] = summary
+
+        arrow = drawing.get("arrow")
+        if arrow is not None:
+            angle = float(np.degrees(np.arctan2(float(end["y"]) - float(start["y"]), (float(end["x"]) - float(start["x"])) or 1e-9)))
+            color = pg.mkColor(str(drawing.get("color") or "#ff8c42"))
+            color.setAlpha(140 if drawing.get("preview") else 255)
+            try:
+                arrow.setStyle(
+                    angle=angle,
+                    pen=mkPen(color, width=1.9 if self._is_selected_drawing(drawing) else 1.3),
+                    brush=pg.mkBrush(color),
+                )
+            except Exception:
+                pass
+            arrow.setPos(float(end["x"]), float(end["y"]))
+            arrow.setVisible(True)
+
+    def _clear_drawing_preview(self):
+        preview = getattr(self, "_drawing_preview", None)
+        if preview:
+            self._remove_chart_items(preview.get("items"))
+        self._drawing_preview = None
+
+    def _commit_chart_drawing(self, tool: str, start, end):
+        if start is None or end is None:
+            return
+        if abs(float(end["x"]) - float(start["x"])) < 1e-9 and abs(float(end["y"]) - float(start["y"])) < 1e-9:
+            return
+        drawing = self._create_segment_drawing(tool, preview=False)
+        drawing["start"] = dict(start)
+        drawing["end"] = dict(end)
+        self._update_segment_drawing(drawing, start, end)
+        self._chart_drawings.append(drawing)
+        self._select_chart_drawing(drawing)
+
+    def _clear_chart_drawings(self):
+        self._drawing_anchor = None
+        self._clear_drawing_preview()
+        if isinstance(getattr(self, "_selected_annotation", None), dict) and self._selected_annotation.get("kind") == "drawing":
+            self._select_annotation(None)
+        for drawing in list(getattr(self, "_chart_drawings", []) or []):
+            self._remove_chart_items(drawing.get("items"))
+        self._chart_drawings = []
+        self._update_chart_interaction_cursor()
+
+    def _scene_distance_to_segment(self, point, start, end) -> float:
+        px = float(point.x())
+        py = float(point.y())
+        ax = float(start.x())
+        ay = float(start.y())
+        bx = float(end.x())
+        by = float(end.y())
+        dx = bx - ax
+        dy = by - ay
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            return float(np.hypot(px - ax, py - ay))
+        scale = ((px - ax) * dx + (py - ay) * dy) / ((dx * dx) + (dy * dy))
+        scale = min(1.0, max(0.0, scale))
+        closest_x = ax + (scale * dx)
+        closest_y = ay + (scale * dy)
+        return float(np.hypot(px - closest_x, py - closest_y))
+
+    def _drawing_hit_distance(self, drawing, scene_pos):
+        if drawing is None or scene_pos is None:
+            return None
+        label = drawing.get("label")
+        try:
+            if label is not None and label.isVisible() and label.sceneBoundingRect().contains(scene_pos):
+                return 0.0
+        except Exception:
+            pass
+
+        points = list(drawing.get("points") or [])
+        if len(points) < 2:
+            start = drawing.get("start")
+            end = drawing.get("end")
+            if start is None or end is None:
+                return None
+            points = [
+                (float(start["x"]), float(start["y"])),
+                (float(end["x"]), float(end["y"])),
+            ]
+        if len(points) < 2:
+            return None
+
+        try:
+            view_box = self.price_plot.getPlotItem().vb
+            scene_points = [
+                view_box.mapViewToScene(QtCore.QPointF(float(x_value), float(y_value)))
+                for x_value, y_value in points
+            ]
+        except Exception:
+            return None
+
+        best = None
+        for index in range(len(scene_points) - 1):
+            distance = self._scene_distance_to_segment(scene_pos, scene_points[index], scene_points[index + 1])
+            if best is None or distance < best:
+                best = distance
+        return best
+
+    def _annotation_hit_test(self, scene_pos, _point=None):
+        if scene_pos is None:
+            return None
+        try:
+            label = self.trade_target_view_label
+            if label is not None and label.isVisible() and label.sceneBoundingRect().contains(scene_pos):
+                return {"kind": "trade_overlay"}
+        except Exception:
+            pass
+
+        best = None
+        best_distance = None
+        for drawing in reversed(list(getattr(self, "_chart_drawings", []) or [])):
+            distance = self._drawing_hit_distance(drawing, scene_pos)
+            if distance is None or distance > 18.0:
+                continue
+            if best is None or distance < best_distance:
+                best = {"kind": "drawing", "drawing": drawing}
+                best_distance = distance
+        return best
+
+    def _begin_annotation_drag(self, annotation, point):
+        if not isinstance(annotation, dict) or point is None:
+            return False
+        if annotation.get("kind") == "drawing":
+            drawing = annotation.get("drawing")
+            if drawing is None:
+                return False
+            self._annotation_drag_state = {
+                "kind": "drawing",
+                "drawing": drawing,
+                "origin": dict(point),
+                "start": dict(drawing.get("start") or point),
+                "end": dict(drawing.get("end") or point),
+                "moved": False,
+            }
+            self._update_chart_interaction_cursor()
+            return True
+        if annotation.get("kind") == "trade_overlay":
+            state = dict(getattr(self, "_trade_overlay_state", {}) or {})
+            if self._format_numeric_value(state.get("entry")) is None:
+                return False
+            self._annotation_drag_state = {
+                "kind": "trade_overlay",
+                "origin": dict(point),
+                "state": state,
+                "moved": False,
+            }
+            self._update_chart_interaction_cursor()
+            return True
+        return False
+
+    def _update_annotation_drag(self, point):
+        drag = getattr(self, "_annotation_drag_state", None)
+        if not isinstance(drag, dict) or point is None:
+            return False
+        origin = drag.get("origin") or {}
+        delta_x = float(point["x"]) - float(origin.get("x", point["x"]))
+        delta_y = float(point["y"]) - float(origin.get("y", point["y"]))
+        if abs(delta_x) < 1e-9 and abs(delta_y) < 1e-9:
+            return False
+        drag["moved"] = True
+
+        if drag.get("kind") == "drawing":
+            start = dict(drag.get("start") or {})
+            end = dict(drag.get("end") or {})
+            min_y = min(float(start.get("y", 0.0)), float(end.get("y", 0.0)))
+            if min_y + delta_y <= 0:
+                delta_y = max(delta_y, 1e-6 - min_y)
+            drawing = drag.get("drawing")
+            new_start = {"x": float(start.get("x", 0.0)) + delta_x, "y": float(start.get("y", 0.0)) + delta_y}
+            new_end = {"x": float(end.get("x", 0.0)) + delta_x, "y": float(end.get("y", 0.0)) + delta_y}
+            drawing["start"] = new_start
+            drawing["end"] = new_end
+            self._update_segment_drawing(drawing, new_start, new_end)
+            return True
+
+        if drag.get("kind") == "trade_overlay":
+            state = dict(drag.get("state") or {})
+            numeric_prices = [
+                self._format_numeric_value(state.get("entry")),
+                self._format_numeric_value(state.get("stop_loss")),
+                self._format_numeric_value(state.get("take_profit")),
+            ]
+            numeric_prices = [value for value in numeric_prices if value is not None]
+            if numeric_prices:
+                min_price = min(float(value) for value in numeric_prices)
+                if min_price + delta_y <= 0:
+                    delta_y = max(delta_y, 1e-6 - min_price)
+
+            updated = {
+                "entry": float(state.get("entry", 0.0)) + delta_y,
+                "stop_loss": float(state.get("stop_loss", 0.0)) + delta_y,
+                "take_profit": float(state.get("take_profit", 0.0)) + delta_y,
+                "anchor_x": float(state.get("anchor_x", 0.0)) + delta_x if state.get("anchor_x") is not None else None,
+                "x_start": float(state.get("x_start", 0.0)) + delta_x if state.get("x_start") is not None else None,
+                "x_end": float(state.get("x_end", 0.0)) + delta_x if state.get("x_end") is not None else None,
+                "side": str(state.get("side") or "buy"),
+            }
+            self._trade_overlay_state.update(
+                {
+                    "anchor_x": updated["anchor_x"],
+                    "x_start": updated["x_start"],
+                    "x_end": updated["x_end"],
+                }
+            )
+            self.set_trade_overlay(
+                entry=updated["entry"],
+                stop_loss=updated["stop_loss"],
+                take_profit=updated["take_profit"],
+                side=updated["side"],
+            )
+            return True
+        return False
+
+    def _finish_annotation_drag(self):
+        drag = getattr(self, "_annotation_drag_state", None)
+        self._annotation_drag_state = None
+        self._update_chart_interaction_cursor()
+        if not isinstance(drag, dict) or not drag.get("moved"):
+            return False
+        if drag.get("kind") == "trade_overlay":
+            state = dict(getattr(self, "_trade_overlay_state", {}) or {})
+            self._emit_trade_level_changed("entry", state.get("entry"))
+            self._emit_trade_level_changed("stop_loss", state.get("stop_loss"))
+            self._emit_trade_level_changed("take_profit", state.get("take_profit"))
+        return True
+
+    def _place_trade_projection(self, side: str, point):
+        if point is None:
+            return
+        entry, stop_loss, take_profit = self._default_trade_levels_for_entry(float(point["y"]), side=side)
+        x_start, x_end = self._default_trade_overlay_window(anchor_x=point["x"])
+        self._trade_overlay_state.update(
+            {
+                "anchor_x": float(point["x"]),
+                "x_start": x_start,
+                "x_end": x_end,
+            }
+        )
+        self.set_trade_overlay(entry=entry, stop_loss=stop_loss, take_profit=take_profit, side=side)
+        self._select_trade_overlay()
+        label = "Short" if str(side or "").strip().lower() == "sell" else "Long"
+        self._show_chart_interaction_notice(
+            f"{label} target view placed.",
+            "Drag the target card to reposition the setup, or drag SL/TP/Entry lines for fine control.",
+            auto_clear_ms=1600,
+        )
+
+    def _handle_chart_tool_click(self, point):
+        tool = str(getattr(self, "_active_chart_tool", "") or "").strip().lower()
+        if not tool or point is None:
+            return False
+        if tool == "long_rr":
+            self._place_trade_projection("buy", point)
+            return True
+        if tool == "short_rr":
+            self._place_trade_projection("sell", point)
+            return True
+        if self._drawing_anchor is None:
+            self._drawing_anchor = {"x": float(point["x"]), "y": float(point["y"])}
+            self._clear_drawing_preview()
+            self._drawing_preview = self._create_segment_drawing(tool, preview=True)
+            self._update_segment_drawing(self._drawing_preview, self._drawing_anchor, point)
+            return True
+
+        self._commit_chart_drawing(tool, self._drawing_anchor, point)
+        self._drawing_anchor = None
+        self._clear_drawing_preview()
+        return True
 
     def _nearest_news_event(self, x_value, y_value):
         events = list(self._visible_news_events or [])
@@ -1654,6 +2551,156 @@ class ChartWidget(QWidget):
                 closest_score = score
         return closest
 
+    def eventFilter(self, watched, event):
+        scene = getattr(self.price_plot, "scene", lambda: None)()
+        viewport = getattr(self.price_plot, "viewport", lambda: None)()
+        if watched is scene:
+            event_type = event.type()
+            if event_type == QtCore.QEvent.Type.GraphicsSceneMousePress:
+                if event.button() == QtCore.Qt.MouseButton.LeftButton and self._drawing_anchor is None:
+                    point = self._chart_point_from_scene_pos(event.scenePos())
+                    hit = self._annotation_hit_test(event.scenePos(), point)
+                    if hit is not None:
+                        self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
+                        self._select_annotation(hit)
+                        if self._begin_annotation_drag(hit, point):
+                            self._suppress_next_mouse_clicked = True
+                            event.accept()
+                            return True
+            elif event_type == QtCore.QEvent.Type.GraphicsSceneMouseMove:
+                if self._annotation_drag_state is not None:
+                    point = self._chart_point_from_scene_pos(event.scenePos())
+                    if point is not None:
+                        self._update_annotation_drag(point)
+                    event.accept()
+                    return True
+            elif event_type == QtCore.QEvent.Type.GraphicsSceneMouseRelease:
+                if self._annotation_drag_state is not None:
+                    point = self._chart_point_from_scene_pos(event.scenePos())
+                    if point is not None:
+                        self._update_annotation_drag(point)
+                    self._finish_annotation_drag()
+                    self._suppress_next_mouse_clicked = True
+                    event.accept()
+                    return True
+        if watched is viewport:
+            event_type = event.type()
+            if event_type == QtCore.QEvent.Type.Wheel:
+                delta = 0
+                try:
+                    delta = int(event.angleDelta().y() or event.angleDelta().x())
+                except Exception:
+                    delta = 0
+                if delta == 0:
+                    return super().eventFilter(watched, event)
+                try:
+                    scene_pos = self.price_plot.mapToScene(event.position().toPoint())
+                except Exception:
+                    scene_pos = None
+                point = self._chart_point_from_scene_pos(scene_pos)
+                steps = max(abs(float(delta)) / 120.0, 1.0)
+                if bool(event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier):
+                    pan_step = 0.16 * steps
+                    self._pan_chart(-pan_step if delta > 0 else pan_step)
+                else:
+                    zoom_scale = (0.84 ** steps) if delta > 0 else (1.19 ** steps)
+                    self._zoom_chart_at(point["x"] if point is not None else None, zoom_scale)
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event):
+        modifiers = event.modifiers()
+        allowed_modifiers = {
+            QtCore.Qt.KeyboardModifier.NoModifier,
+            QtCore.Qt.KeyboardModifier.ShiftModifier,
+        }
+        if modifiers not in allowed_modifiers:
+            super().keyPressEvent(event)
+            return
+
+        if event.key() in (QtCore.Qt.Key.Key_Delete, QtCore.Qt.Key.Key_Backspace):
+            if self._remove_selected_annotation():
+                event.accept()
+                return
+        if event.key() == QtCore.Qt.Key.Key_Escape:
+            if self._drawing_anchor is not None:
+                self._drawing_anchor = None
+                self._clear_drawing_preview()
+                self._show_chart_interaction_notice("Drawing preview cancelled.", auto_clear_ms=900)
+                self._update_chart_interaction_cursor()
+                event.accept()
+                return
+            if self._active_chart_tool is not None:
+                self._set_active_chart_tool(None)
+                self._show_chart_interaction_notice("Chart tool disarmed.", auto_clear_ms=900)
+                event.accept()
+                return
+            if self._selected_annotation is not None:
+                self._select_annotation(None)
+                self._show_chart_interaction_notice("Selection cleared.", auto_clear_ms=900)
+                event.accept()
+                return
+        if event.key() == QtCore.Qt.Key.Key_F:
+            self._fit_recent_chart()
+            self._show_chart_interaction_notice("Chart fit to recent move.", auto_clear_ms=900)
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key.Key_V:
+            self.set_volume_panel_visible(not self.show_volume_panel)
+            self._show_chart_interaction_notice(
+                "Volume pane shown." if self.show_volume_panel else "Volume pane hidden.",
+                auto_clear_ms=900,
+            )
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key.Key_Left:
+            self._pan_chart(-0.18)
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key.Key_Right:
+            self._pan_chart(0.18)
+            event.accept()
+            return
+        if event.key() in (QtCore.Qt.Key.Key_Plus, QtCore.Qt.Key.Key_Equal):
+            self._zoom_chart(0.72)
+            event.accept()
+            return
+        if event.key() in (QtCore.Qt.Key.Key_Minus, QtCore.Qt.Key.Key_Underscore):
+            self._zoom_chart(1.35)
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key.Key_Comma:
+            self._cycle_timeframe(-1)
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key.Key_Period:
+            self._cycle_timeframe(1)
+            event.accept()
+            return
+
+        tool_name = None
+        tool_label = ""
+        tool_map = self._chart_tool_shortcuts()
+        text = str(event.text() or "").strip().lower()
+        if text in tool_map:
+            tool_name, tool_label = tool_map[text]
+        if tool_name:
+            if self._active_chart_tool == tool_name:
+                self._set_active_chart_tool(None)
+                self._show_chart_interaction_notice(f"{tool_label} tool disarmed.", auto_clear_ms=900)
+            else:
+                self._set_active_chart_tool(tool_name)
+                detail = (
+                    "Click a price level to drop a target view."
+                    if tool_name in {"long_rr", "short_rr"}
+                    else "Click once to anchor and again to place the drawing."
+                )
+                self._show_chart_interaction_notice(f"{tool_label} tool armed.", detail, auto_clear_ms=1400)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _news_hover_html(self, event):
         headline = str(event.get("headline") or "News event")
         source = str(event.get("source") or "News Feed")
@@ -1678,13 +2725,44 @@ class ChartWidget(QWidget):
         )
 
     def _mouse_clicked(self, event):
+        self.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
         try:
             self.sigActivated.emit(self)
         except Exception:
             pass
+        if self._suppress_next_mouse_clicked:
+            self._suppress_next_mouse_clicked = False
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return
         if event.button() == QtCore.Qt.MouseButton.RightButton:
+            if self._drawing_anchor is not None:
+                self._drawing_anchor = None
+                self._clear_drawing_preview()
+                try:
+                    event.accept()
+                except Exception:
+                    pass
+                return
+            hit = self._annotation_hit_test(event.scenePos(), self._chart_point_from_scene_pos(event.scenePos()))
+            if hit is not None:
+                self._select_annotation(hit)
+                self._show_annotation_context_menu(event, hit)
+                return
             self._show_trade_context_menu(event)
             return
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            point = self._chart_point_from_scene_pos(event.scenePos())
+            if self._handle_chart_tool_click(point):
+                try:
+                    event.accept()
+                except Exception:
+                    pass
+                return
+            if self._selected_annotation is not None and self._annotation_hit_test(event.scenePos(), point) is None:
+                self._select_annotation(None)
         try:
             is_double = bool(event.double())
         except Exception:
@@ -1714,6 +2792,20 @@ class ChartWidget(QWidget):
             event.accept()
         except Exception:
             pass
+
+    def _show_annotation_context_menu(self, event, annotation):
+        if not isinstance(annotation, dict):
+            return
+        menu = QMenu(self)
+        remove_action = menu.addAction(f"Remove {self._annotation_display_name(annotation)}")
+        chosen = menu.exec(event.screenPos().toPoint())
+        if chosen is not remove_action:
+            return
+        if self._remove_selected_annotation():
+            try:
+                event.accept()
+            except Exception:
+                pass
 
     def _show_trade_context_menu(self, event):
         pos = event.scenePos()
