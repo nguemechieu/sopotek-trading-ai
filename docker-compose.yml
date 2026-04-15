@@ -50,7 +50,7 @@ services:
       DISPLAY: ${DISPLAY:-}
     stdin_open: true
     tty: true
-    command: python  src/main.py   # ✅ FIXED
+    command: ["python", "src/main.py"]
 
   app-headless:
     <<: *app-common
@@ -59,7 +59,7 @@ services:
       <<: *app-env
       QT_QPA_PLATFORM: offscreen
     profiles: ["headless"]
-    command: python   src/main.py  # ✅ FIXED
+    command: ["python", "src/main.py"]
 
   app-http:
     <<: *app-common
@@ -90,7 +90,7 @@ services:
     ports:
       - "127.0.0.1:${APP_HTTP_PORT:-6080}:6080"
     profiles: ["browser"]
-    command: /app/src/scripts/start_http_ui.sh   # ✅ FIXED PATH
+    command: ["/app/scripts/docker/start_http_ui.sh"]
 
 volumes:
   postgres_data:

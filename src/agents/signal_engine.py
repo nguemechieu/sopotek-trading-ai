@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.event_bus import AsyncEventBus
-from core.event_bus.event_types import EventType
-from core.models import Signal, SignalStatus
+from event_bus.event_types import EventType
+from sopotek.core.models import Signal, SignalStatus
 
 
 def _utc_now() -> datetime:
